@@ -2,7 +2,7 @@ param(
   [string]$ControlUrl = $(if ($env:CONTROL_URL) { $env:CONTROL_URL } else { 'http://139.224.32.61' }),
   [string]$WorkerId = $(if ($env:WORKER_ID) { $env:WORKER_ID } else { 'yahahagame-sandbox-0' }),
   [string]$WorkerToken = $env:WORKER_TOKEN,
-  [string]$WorkerRoot = $(if ($env:YAHAHAGAME_WORKER_ROOT) { $env:YAHAHAGAME_WORKER_ROOT } else { 'D:\YahahaGameWorker' })
+  [string]$WorkerRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'runtime')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +21,7 @@ $env:CONTROL_URL = $ControlUrl
 $env:WORKER_ID = $WorkerId
 $env:WORKER_TOKEN = $WorkerToken
 $env:YAHAHAGAME_WORKER_ROOT = $WorkerRoot
+$env:YAHAHA_PRODUCTION_SKILL = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'skills\yahahagame-production\SKILL.md'
 if (-not $env:BLENDER_EXE) { $env:BLENDER_EXE = 'D:\Tools\Blender\blender-5.2.1-windows-x64\blender.exe' }
 if (-not $env:UNREAL_CMD) { $env:UNREAL_CMD = 'D:\UE\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' }
 $env:SESSION_ID = [string](Get-Process -Id $PID).SessionId

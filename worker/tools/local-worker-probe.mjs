@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const root = process.env.YAHAHAGAME_WORKER_ROOT || 'D:\\YahahaGameWorker';
+const root = process.env.YAHAHAGAME_WORKER_ROOT || fileURLToPath(new URL('../../runtime/', import.meta.url));
 const logDir = path.join(root, 'logs');
 const artifactDir = path.join(root, 'artifacts');
 const workspaceDir = path.join(root, 'workspace');

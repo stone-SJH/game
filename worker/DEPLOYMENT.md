@@ -1,41 +1,86 @@
 # Phase 1 Windows Worker
 
-The Windows machine uses the same Git repository as the controller. Clone it once into
-`$HOME\workspace\game`, then run [`deploy/deploy-worker.ps1`](deploy/deploy-worker.ps1) in an
-elevated PowerShell window:
+The Windows worker runs directly from the Git checkout at `D:\game`, with remote
+`git@github.com:stone-SJH/game.git`. Runtime files live in the Git-ignored
+`D:\game\runtime` directory. There is no worker tar extraction, release copy or
+deployment-time source patching. Edit the tracked files under `worker/` and commit
+machine deployment fixes to a local branch; never commit credentials or task data.
+
+## Initial setup
+
+Use the logged-in worker account. If the checkout does not exist:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-git -C $HOME\workspace\game status --short
-& "$HOME\workspace\game\worker\deploy\deploy-worker.ps1" -Repo "$HOME\workspace\game" -Ref main
+git clone git@github.com:stone-SJH/game.git D:\game
+Set-Location D:\game
+git switch -c deploy/stone-worker --track origin/main
+New-Item -ItemType Directory -Force runtime\config
+Copy-Item worker\deploy\worker.env.ps1.example runtime\config\worker.env.ps1
 ```
 
-The script fetches the configured remote and fast-forwards the checked-out branch. It refuses
-uncommitted changes and ignored files under `worker/` or `skills/`, so deployment-time changes must be committed and remain
-visible in Git history. It stops the current agent, refuses an unconfirmed running journal,
-copies the tracked worker code and Codex skills into a timestamped release, then restarts the
-agent. It does not use SSH or contact the ECS machine except through the worker's configured
-controller URL.
+Configure the protected environment file before starting. Do not repeat the copy
+over an existing configuration. The launcher uses the production skill directly
+from this checkout; separately installed specialized skills remain in place.
 
-Local commits ahead of the remote are retained. If local and remote commits diverge, merge
-`origin/main` in the worktree, resolve conflicts and commit before deployment. Use the same
-reviewed controller/worker code version on both machines.
+## Update and deployment
 
-Deploy the controller first. Its idle/allocation check is the authority that confirms no task is
-running before this worker script stops the current agent.
+Wait for the current task and pending result delivery to finish, and stop the old
+agent with Ctrl+C before updating code. The deployment script refuses any existing
+execution journal or running worker process. Do not kill active work or clear a
+journal to bypass this check. Coordinate protocol changes with the controller.
 
-Deploy the complete `worker/` directory, including `agent/agent.mjs` and `agent/process-runner.mjs`.
-The worker connects outbound only and must match controller protocol 2. Run tools in the logged-in
-Windows user session. The release metadata records the Git remote, branch and commit used.
+```powershell
+Set-Location D:\game
+git status --short
+git diff
+# Commit the specific files changed for this machine before updating.
+# git add worker/<changed-file>
+# git commit -m "Describe the local deployment fix"
+& .\worker\deploy\deploy-worker.ps1 -Update -CheckOnly
+& .\worker\deploy\deploy-worker.ps1 -Update
+```
+
+`-Update` fetches `origin` and merges the current branch's upstream, preserving
+local commits. It never resets, auto-stashes or pushes. Conflicts stop deployment;
+resolve and commit them, or use `git merge --abort`, before trying again. A dirty
+working tree or ignored file under `worker/` or `skills/` is rejected before
+fetch/start. Omit `-Update` to deploy the current
+committed revision without accessing GitHub. `-CheckOnly` performs preflight only.
+
+After an update the script re-runs the updated deployment entry point, checks Node
+20+, module syntax, configuration and the production skill, and starts the worker
+in a hidden user-session window. Registration must be confirmed in its new log.
+`runtime/deployment.json` records the commit, remote, branch, launcher PID and log paths.
+The credential is loaded from disk and never passed on the process command line.
+For a foreground session use `worker/deploy/start-phase1.ps1` instead.
+
+For rollback, stop between jobs, inspect `git log`, revert the faulty commit on the
+local deployment branch, and deploy again without `-Update`. Keep runtime data.
+Controller deployment is a separate ECS operation documented in
+[`../controller/DEPLOYMENT.md`](../controller/DEPLOYMENT.md).
+
+## Migration from StoneWorker
+
+First finish or explicitly cancel the current task and verify result delivery and
+process shutdown. Preserve `config`, `journal`, `workspaces`, `workspace`,
+`artifacts`, `checkpoints` and `logs`; move them to `D:\game\runtime` only when idle.
+Update the protected configuration's `YAHAHAGAME_WORKER_ROOT` to that path and
+remove `STONE_WORKER_ROOT`. Compare file hashes before removing old data copies.
+Historical reports may contain old absolute paths; retain them as evidence.
+
+Once no process references the old install, tar bundles (`0916/`), extraction
+caches (`cache/`), release snapshots (`releases/`), duplicate `worker/`, `agent/`
+and `deploy/` source trees and the legacy environment template can be removed.
+Reconcile any locally changed source into Git before deleting its old copy.
 
 ## Enrollment
 
 An operator runs `node tools/admin.mjs enroll <workerId>` on the controller and assigns the printed per-worker credential to this agent. After an invited user registers, the operator runs `node tools/admin.mjs bind <username> <workerId>`. Old shared worker credentials do not authenticate this release.
 
-Store settings outside source using `deploy/worker.env.ps1.example`, with ACLs limited to the operator/worker account. Set `CONTROL_URL`, `WORKER_ID`, `WORKER_TOKEN`, `YAHAHAGAME_WORKER_ROOT`, `CODEX_CMD` and the actual tool executable paths. The account rollout uses the trusted HTTPS controller origin.
+Store settings in `runtime/config/worker.env.ps1` using `deploy/worker.env.ps1.example`, with ACLs limited to the operator/worker account. Set `CONTROL_URL`, `WORKER_ID`, `WORKER_TOKEN`, `YAHAHAGAME_WORKER_ROOT`, `CODEX_CMD` and the actual tool executable paths. The account rollout uses the trusted HTTPS controller origin.
 
 ```powershell
-& .\deploy\start-phase1.ps1 -ControlUrl 'https://controller.example.com' -WorkerId 'yahahagame-sandbox-0' -WorkerToken $env:WORKER_TOKEN -WorkerRoot 'D:\YahahaGameWorker'
+& D:\game\worker\deploy\start-phase1.ps1 -WorkerRoot 'D:\game\runtime'
 ```
 
 The launcher preserves environment overrides for Blender/Unreal. Validate Node and tool versions and controller connectivity before start. Never publish credentials in evidence logs.

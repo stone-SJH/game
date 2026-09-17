@@ -42,6 +42,7 @@ Run `npm --prefix controller ci`, `npm --prefix controller test`, then `npm --pr
 - `app/` contains the browser-facing static application and its deployment runbook.
 - `controller/` contains Linux ECS API, scheduler/core packages, tools and deployment assets.
 - `worker/` contains the Windows GPU Agent, launcher, local probe and deployment runbook.
+- Windows worker deployments use the Git checkout at `D:\game`; local deployment fixes are committed on a local branch and runtime data is ignored under `runtime/`. See [worker deployment](worker/DEPLOYMENT.md) for update and migration commands.
 - `knowledgebase/` contains architecture, phase plans and the Phase 2 prerequisite checklist.
 
 Phase 1 refactoring is complete. On 2026-09-16, the user reported that the deployed Windows toolchain smoke task reached `COMPLETED` from a user machine at `http://139.224.32.61/`; the result and remaining acceptance checks are recorded in [phase1-http-pilot-plan.md](knowledgebase/phase1-http-pilot-plan.md#deployment-test-record). Phase 2 implementation remains gated by [phase2-prerequisites.md](knowledgebase/phase2-prerequisites.md).

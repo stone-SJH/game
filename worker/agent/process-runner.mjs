@@ -17,7 +17,9 @@ export function runCommand(command, args, { cwd, timeoutMs, signal } = {}) {
   return new Promise(resolve => {
     const startedAt = new Date().toISOString();
     let stdout = '', stderr = '', timedOut = false, stopping, stopError, finished = false;
-    const child = spawn(command, args, { cwd, windowsHide: true, shell: false, detached: process.platform !== 'win32' });
+    // Windows command wrappers need the native shell; keep real executables shell-free.
+    const shellCommand = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
+    const child = spawn(command, args, { cwd, windowsHide: true, shell: shellCommand, detached: process.platform !== 'win32' });
     const stop = () => {
       if (!stopping && child.pid && !finished) stopping = killProcessTree(child.pid).catch(error => { stopError = error.message; });
     };

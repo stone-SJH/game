@@ -1,106 +1,112 @@
 [CmdletBinding()]
 param(
-  [string]$Repo = $(if ($env:GAME_REPO) { $env:GAME_REPO } else { Join-Path $HOME 'workspace\game' }),
-  [string]$Remote = 'origin',
-  [string]$Ref = 'main',
-  [string]$WorkerRoot = 'D:\YahahaGameWorker',
-  [string]$WorkerId = $(if ($env:WORKER_ID) { $env:WORKER_ID } else { 'yahahagame-sandbox-0' }),
-  [string]$ControlUrl = 'http://139.224.32.61'
+  [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+  [string]$WorkerRoot,
+  [switch]$Update,
+  [switch]$CheckOnly
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath $WorkerRoot) -and (Test-Path -LiteralPath 'D:\StoneWorker')) {
-  $WorkerRoot = 'D:\StoneWorker'
-  Write-Host "Using existing worker root $WorkerRoot"
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+if (-not $WorkerRoot) { $WorkerRoot = Join-Path $RepoRoot 'runtime' }
+$WorkerRoot = [IO.Path]::GetFullPath($WorkerRoot)
+
+function Invoke-Git([string[]]$GitArgs) {
+  $output = & git.exe -C $RepoRoot @GitArgs
+  if ($LASTEXITCODE -ne 0) { throw "Git failed: git $($GitArgs -join ' ')" }
+  return $output
 }
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git is required on the worker.' }
-$repoPath = (Resolve-Path -LiteralPath $Repo -ErrorAction Stop).Path
-$repoRoot = (& git -C $repoPath rev-parse --show-toplevel 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) { throw "Not a Git worktree: $Repo" }
-$repoRoot = (Resolve-Path -LiteralPath $repoRoot).Path
-if ($repoRoot -ne $repoPath) { throw "-Repo must point to the Git worktree root: $repoRoot" }
-$currentBranch = (& git -C $repoPath symbolic-ref --quiet --short HEAD 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $currentBranch -ne $Ref) { throw "Expected checked-out branch '$Ref', found '$currentBranch'." }
-& git -C $repoPath remote get-url $Remote *> $null
-if ($LASTEXITCODE -ne 0) { throw "Git remote not found: $Remote" }
-& git -C $repoPath fetch --prune $Remote $Ref
-if ($LASTEXITCODE -ne 0) { throw "Failed to fetch $Remote/$Ref." }
-$status = @(& git -C $repoPath status --porcelain --untracked-files=all)
-if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect Git worktree status.' }
-$ignored = @(& git -C $repoPath ls-files --others --ignored --exclude-standard -- worker skills)
-if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect ignored worker files.' }
-if ($status.Count -gt 0 -or $ignored.Count -gt 0) {
-  if ($status.Count -gt 0) { $status | Write-Host }
-  if ($ignored.Count -gt 0) { $ignored | Write-Host }
-  throw 'The Git worktree has local or ignored changes. Commit or remove them before deployment.'
+function Assert-NoExecution {
+  $journal = Join-Path $WorkerRoot 'journal\execution.json'
+  if (Test-Path -LiteralPath $journal) {
+    $state = Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
+    throw "Worker journal is $($state.phase): $journal. Finish execution/result delivery before deployment."
+  }
 }
-& git -C $repoPath merge --ff-only "$Remote/$Ref"
-if ($LASTEXITCODE -ne 0) { throw "Cannot fast-forward $Ref from $Remote/$Ref." }
-$sourceCommit = (& git -C $repoPath rev-parse HEAD).Trim()
-$sourceCommitShort = (& git -C $repoPath rev-parse --short HEAD).Trim()
-Write-Host "Deploying $Ref at $sourceCommitShort ($sourceCommit)"
+
+function Get-WorkerProcesses {
+  @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object {
+    $_.CommandLine -match '(?i)[\\/]agent[\\/]agent\.mjs(?:"|\s|$)'
+  })
+}
+
+$gitRoot = [IO.Path]::GetFullPath((Invoke-Git @('rev-parse', '--show-toplevel')))
+if ($gitRoot.TrimEnd('\') -ne $RepoRoot.TrimEnd('\')) { throw 'RepoRoot must be the Git repository root.' }
+$branch = Invoke-Git @('symbolic-ref', '--quiet', '--short', 'HEAD')
+$revision = Invoke-Git @('rev-parse', 'HEAD')
+$dirty = @(Invoke-Git @('status', '--porcelain', '--untracked-files=all'))
+if ($dirty.Count) { throw 'Commit or explicitly stash local changes before deployment. Nothing was overwritten. Run git status --short and git diff.' }
+$ignored = @(Invoke-Git @('ls-files', '--others', '--ignored', '--exclude-standard', '--', 'worker', 'skills'))
+if ($ignored.Count) { throw 'Ignored files exist under worker/ or skills/. Move runtime files outside source and commit intentional source changes before deployment.' }
+$remoteUrl = Invoke-Git @('remote', 'get-url', 'origin')
+
+# Fetch is safe while the old worker runs; changing its source tree is not.
+if ($Update) {
+  Invoke-Git @('fetch', '--prune', 'origin') | Out-Host
+  $upstream = Invoke-Git @('rev-parse', '--abbrev-ref', '@{upstream}')
+  Write-Host "Update target: $upstream"
+}
 
 $config = Join-Path $WorkerRoot 'config\worker.env.ps1'
-if (Test-Path -LiteralPath $config) { . $config }
-
-$journal = Join-Path $WorkerRoot 'journal\execution.json'
-if (Test-Path -LiteralPath $journal) {
-  $state = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
-  if ($state.phase -eq 'RUNNING') { throw 'Worker journal still records RUNNING work. Verify the old tool process before deploying.' }
+if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw "Configure $config using worker/deploy/worker.env.ps1.example first." }
+. $config
+if (-not $env:WORKER_TOKEN -or -not $env:WORKER_ID -or -not $env:CONTROL_URL) { throw 'Configuration requires WORKER_TOKEN, WORKER_ID and CONTROL_URL.' }
+if ($env:YAHAHAGAME_WORKER_ROOT -and [IO.Path]::GetFullPath($env:YAHAHAGAME_WORKER_ROOT) -ne $WorkerRoot) {
+  throw 'Configured YAHAHAGAME_WORKER_ROOT does not match WorkerRoot.'
+}
+Assert-NoExecution
+$running = @(Get-WorkerProcesses)
+if ($running.Count) {
+  throw "A worker agent is still running (PID $($running.ProcessId -join ', ')). Stop it between jobs before deploying; do not discard its journal."
 }
 
-$running = @(Get-CimInstance Win32_Process | Where-Object {
-  $_.CommandLine -match 'worker[\\/]agent[\\/]agent\.mjs'
-})
-foreach ($process in $running) { & taskkill.exe /PID $process.ProcessId /T /F | Out-Null }
-Start-Sleep -Seconds 3
-$remaining = @(Get-CimInstance Win32_Process | Where-Object {
-  $_.CommandLine -match 'worker[\\/]agent[\\/]agent\.mjs'
-})
-if ($remaining.Count -gt 0) { throw 'Existing worker agent did not stop; deployment is aborted.' }
-if (-not $env:WORKER_TOKEN) { throw 'WORKER_TOKEN is not set. Configure it in config\worker.env.ps1 or the service environment.' }
+& node -e 'if (parseInt(process.versions.node) < 20) process.exit(1)'
+if ($LASTEXITCODE -ne 0) { throw 'Node.js 20 or newer is required.' }
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'worker\agent') -Filter '*.mjs') {
+  & node --check $file.FullName
+  if ($LASTEXITCODE -ne 0) { throw "Node syntax check failed: $($file.Name)" }
+}
+$start = Join-Path $RepoRoot 'worker\deploy\start-phase1.ps1'
+$tokens = $null; $parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile($start, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw "Launcher parse failed: $parseErrors" }
+$skill = Join-Path $RepoRoot 'skills\yahahagame-production\SKILL.md'
+if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) { throw "Missing production skill: $skill" }
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$release = Join-Path $WorkerRoot "releases\$stamp"
-New-Item -ItemType Directory -Force -Path $release | Out-Null
-
-$sourceWorker = Join-Path $repoRoot 'worker'
-if (-not (Test-Path -LiteralPath $sourceWorker)) { throw "Repository has no worker directory: $sourceWorker" }
-Copy-Item -LiteralPath $sourceWorker -Destination $release -Recurse -Force
-$sourceSkills = Join-Path $repoRoot 'skills'
-if (Test-Path -LiteralPath $sourceSkills) { Copy-Item -LiteralPath $sourceSkills -Destination $release -Recurse -Force }
-@(
-  "repository=$((& git -C $repoRoot remote get-url $Remote).Trim())"
-  "remote=$Remote"
-  "ref=$Ref"
-  "commit=$sourceCommit"
-  "deployed_at=$([DateTime]::UtcNow.ToString('o'))"
-  'worktree_status=clean'
-) | Set-Content -LiteralPath (Join-Path $release 'deployment-metadata.txt') -Encoding UTF8
-
-$sourceWorker = Join-Path $release 'worker'
-$skillSource = Join-Path $release 'skills'
-$agentTarget = Join-Path $WorkerRoot 'agent'
-$deployTarget = Join-Path $WorkerRoot 'deploy'
-if (Test-Path -LiteralPath $agentTarget) { Remove-Item -LiteralPath $agentTarget -Recurse -Force }
-if (Test-Path -LiteralPath $deployTarget) { Remove-Item -LiteralPath $deployTarget -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $agentTarget, $deployTarget | Out-Null
-Copy-Item -Path (Join-Path $sourceWorker 'agent\*') -Destination $agentTarget -Recurse -Force
-Copy-Item -Path (Join-Path $sourceWorker 'deploy\*') -Destination $deployTarget -Recurse -Force
-
-$skillTarget = Join-Path $env:USERPROFILE '.codex\skills'
-New-Item -ItemType Directory -Force -Path $skillTarget | Out-Null
-if (Test-Path -LiteralPath $skillSource) {
-  Copy-Item -Path (Join-Path $skillSource '*') -Destination $skillTarget -Recurse -Force
-} else {
-  Write-Warning 'Release bundle has no skills directory; preserving the worker skill installation.'
+if ($CheckOnly) {
+  Write-Host "Preflight passed: $branch $revision; runtime $WorkerRoot. No merge or worker start performed."
+  return
+}
+if ($Update) {
+  # Merge retains local deployment commits. Conflicts remain visible for the operator.
+  Invoke-Git @('merge', '--no-edit', $upstream) | Out-Host
+  if ((Invoke-Git @('rev-parse', 'HEAD')) -ne $revision) {
+    & (Join-Path $RepoRoot 'worker\deploy\deploy-worker.ps1') -RepoRoot $RepoRoot -WorkerRoot $WorkerRoot
+    return
+  }
 }
 
-node --check (Join-Path $WorkerRoot 'agent\agent.mjs')
-$env:CONTROL_URL = $ControlUrl
-$env:WORKER_ID = $WorkerId
-$env:YAHAHAGAME_WORKER_ROOT = $WorkerRoot
-$start = Join-Path $WorkerRoot 'deploy\start-phase1.ps1'
-Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $start, '-ControlUrl', $ControlUrl, '-WorkerId', $WorkerId, '-WorkerToken', $env:WORKER_TOKEN, '-WorkerRoot', $WorkerRoot) -WorkingDirectory $WorkerRoot -WindowStyle Hidden
-Write-Host "Worker $WorkerId deployment completed: $stamp"
+Assert-NoExecution
+if (@(Get-WorkerProcesses).Count) { throw 'Another worker started during preflight.' }
+$logDir = Join-Path $WorkerRoot 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$stdout = Join-Path $logDir "worker-$stamp.log"
+$stderr = Join-Path $logDir "worker-$stamp-error.log"
+# Only the root goes on the command line; the launcher loads credentials from disk.
+$process = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $start), '-WorkerRoot', ('"{0}"' -f $WorkerRoot)) -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+$registered = $false
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+  Start-Sleep -Seconds 1
+  $process.Refresh()
+  if ($process.HasExited) { throw "Worker exited ($($process.ExitCode)). Inspect $stderr" }
+  if ((Test-Path -LiteralPath $stdout) -and (Select-String -LiteralPath $stdout -SimpleMatch "worker $($env:WORKER_ID) registered (protocol 2)" -Quiet)) {
+    $registered = $true
+    break
+  }
+}
+if (-not $registered) { throw "Worker registration was not confirmed. Inspect $stdout and $stderr before retrying (launcher PID $($process.Id))." }
+$record = [ordered]@{ deployedAt = (Get-Date).ToString('o'); repository = $RepoRoot; remote = $remoteUrl; branch = $branch; commit = $revision; workerRoot = $WorkerRoot; workerId = $env:WORKER_ID; launcherPid = $process.Id; stdout = $stdout; stderr = $stderr }
+$record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $WorkerRoot 'deployment.json') -Encoding UTF8
+Write-Host "Worker $($env:WORKER_ID) registered from Git commit $revision. Logs: $stdout"

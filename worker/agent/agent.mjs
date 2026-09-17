@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand, maintainLease } from './process-runner.mjs';
 import { artifactContentType, runProductionHarness } from './production-harness.mjs';
@@ -127,6 +127,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const shutdown = new AbortController();
   process.on('SIGINT', () => shutdown.abort()); process.on('SIGTERM', () => shutdown.abort());
   runAgent({ control: (process.env.CONTROL_URL || 'http://139.224.32.61').replace(/\/$/, ''), workerId: process.env.WORKER_ID || 'yahahagame-sandbox-0',
-    token: process.env.WORKER_TOKEN, root: process.env.YAHAHAGAME_WORKER_ROOT || 'D:\\YahahaGameWorker', signal: shutdown.signal,
+    token: process.env.WORKER_TOKEN, root: process.env.YAHAHAGAME_WORKER_ROOT || fileURLToPath(new URL('../../runtime/', import.meta.url)), signal: shutdown.signal,
     intervalMs: Number(process.env.POLL_INTERVAL_MS || 2000) }).catch(error => { console.error(error.message); process.exitCode = 1; });
 }
