@@ -71,6 +71,14 @@ try {
   Remove-Item -LiteralPath (Join-Path $checkout 'worker/ignored.log')
   Write-Fixture 'local-fix.txt' 'local change'
   Expect-Failure { & $deploy -RepoRoot $checkout -Update } 'Commit or explicitly stash'
+  # Exercise Windows PowerShell -File default parameter evaluation in a real process.
+  $savedPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $external = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deploy -CheckOnly 2>&1
+    $externalExit = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $savedPreference }
+  Assert ($externalExit -ne 0 -and ($external -join "`n") -match 'Commit or explicitly stash') 'The -File entrypoint did not resolve its default repository before checking the dirty tree.'
   Git $checkout @('add', 'local-fix.txt') | Out-Null
   Git $checkout @('commit', '-m', 'Local deployment fix') | Out-Null
   $localCommit = Git $checkout @('rev-parse', 'HEAD')

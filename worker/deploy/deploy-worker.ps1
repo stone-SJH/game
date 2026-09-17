@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
-  [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+  [string]$RepoRoot,
   [string]$WorkerRoot,
   [switch]$Update,
   [switch]$CheckOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not $WorkerRoot) { $WorkerRoot = Join-Path $RepoRoot 'runtime' }
 $WorkerRoot = [IO.Path]::GetFullPath($WorkerRoot)
