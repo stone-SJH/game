@@ -91,6 +91,14 @@ Each task receives a persistent `workspaceId` and a new empty project directory 
 
 Heartbeat/control remains active during commands and streamed uploads. Windows cancellation uses process-tree termination; the agent confirms shutdown before acknowledging completion/cancellation. A local lease deadline also stops execution if the controller cannot renew it.
 
+Codex runs through Node and its npm package entrypoint (or a configured native
+executable). `CODEX_CMD` accepts a JS entrypoint, a native executable, or the npm
+`codex.cmd` shim, which is resolved without executing a shell. Prompts are sent as
+UTF-8 to `codex exec -` and stdin is closed after writing. Each step writes live
+stdout/stderr and a result JSON under its run directory. Codex CLI usage errors
+(exit code 2) and process launch errors fail immediately instead of retrying.
+Run `npm run test:worker` for the stdin, argument, launch and cancellation tests.
+
 `journal/execution.json` records active work and pending final results. Pending results are replayed after reconnect/restart. An agent restart with a `RUNNING` journal is deliberately blocked until the old process tree and workspace are checked; automatic interrupted-step recovery and pause/resume are not yet implemented. Do not delete the journal or clear the controller allocation merely to bypass that guard.
 
 ## Acceptance

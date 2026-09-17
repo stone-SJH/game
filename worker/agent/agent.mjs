@@ -19,14 +19,18 @@ export async function executeJob(job, ctx) {
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
   const logs = [], artifactIds = [];
-  async function step(name, command, args, timeoutMs, cwd = project, accepts) {
+  async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
-    const result = await runCommand(command, args, { cwd, timeoutMs, signal });
+    const stepFile = path.join(output, `${name}.json`);
+    await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
+    const result = await runCommand(command, args, { ...options, cwd, timeoutMs, signal,
+      stdoutFile: path.join(output, `${name}.stdout.jsonl`), stderrFile: path.join(output, `${name}.stderr.log`) });
+    await atomicJson(stepFile, { name, ...result });
     if (!result.stopConfirmed) throw Object.assign(new Error(result.error), { stopConfirmed: false });
     signal.throwIfAborted();
-    const passed = accepts ? await accepts(result) : result.exitCode === 0 && !result.timedOut;
+    const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
     logs.push({ name, ...result, passed });
-    if (!passed) throw Object.assign(new Error(`${name} failed.`), { result });
+    if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}): ${result.error || result.stderr.trim().slice(-1000) || 'No diagnostic output.'}`), { result });
     return result;
   }
   const unreal = process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe';

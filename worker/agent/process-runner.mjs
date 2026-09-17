@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import { finished as streamFinished } from 'node:stream/promises';
 
 export function killProcessTree(pid) {
   if (process.platform !== 'win32') {
@@ -12,11 +14,11 @@ export function killProcessTree(pid) {
   });
 }
 
-export function runCommand(command, args, { cwd, timeoutMs, signal } = {}) {
+export function runCommand(command, args, { cwd, timeoutMs, signal, input, stdoutFile, stderrFile } = {}) {
   signal?.throwIfAborted();
   return new Promise(resolve => {
     const startedAt = new Date().toISOString();
-    let stdout = '', stderr = '', timedOut = false, stopping, stopError, finished = false;
+    let stdout = '', stderr = '', timedOut = false, stopping, stopError, ioError, finished = false;
     // Windows command wrappers need the native shell; keep real executables shell-free.
     const shellCommand = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
     const child = spawn(command, args, { cwd, windowsHide: true, shell: shellCommand, detached: process.platform !== 'win32' });
@@ -26,16 +28,31 @@ export function runCommand(command, args, { cwd, timeoutMs, signal } = {}) {
     const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs || 120000);
     signal?.addEventListener('abort', stop, { once: true });
     if (signal?.aborted) stop();
-    child.stdout?.on('data', data => { stdout = (stdout + data.toString()).slice(-2 * 1024 * 1024); });
-    child.stderr?.on('data', data => { stderr = (stderr + data.toString()).slice(-2 * 1024 * 1024); });
+    const logStreams = [];
+    for (const [source, file] of [[child.stdout, stdoutFile], [child.stderr, stderrFile]]) {
+      if (!source || !file) continue;
+      const destination = fs.createWriteStream(file);
+      logStreams.push(streamFinished(destination).catch(error => { ioError = error.message; stop(); }));
+      source.pipe(destination);
+    }
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); });
+    child.stderr?.on('data', data => { stderr = (stderr + data).slice(-2 * 1024 * 1024); });
+    child.stdin?.on('error', error => {
+      if (!['EPIPE', 'ERR_STREAM_DESTROYED'].includes(error.code)) { ioError = error.message; stop(); }
+    });
+    // Non-interactive tools may read until EOF even when a prompt is in argv.
+    child.stdin?.end(input);
     let spawnError;
     child.on('error', error => { spawnError = error.message; });
     child.on('close', async exitCode => {
       finished = true;
       clearTimeout(timer); signal?.removeEventListener('abort', stop);
       await stopping;
+      await Promise.all(logStreams);
       resolve({ command, args, startedAt, finishedAt: new Date().toISOString(), exitCode, timedOut,
-        canceled: signal?.aborted || false, stdout, stderr, error: stopError || spawnError, stopConfirmed: !stopError });
+        canceled: signal?.aborted || false, stdout, stderr, error: stopError || spawnError || ioError, stopConfirmed: !stopError });
     });
   });
 }

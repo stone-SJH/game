@@ -62,10 +62,30 @@ function codexCommand() {
   return process.env.CODEX_CMD || (process.platform === 'win32' ? 'codex.cmd' : 'codex');
 }
 
-function codexInvocation(args) {
-  const command = codexCommand();
+export function codexInvocation(args, command = codexCommand()) {
   if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
-    return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', command, ...args] };
+    const candidates = path.isAbsolute(command) || /[\\/]/.test(command)
+      ? [path.resolve(command)]
+      : (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(directory => path.join(directory.replace(/^"|"$/g, ''), command));
+    const wrapper = candidates.find(requireFile);
+    // Resolve the npm package's declared entrypoint without executing its shell shim.
+    if (wrapper) {
+      const packageRoot = path.join(path.dirname(wrapper), 'node_modules', '@openai', 'codex');
+      try {
+        const metadata = JSON.parse(fsSync.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
+        const bin = typeof metadata.bin === 'string' ? metadata.bin : metadata.bin?.codex;
+        const entrypoint = bin && path.resolve(packageRoot, bin);
+        if (metadata.name === '@openai/codex' && entrypoint && requireFile(entrypoint)) {
+          return { command: process.execPath, args: [entrypoint, ...args] };
+        }
+      } catch { /* Report an actionable configuration error below. */ }
+    }
+    throw Object.assign(new Error('Cannot resolve the Codex npm entrypoint. Set CODEX_CMD to @openai/codex/bin/codex.js or codex.exe.'), { hardFailure: true });
+  }
+  if (/\.(?:c?js|mjs)$/i.test(command)) {
+    const entrypoint = path.resolve(command);
+    if (!requireFile(entrypoint)) throw Object.assign(new Error(`Codex JS entrypoint does not exist: ${entrypoint}`), { hardFailure: true });
+    return { command: process.execPath, args: [entrypoint, ...args] };
   }
   return { command, args };
 }
@@ -101,6 +121,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
   if (!skillPath) throw new Error('The yahahagame-production skill is not installed on the worker.');
   const maxAttempts = Number(process.env.CODEX_MAX_ATTEMPTS || 0);
   const retryDelayMs = Number(process.env.CODEX_RETRY_DELAY_MS || 10000);
+  const invocation = codexInvocation([]);
   let attempt = 0;
   while (true) {
     attempt++;
@@ -115,11 +136,10 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
     ].join('\n');
-    const sessionOutput = path.join(output, `codex-production-session-${attempt}.jsonl`);
+    const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     try {
-      const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, prompt];
-      const invocation = codexInvocation(args);
-      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, invocation.args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project);
+      const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
+      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, { input: prompt });
       if (/\b(?:HARD_FAILURE|TASK_IMPOSSIBLE)\b/i.test(`${orchestration.stdout}\n${orchestration.stderr}`)) {
         throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
       }
@@ -153,7 +173,11 @@ export async function runProductionHarness({ job, project, output, signal, step,
         result => !result.error && result.exitCode === 0 && !result.timedOut);
       return deliverables;
     } catch (error) {
-      if (signal.aborted || error.stopConfirmed === false || error.hardFailure || error.result?.timedOut || error.result?.error?.includes('ENOENT')) throw error;
+      await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {
+        attempt, failedAt: new Date().toISOString(), error: error.message,
+        exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
+      });
+      if (signal.aborted || error.stopConfirmed === false || error.hardFailure || error.result?.timedOut || error.result?.error || error.result?.exitCode === 2) throw error;
       if (maxAttempts > 0 && attempt >= maxAttempts) throw new Error(`Production retry budget exhausted after ${attempt} iterations: ${error.message}`);
       await delay(retryDelayMs, undefined, { signal });
     }

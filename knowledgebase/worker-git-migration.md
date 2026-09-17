@@ -28,24 +28,37 @@ described here. This migration does not deploy or change the ECS service.
 
 ## Current handoff
 
-The operator requested keeping the current task running and switching only after
-it finishes. Therefore the active worker remains at `D:\StoneWorker\agent` with
-its existing configuration and data. No worker was stopped, restarted, canceled
-or migrated. The observed active task was
-`task-d1cf4e63-296f-4e9d-9b1b-6170fc25977f`; the controller confirmed `CONTINUE`.
+The initial migration preserved the running task. Later on 2026-09-17 the operator
+canceled `task-d1cf4e63-296f-4e9d-9b1b-6170fc25977f` and authorized the worker fix
+and deployment. At 16:18 +08:00 the controller returned `STOP / CANCELED`; the old
+execution journal was absent and the old worker had no task descendants. Its idle
+agent (PID 20084) and launcher (PID 10252) were then stopped and shutdown verified.
 
-After task completion and result delivery, stop the old agent between jobs,
-migrate its runtime directories as described in the runbook, then run:
+Runtime data was copied to `D:\game\runtime`, with 33 files verified by SHA-256.
+The old data remains in `D:\StoneWorker` as a backup. The copy inventory is
+`runtime/migration/runtime-copy.json`; the destination environment subsequently
+changed to the new root and the explicit Codex JS entrypoint. Credentials remain
+outside Git in the protected runtime configuration directory.
+
+Codex now uses Node/native execution and UTF-8 stdin with EOF, eliminating shell
+prompt splitting and the open-input wait. Each run persists live stdout/stderr
+and step diagnostics. CLI usage errors fail immediately. Worker regressions and
+Windows deployment tests passed, and a real Codex invocation in a Chinese path
+with spaces completed with the expected response. Controller integration tests
+could not start their PostgreSQL fixture in this administrative Windows session;
+the native server reported that administrative execution is not permitted.
+
+Deploy the validated committed checkout without fetching unrelated updates:
 
 ```powershell
 Set-Location D:\game
-& .\worker\deploy\deploy-worker.ps1 -Update -CheckOnly
-& .\worker\deploy\deploy-worker.ps1 -Update
+& .\worker\deploy\deploy-worker.ps1 -CheckOnly
+& .\worker\deploy\deploy-worker.ps1
 ```
 
-The planned runtime root is `D:\game\runtime`. It is ignored by Git, including
-credentials, task workspaces, artifacts, logs and migration backups. The current
-live runtime has deliberately not been copied while the task is writing to it.
+The runtime root is `D:\game\runtime`. It is ignored by Git, including credentials,
+task workspaces, artifacts, logs and migration backups. `runtime/deployment.json`
+records the successfully registered deployment commit, launcher and log paths.
 
 ## Cleanup record
 
