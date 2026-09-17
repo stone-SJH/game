@@ -1,0 +1,44 @@
+services:
+  controller:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      PORT: 8080
+      BIND: 0.0.0.0
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set trusted HTTPS PUBLIC_ORIGIN}
+      ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-false}
+      APP_ROOT: /opt/yahahagame-controller/app
+      DATABASE_URL: postgresql://yahahagame:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/yahahagame_controller
+      ARTIFACT_ROOT: /var/lib/yahahagame-controller/artifacts
+      MAX_USERS: ${MAX_USERS:-10}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - yahahagame-artifacts:/var/lib/yahahagame-controller/artifacts
+      - ../../app:/opt/yahahagame-controller/app:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: yahahagame_controller
+      POSTGRES_USER: yahahagame
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - yahahagame-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yahahagame -d yahahagame_controller"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    expose:
+      - "5432"
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+volumes:
+  yahahagame-artifacts:
+  yahahagame-postgres:

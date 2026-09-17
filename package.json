@@ -1,0 +1,13 @@
+{
+  "name": "yahaha3-control-plane",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "npm --prefix controller test",
+    "controller": "npm --prefix controller start",
+    "worker": "node worker/agent/agent.mjs"
+  }
+}

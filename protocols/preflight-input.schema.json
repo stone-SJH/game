@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "objective", "gameplay", "scene", "visual", "globalCriteria"],
+  "properties": {
+    "protocol": { "const": 1 },
+    "objective": { "type": "string", "minLength": 1 },
+    "gameplay": { "type": "object", "required": ["summary"], "properties": { "summary": { "type": "string", "minLength": 1 } } },
+    "scene": { "type": "object", "required": ["summary"], "properties": { "summary": { "type": "string", "minLength": 1 } } },
+    "visual": { "type": "object", "required": ["summary"], "properties": { "summary": { "type": "string", "minLength": 1 } } },
+    "context": { "type": "object", "description": "Reference evidence, execution constraints and machine-checkable validation metadata preserved in the compiled plan." },
+    "globalCriteria": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["id", "description"], "properties": { "id": { "type": "string" }, "description": { "type": "string", "minLength": 1 } } } },
+    "outputs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "tasks": { "type": "array", "items": { "type": "object", "required": ["id", "objective", "acceptanceCriteria"], "properties": { "id": { "type": "string" }, "objective": { "type": "string" }, "dependsOn": { "type": "array", "items": { "type": "string" } }, "resource": { "type": "string" }, "resources": { "type": "array", "items": { "type": "string" } }, "parallelGroup": { "type": ["string", "null"] }, "inputs": { "type": "array", "items": { "type": "string" } }, "outputs": { "type": "array", "items": { "type": "string" } }, "tools": { "type": "array", "items": { "type": "string" } }, "evidence": { "type": "array", "items": { "type": "string" } }, "resultContract": { "type": "object" }, "retryPolicy": { "type": "object" }, "acceptanceCriteria": { "type": "array", "minItems": 1 } } } }
+  }
+}

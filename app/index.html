@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YahahaGame Workspace</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/">YahahaGame <span>Workspace</span></a><span class="pilot">Internal test</span><div id="account" hidden><span id="username"></span><button id="logout">Log out</button></div></header>
+  <div id="notice" role="alert" hidden></div>
+  <main id="auth" hidden>
+    <h1>Your workspace</h1>
+    <div class="tabs" role="tablist" aria-label="Account access"><button id="login-tab" role="tab" aria-selected="true">Log in</button><button id="register-tab" role="tab" aria-selected="false">Register</button></div>
+    <form id="auth-form">
+      <label>Username<input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
+      <label id="invite-field" hidden>Activation code<input id="invite" autocomplete="off" maxlength="128"></label>
+      <button class="primary" id="auth-submit" type="submit">Log in</button>
+    </form>
+  </main>
+  <main id="workspace" hidden>
+    <aside><div class="section-heading"><h1>Tasks</h1><button class="primary" id="new-task">New task</button></div><div id="task-list" aria-label="Tasks"></div><button id="more" hidden>Load more</button></aside>
+    <section id="detail"><div class="empty">No task selected</div></section>
+  </main>
+  <dialog id="create-dialog"><form id="create-form">
+    <h2>New task</h2><label>Objective<textarea id="objective" required maxlength="4000" rows="3"></textarea></label>
+    <p id="create-error" role="alert"></p><div class="actions"><button id="close-dialog" type="button">Close</button><button class="primary" id="create-submit" type="submit">Create task</button></div>
+  </form></dialog>
+</body>
+</html>
