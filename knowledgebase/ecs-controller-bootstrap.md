@@ -2,7 +2,7 @@
 
 Target: public Ubuntu ECS replacing the Wuying Linux cloud computer as the production control plane.
 
-Scope note (2026-09-16): Phase 1 is the limited invited internal pilot; Phase 2 is production launch. The controller is already deployed and the user reported a completed HTTP toolchain smoke. Commands below are infrastructure reference checks, not a claim that deployment has not started. The account/protocol-2 code is locally verified but not yet deployed; see [phase1-implementation.md](phase1-implementation.md).
+Scope note: Phase 1 is the limited invited internal pilot; Phase 2 is production launch. The controller is already deployed and the user reported a completed HTTP toolchain smoke. Commands below are infrastructure reference checks, not a claim that deployment has not started. On 2026-09-17 the ECS was verified running account/protocol-2 from the earlier tar deployment; subsequent updates use the [Git workflow](git-deployment-migration.md).
 
 Recommended pilot size: Ubuntu 22.04 LTS x86_64, 4 vCPU, 16 GiB RAM, ESSD PL1 100 GiB, public IPv4 or EIP, 5-10 Mbps. Open security-group ingress only for TCP 443 and administrator-restricted TCP 22. Do not expose PostgreSQL or Redis.
 
@@ -103,12 +103,18 @@ Return DNS resolution and HTTP status/headers for the services actually used. Ph
 ## E9. Deployment directories and permissions
 
 ```bash
+install -d -m 0750 "$HOME/workspace"
+if [ ! -d "$HOME/workspace/game/.git" ]; then
+  git clone git@github.com:stone-SJH/game.git "$HOME/workspace/game"
+fi
+git -C "$HOME/workspace/game" fetch --prune origin
+git -C "$HOME/workspace/game" status --short --branch
 sudo install -d -m 0750 /opt/yahahagame-controller/{controller,app,config,logs}
 sudo install -d -m 0750 /var/lib/yahahagame-controller
 stat -c '%U:%G %a %n' /opt/yahahagame-controller /var/lib/yahahagame-controller
 ```
 
-Return the two `stat` lines. Apply the source/service/artifact ownership separation in `controller/DEPLOYMENT.md`; do not recursively transfer the deployed source/config tree to the interactive user. Secrets belong under the protected config directory.
+Return the Git status and two `stat` lines. Apply the source/service/artifact ownership separation in `controller/DEPLOYMENT.md`; do not recursively transfer the deployed source/config tree to the interactive user. Secrets belong under the protected config directory. The deployment script refuses local worktree changes, so commit deployment-specific changes before fetching and deploying.
 
 ## E10. Required external checks before application deployment
 

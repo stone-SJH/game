@@ -1,21 +1,32 @@
 # Phase 1 Windows Worker
 
-The Windows machine has its own local deployment script at [`deploy/deploy-worker.ps1`](deploy/deploy-worker.ps1). Copy that script and the release bundle to the worker, then run it in an elevated PowerShell window:
+The Windows machine uses the same Git repository as the controller. Clone it once into
+`$HOME\workspace\game`, then run [`deploy/deploy-worker.ps1`](deploy/deploy-worker.ps1) in an
+elevated PowerShell window:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\deploy-worker.ps1 -Bundle C:\Temp\yahahagame-<timestamp>.tgz
+git -C $HOME\workspace\game status --short
+& "$HOME\workspace\game\worker\deploy\deploy-worker.ps1" -Repo "$HOME\workspace\game" -Ref main
 ```
 
-The script stops the current agent, refuses an unconfirmed running journal, updates the worker
-code and any bundled Codex skills, then restarts the agent. If a release bundle contains only the
-project master skill, the worker preserves its existing specialized skill installation. It does
-not use SSH or contact the ECS machine except through the worker's configured controller URL.
+The script fetches the configured remote and fast-forwards the checked-out branch. It refuses
+uncommitted changes and ignored files under `worker/` or `skills/`, so deployment-time changes must be committed and remain
+visible in Git history. It stops the current agent, refuses an unconfirmed running journal,
+copies the tracked worker code and Codex skills into a timestamped release, then restarts the
+agent. It does not use SSH or contact the ECS machine except through the worker's configured
+controller URL.
+
+Local commits ahead of the remote are retained. If local and remote commits diverge, merge
+`origin/main` in the worktree, resolve conflicts and commit before deployment. Use the same
+reviewed controller/worker code version on both machines.
 
 Deploy the controller first. Its idle/allocation check is the authority that confirms no task is
 running before this worker script stops the current agent.
 
-Deploy the complete `worker/` directory, including `agent/agent.mjs` and `agent/process-runner.mjs`. The worker connects outbound only and must match controller protocol 2. Run tools in the logged-in Windows user session.
+Deploy the complete `worker/` directory, including `agent/agent.mjs` and `agent/process-runner.mjs`.
+The worker connects outbound only and must match controller protocol 2. Run tools in the logged-in
+Windows user session. The release metadata records the Git remote, branch and commit used.
 
 ## Enrollment
 

@@ -10,8 +10,8 @@
   },
   "scripts": {
     "start": "node api/server.mjs",
-    "test": "node --test tests/controller.test.mjs tests/auth.test.mjs tests/phase1.test.mjs",
-    "test:unit": "node --test tests/controller.test.mjs tests/auth.test.mjs",
+    "test": "node --test tests/controller.test.mjs tests/auth.test.mjs tests/deployment.test.mjs tests/phase1.test.mjs",
+    "test:unit": "node --test tests/controller.test.mjs tests/auth.test.mjs tests/deployment.test.mjs",
     "migrate": "node tools/admin.mjs migrate",
     "dev": "node tools/dev-server.mjs"
   },

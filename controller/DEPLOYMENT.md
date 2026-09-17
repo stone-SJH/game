@@ -1,23 +1,52 @@
 # Phase 1 Controller Deployment
 
-This account/protocol-2 release changes browser authentication and worker identity. It has local integration verification; it has not been deployed by the implementation task. Phase 1 is limited internal testing. Cloud pooling, OSS and automatic resource release remain Phase 2.
+This account/protocol-2 release changes browser authentication and worker identity. The ECS is running this release from the earlier tar deployment. Git is now the source for subsequent deployments. Phase 1 is limited internal testing. Cloud pooling, OSS and automatic resource release remain Phase 2.
 
-The ECS machine has its own deployment script at [`deploy/deploy-controller.sh`](deploy/deploy-controller.sh). Copy that script and a release bundle to the ECS machine, then run:
+The ECS machine uses the Git repository as its source of truth. Clone it once into the operator's
+home directory and keep the worktree at `~/workspace/game`:
 
 ```bash
-sudo bash /tmp/deploy-controller.sh --bundle /tmp/yahahagame-<timestamp>.tgz
+git clone git@github.com:stone-SJH/game.git "$HOME/workspace/game"
 ```
 
-The script refuses active allocations, backs up PostgreSQL/artifacts, applies migrations, swaps the
-controller/app release, and checks `/healthz`. It does not use SSH or copy files to another host.
+Every deployment runs `git fetch --prune`, requires a clean checked-out branch, fast-forwards it to
+the selected remote branch when possible, and exports the selected Git commit into a timestamped release. Local
+deployment changes must be committed before deployment, so they remain visible in Git history and
+cannot be silently overwritten by a remote update. The release records the remote, branch and
+commit in `deployment-metadata.txt`.
 
-The release bundle must contain the updated `app/`, `controller/`, `worker/`, and project `skills/`
-directories. It can be assembled on the release machine with `tar`; do not include `node_modules`,
-`.local`, credentials, or worker data.
+Local commits ahead of the remote are retained and deployed; pushing them is optional. When remote
+and local commits diverge, deployment stops. Merge upstream explicitly and resolve any conflicts:
+
+```bash
+cd "$HOME/workspace/game"
+git status --short --branch
+# Stage only intentional source/script changes, then commit them.
+git fetch --prune origin
+git merge origin/main
+# Resolve conflicts, review/test, and commit the merge before deployment.
+```
+
+Do not edit `/opt/yahahagame-controller/controller` or `app` directly. Make source and deployment
+script changes in this worktree and commit them; keep secrets in the protected configuration.
+
+Run the repository-owned deployment entry point as root. When `sudo` changes `$HOME`, pass the
+absolute repository path explicitly:
+
+```bash
+sudo bash "$HOME/workspace/game/controller/deploy/deploy-controller.sh" \
+  --repo "$HOME/workspace/game" --remote origin --ref main \
+  --public-origin http://139.224.32.61
+```
+
+Use `--dry-run` to fetch and validate Git without changing local HEAD, worktree files or the service.
+It does not test runtime prerequisites or task activity. A real deployment
+refuses active allocations, backs up PostgreSQL/artifacts, applies migrations, swaps the
+controller/app release, and checks `/healthz`. It does not copy a source tar bundle to the ECS.
 
 ## Prerequisites and layout
 
-Use Node.js 20+, private PostgreSQL, Nginx with trusted HTTPS ingress, and a service account with write access only to artifact storage. Install `controller/` and `app/` as siblings under `/opt/yahahagame-controller`. Keep environment/credentials in protected `/opt/yahahagame-controller/config/`, outside source. Do not copy `key/`, `.local/`, `node_modules/` or worker data.
+Use Node.js 20+, private PostgreSQL, Nginx with trusted HTTPS ingress, and a service account with write access only to artifact storage. Install `controller/` and `app/` as siblings under `/opt/yahahagame-controller`. Keep environment/credentials in protected `/opt/yahahagame-controller/config/`, outside source. Do not copy `key/`, `.local/`, `node_modules/` or worker data. Existing pilot installations may keep `ARTIFACT_ROOT` under the legacy `/var/lib/stone-controller/artifacts`; preserve that path until the database storage paths and retained artifacts have been migrated deliberately.
 
 Configure the values from `deploy/controller.env.example`: `DATABASE_URL`, `PUBLIC_ORIGIN` (exact HTTPS origin, no trailing slash), `APP_ROOT`, `ARTIFACT_ROOT`, `MAX_USERS`, `BIND` and `PORT`. Neither `PHASE1_TOKEN` nor a shared controller `WORKER_TOKEN` is used. Each worker is enrolled separately.
 
@@ -25,8 +54,8 @@ For loopback development only, `ALLOW_INSECURE_LOCALHOST=true` permits an HTTP o
 
 ## Upgrade sequence
 
-1. Back up source/config, PostgreSQL and artifacts. Stop new submissions and drain existing tool processes before stopping the old agent/API. Migration refuses legacy `RUNNING` jobs; reconcile actual execution instead of blindly changing their state.
-2. Stage the complete controller/app directories and deploy the matching worker modules. Keep the existing systemd source/config/artifact permissions and do not overwrite the configured environment with the template.
+1. Commit intentional source or deployment changes from the Git worktree. Stop new submissions and drain existing tool processes before stopping the old agent/API. Migration refuses legacy `RUNNING` jobs; reconcile actual execution instead of blindly changing their state.
+2. Run the repository-owned deployment script. It stages the complete controller/app directories and matching worker modules from the selected Git commit; only the controller and app are activated on ECS. Worker deployment runs separately on Windows. Keep the existing systemd source/config/artifact permissions and do not overwrite the configured environment with the template.
 3. In the controller directory, install runtime dependencies and run unit verification:
 
 ```bash
@@ -34,7 +63,7 @@ npm ci --omit=dev --ignore-scripts
 npm run test:unit
 ```
 
-4. With `DATABASE_URL` loaded from the protected environment, apply all versioned migrations:
+4. The deployment script applies versioned migrations automatically. For a manual installation only, load `DATABASE_URL` from the protected environment and run:
 
 ```bash
 npm run migrate
@@ -57,11 +86,11 @@ node tools/admin.mjs bind tester yahahagame-sandbox-0
 
 Bindings are exclusive. The initial CLI deliberately does not silently rotate/reassign a busy worker. An unbound user's tasks remain queued.
 
-6. Configure the trusted HTTPS virtual host and exact `PUBLIC_ORIGIN`, validate Nginx, restart `yahahagame-controller`, then start the protocol-2 worker. The existing systemd unit uses the controller entry point. Port 8080 and PostgreSQL remain private.
+6. Configure the trusted HTTPS virtual host and exact `PUBLIC_ORIGIN`, validate Nginx, restart `yahahagame-controller`, then run the matching Git commit through the worker deployment script. The existing systemd unit uses the controller entry point. Port 8080 and PostgreSQL remain private.
 
 ## Verification
 
-Run full local integration tests with dev dependencies before packaging the release: `npm ci` then `npm test`. The suite starts an isolated native PostgreSQL instance; the deployment unit test command does not require those dev dependencies.
+Run full local integration tests with dev dependencies before deploying the release: `npm ci` then `npm test`. The suite starts an isolated native PostgreSQL instance; the deployment unit test command does not require those dev dependencies.
 
 On the deployed stack verify login, invitation cap, task listing after reopen, cross-user denial including artifact downloads, worker binding, long-running heartbeat/lease renewal and actual process-tree cancellation. Retain report/image hashes and final task state. `/healthz` is process liveness only.
 
