@@ -175,6 +175,10 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
     }
     const uploadMatch = url.pathname.match(/^\/v1\/worker\/artifacts\/([a-zA-Z0-9-]{1,100})\/([a-zA-Z0-9-]{1,100})$/);
     if (req.method === 'POST' && uploadMatch) return upload(req, res, uploadMatch[1], uploadMatch[2]);
+    if (req.method === 'GET' && url.pathname === '/v1/worker/status') {
+      const agent = await worker(req);
+      return json(res, 200, await tasks.workerStatus(db, agent));
+    }
     if (req.method === 'POST' && url.pathname.startsWith('/v1/worker/')) {
       const agent = await worker(req), input = await body(req);
       if (input.workerId && input.workerId !== agent.worker_id) throw problem(403, 'Worker identity mismatch.');

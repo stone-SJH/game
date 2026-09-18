@@ -232,6 +232,55 @@ export async function heartbeat(db, worker, input, leaseMs) {
     return { ok: true, action: 'CONTINUE', leaseUntil: until.toISOString() };
   });
 }
+
+// Read-only status for an authenticated worker monitor. This deliberately does
+// not poll or mutate an allocation, so watching a worker cannot claim work.
+export async function workerStatus(db, worker) {
+  const row = (await db.query(`SELECT w.worker_id,w.status,w.boot_id,w.capabilities,w.last_seen_at,w.updated_at,
+      wa.allocation_id,wa.job_id AS allocation_job_id,wa.workspace_id AS allocation_workspace_id,
+      wa.boot_id AS allocation_boot_id,wa.write_epoch,wa.created_at AS allocation_created_at,
+      j.task_id,j.run_id,j.status AS job_status,j.attempt,j.lease_until,
+      t.status AS task_status,t.objective,t.deadline_at,t.cancel_reason,
+      (SELECT count(*) FROM jobs queued_jobs JOIN tasks queued_tasks ON queued_tasks.task_id=queued_jobs.task_id
+        JOIN workspaces queued_workspaces ON queued_workspaces.task_id=queued_tasks.task_id
+        JOIN user_worker_bindings queued_bindings ON queued_bindings.user_id=queued_tasks.user_id
+        JOIN users queued_users ON queued_users.user_id=queued_tasks.user_id
+        WHERE queued_bindings.worker_id=w.worker_id AND queued_users.status='ACTIVE'
+          AND queued_jobs.status='QUEUED' AND queued_tasks.status='QUEUED' AND queued_tasks.deadline_at>now()
+          AND (queued_workspaces.worker_id IS NULL OR queued_workspaces.worker_id=w.worker_id)) AS queued_jobs
+    FROM workers w
+    LEFT JOIN worker_allocations wa ON wa.worker_id=w.worker_id AND wa.released_at IS NULL
+    LEFT JOIN jobs j ON j.job_id=wa.job_id
+    LEFT JOIN tasks t ON t.task_id=j.task_id
+    WHERE w.worker_id=$1`, [worker.worker_id])).rows[0];
+  if (!row) throw problem(404, 'Worker not found.');
+  return {
+    workerId: row.worker_id,
+    status: row.status,
+    bootId: row.boot_id,
+    capabilities: row.capabilities,
+    lastSeenAt: row.last_seen_at,
+    updatedAt: row.updated_at,
+    queuedJobs: Number(row.queued_jobs || 0),
+    active: row.allocation_id ? {
+      allocationId: row.allocation_id,
+      jobId: row.allocation_job_id,
+      taskId: row.task_id,
+      runId: row.run_id,
+      workspaceId: row.allocation_workspace_id,
+      bootId: row.allocation_boot_id,
+      writeEpoch: Number(row.write_epoch),
+      allocatedAt: row.allocation_created_at,
+      jobStatus: row.job_status,
+      taskStatus: row.task_status,
+      attempt: row.attempt,
+      leaseUntil: row.lease_until,
+      deadlineAt: row.deadline_at,
+      cancelReason: row.cancel_reason,
+      objective: row.objective
+    } : null
+  };
+}
 export async function stepResult(db, worker, input) {
   await reconcile(db);
   return change(db, async client => {
