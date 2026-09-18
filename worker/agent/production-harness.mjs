@@ -90,7 +90,7 @@ export function codexInvocation(args, command = codexCommand()) {
   return { command, args };
 }
 
-export async function runProductionHarness({ job, project, output, signal, step, unreal }) {
+export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
   const context = {
@@ -136,6 +136,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
     ].join('\n');
+    await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt, iterationTotal: maxAttempts || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     try {
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];

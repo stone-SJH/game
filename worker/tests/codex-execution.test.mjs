@@ -113,6 +113,27 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')), received);
 });
 
+test('telemetry includes the newest workspace files beyond the first directory entries', async t => {
+  const root = await fixture(t), { entrypoint } = await fakeCli(root, { exitCode: 2 });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '1' });
+  const job = { taskId: 'recent-task', workspaceId: 'existing-workspace', runId: 'next-run', objective };
+  const project = path.join(root, 'workspaces', job.workspaceId, 'project');
+  await fs.mkdir(project, { recursive: true });
+  for (let index = 0; index < 40; index++) {
+    const file = path.join(project, `asset-${String(index).padStart(2, '0')}.uasset`);
+    await fs.writeFile(file, 'existing project data');
+    await fs.utimes(file, 1000 + index, 1000 + index);
+  }
+  const latest = path.join(project, 'zzz-latest.umap');
+  await fs.writeFile(latest, 'latest scene');
+  const progress = [];
+  await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name,
+    reportProgress: value => progress.push(value) });
+  assert.ok(progress.some(value => value.projectFiles.some(file => file.name === 'zzz-latest.umap')));
+  assert.ok(progress.every(value => value.projectFiles.length <= 30));
+  assert.equal(await fs.readFile(latest, 'utf8'), 'latest scene');
+});
+
 test('CLI usage failure exits immediately with diagnostics even when retries are unlimited', async t => {
   const root = await fixture(t), { entrypoint } = await fakeCli(root, { exitCode: 2 });
   environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000' });

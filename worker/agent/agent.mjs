@@ -13,17 +13,131 @@ async function atomicJson(file, value) {
   await fsp.rename(temp, file);
 }
 
+const ignoredDirectories = new Set(['.git', 'Binaries', 'DerivedDataCache', 'Intermediate', 'node_modules']);
+const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const logExtensions = new Set(['.log', '.jsonl', '.txt']);
+const normalizePath = value => value.split(path.sep).join('/');
+async function recentFiles(root, predicate, limit = 30) {
+  const found = [];
+  async function visit(directory) {
+    let entries;
+    try { entries = await fsp.readdir(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) { if (!ignoredDirectories.has(entry.name)) await visit(path.join(directory, entry.name)); continue; }
+      if (!entry.isFile()) continue;
+      const file = path.join(directory, entry.name);
+      if (!predicate(file, entry.name)) continue;
+      try {
+        const stat = await fsp.stat(file);
+        found.push({ name: entry.name, path: normalizePath(path.relative(root, file)), size: stat.size, updatedAt: stat.mtime.toISOString() });
+        found.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+        if (found.length > limit) found.pop();
+      } catch { /* A file can disappear while a tool is writing it. */ }
+    }
+  }
+  await visit(root);
+  return found.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, limit);
+}
+async function workspaceSnapshot(project, output) {
+  const projectFiles = await recentFiles(project, (file, name) => !file.split(path.sep).includes('Saved') && !logExtensions.has(path.extname(name).toLowerCase()), 30);
+  const logFiles = [
+    ...(await recentFiles(project, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20)).map(file => ({ ...file, path: `project/${file.path}` })),
+    ...(await recentFiles(output, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20)).map(file => ({ ...file, path: `run/${file.path}` })),
+  ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 30);
+  const screenshots = [
+    ...(await recentFiles(project, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12)).map(file => ({ ...file, path: `project/${file.path}` })),
+    ...(await recentFiles(output, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12)).map(file => ({ ...file, path: `run/${file.path}` })),
+  ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 20);
+  return { projectFiles, logFiles, screenshots };
+}
+function phaseForStep(name) {
+  if (name.startsWith('production-orchestrator')) return 'thinking';
+  if (name.startsWith('unreal-project-validation')) return 'building';
+  if (name.startsWith('packaged-game-playtest')) return 'evaluating';
+  return 'working';
+}
+function toolForCommand(command) {
+  const value = path.basename(command).toLowerCase();
+  if (value.includes('codex')) return 'AI / Codex';
+  if (value.includes('unreal')) return 'Unreal Engine';
+  if (value.includes('blender')) return 'Blender';
+  if (value.includes('dotnet')) return '.NET';
+  return path.basename(command);
+}
+function toolFromOutput(value) {
+  const text = String(value);
+  if (/\bblender(?:\.exe)?\b/i.test(text)) return 'Blender';
+  if (/\bunreal(?:editor(?:-cmd)?(?:\.exe)?)?\b/i.test(text)) return 'Unreal Engine';
+  if (/\bdotnet(?:\.exe)?\b/i.test(text)) return '.NET';
+  return null;
+}
+
 export async function executeJob(job, ctx) {
-  const { root, signal, uploadFile } = ctx;
+  const { root, signal, uploadFile, reportProgress = () => {} } = ctx;
   const project = path.join(root, 'workspaces', job.workspaceId, 'project');
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
   const logs = [], artifactIds = [];
+  const uploadedScreenshots = new Map();
+  let currentProgress = { phase: 'preparing', goal: job.objective, status: 'running', steps: { completed: 0, total: 3 } };
+  let publishing = Promise.resolve();
+  const publish = patch => {
+    const next = publishing.then(async () => {
+      if (signal.aborted) return;
+      const snapshot = await workspaceSnapshot(project, output);
+      if (typeof uploadFile === 'function') {
+        for (const screenshot of snapshot.screenshots.slice(0, 4)) {
+          const key = `${screenshot.path}:${screenshot.updatedAt}`;
+          let artifactId = uploadedScreenshots.get(key);
+          if (!artifactId) {
+            const root = screenshot.path.startsWith('project/') ? project : output;
+            const relative = screenshot.path.replace(/^(?:project|run)\//, '');
+            try {
+              artifactId = await uploadFile(`worker-screenshot-${uploadedScreenshots.size}${path.extname(relative).toLowerCase()}`, path.join(root, relative), artifactContentType(relative));
+              uploadedScreenshots.set(key, artifactId);
+            } catch { /* A screenshot may still be locked or disappear while a tool writes it. */ }
+          }
+          if (artifactId) screenshot.artifactId = artifactId;
+        }
+      }
+      currentProgress = { ...currentProgress, ...patch, updatedAt: new Date().toISOString(), ...snapshot };
+      await reportProgress(currentProgress);
+    });
+    publishing = next.catch(() => {});
+    return next;
+  };
+  let snapshotPending = false;
+  const snapshotTimer = setInterval(() => {
+    if (snapshotPending) return;
+    snapshotPending = true;
+    publish({}).catch(() => {}).finally(() => { snapshotPending = false; });
+  }, 5000);
+  snapshotTimer.unref?.();
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
+    const codexStep = name.startsWith('production-orchestrator');
+    await publish({ phase: phaseForStep(name), step: name, tool: codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
+      prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
     await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
+    let pendingOutput = '';
+    const onStdout = chunk => {
+      if (!codexStep) return;
+      pendingOutput += chunk;
+      let newline;
+      while ((newline = pendingOutput.indexOf('\n')) !== -1) {
+        const line = pendingOutput.slice(0, newline); pendingOutput = pendingOutput.slice(newline + 1);
+        let event; try { event = JSON.parse(line); } catch { continue; }
+        if (event.item?.type !== 'command_execution') continue;
+        const done = event.type === 'item.completed';
+        const tool = done ? 'AI / Codex' : toolFromOutput(event.item.command) || 'Shell';
+        const phase = done ? 'thinking' : tool === 'Blender' ? 'crafting' : ['Unreal Engine', '.NET'].includes(tool) ? 'building' : 'working';
+        publish({ tool, phase, command: done ? path.basename(command) : String(event.item.command || '').slice(0, 180) }).catch(() => {});
+      }
+      if (pendingOutput.length > 2 * 1024 * 1024) pendingOutput = '';
+    };
     const result = await runCommand(command, args, { ...options, cwd, timeoutMs, signal,
+      onStdout,
       stdoutFile: path.join(output, `${name}.stdout.jsonl`), stderrFile: path.join(output, `${name}.stderr.log`) });
     await atomicJson(stepFile, { name, ...result });
     if (!result.stopConfirmed) throw Object.assign(new Error(result.error), { stopConfirmed: false });
@@ -31,18 +145,24 @@ export async function executeJob(job, ctx) {
     const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
     logs.push({ name, ...result, passed });
     if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}): ${result.error || result.stderr.trim().slice(-1000) || 'No diagnostic output.'}`), { result });
+    await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }
   const unreal = process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe';
   let failure;
   let production;
   try {
-    production = await runProductionHarness({ job, project, output, signal, step, unreal });
+    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish });
     for (const file of Object.values(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file)));
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
     failure = error.message;
+    await publish({ phase: 'failed', status: 'failed', goal: job.objective, error: failure });
+  } finally {
+    clearInterval(snapshotTimer);
+    await publishing;
   }
+  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective });
   const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
     deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null };
   const reportName = 'production-report.json';
@@ -85,7 +205,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     }
   }
   const identity = job => ({ jobId: job.jobId, taskId: job.taskId, leaseToken: job.leaseToken });
-  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, productionHarness: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
+  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, productionHarness: 1, telemetry: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
   if (prior) await sendResult(prior.job, prior.result);
   console.log(`worker ${workerId} registered (protocol 2)`);
   while (!signal?.aborted) {
@@ -103,11 +223,13 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     const abort = () => controller.abort(new Error('Worker shutting down.'));
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    const stopLease = maintainLease({ job, controller, intervalMs, heartbeat: () => post('/v1/worker/heartbeat', identity(job)) });
+    let progress = { phase: 'preparing', status: 'running', goal: job.objective, steps: { completed: 0, total: 3 }, updatedAt: new Date().toISOString() };
+    const reportProgress = value => { if (value && typeof value === 'object') progress = { ...value, updatedAt: value.updatedAt || new Date().toISOString() }; };
+    const stopLease = maintainLease({ job, controller, intervalMs, heartbeat: () => post('/v1/worker/heartbeat', { ...identity(job), progress }) });
     await atomicJson(journal, { phase: 'RUNNING', bootId, job });
     let result;
     try {
-      result = await execute(job, { root, signal: controller.signal, uploadFile: async (name, file, contentType) => {
+      result = await execute(job, { root, signal: controller.signal, reportProgress, uploadFile: async (name, file, contentType) => {
         controller.signal.throwIfAborted();
         const hash = crypto.createHash('sha256');
         for await (const chunk of fs.createReadStream(file, { signal: controller.signal })) hash.update(chunk);
@@ -120,8 +242,10 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
         return (await response.json()).artifactId;
       } });
     } catch (error) {
+      reportProgress({ phase: controller.signal.aborted ? 'canceled' : 'failed', status: controller.signal.aborted ? 'canceled' : 'failed', error: error.message });
       result = { status: controller.signal.aborted ? 'CANCELED' : 'FAIL', reason: error.message, artifactIds: [], stopConfirmed: error.stopConfirmed !== false };
     }
+    result = { ...result, progress };
     try { await sendResult(job, result); } finally { await stopLease(); signal?.removeEventListener('abort', abort); }
     if (once) return result;
   }

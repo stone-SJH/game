@@ -45,6 +45,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
     const agent = await worker(req);
     const lease = { taskId, jobId: req.headers['x-job-id'], bootId: req.headers['x-boot-id'], leaseToken: req.headers['x-lease-token'] };
     const job = await tasks.matchingJob(db, agent, lease);
+    if (job.run_finished_at) throw problem(409, 'Execution is no longer active.');
     if (job.task_status !== 'RUNNING') throw problem(409, 'Task is not accepting artifacts.');
     const name = String(req.headers['x-artifact-name'] || ''), expected = String(req.headers['x-artifact-sha256'] || '');
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,160}$/.test(name) || !/^[a-f0-9]{64}$/.test(expected)) throw problem(400, 'Invalid artifact metadata.');
@@ -62,6 +63,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
       if (actual !== expected) throw problem(400, 'Artifact hash mismatch.');
       const result = await tasks.change(db, async client => {
         const current = await tasks.matchingJob(client, agent, lease);
+        if (current.run_finished_at) throw problem(409, 'Execution is no longer active.');
         if (current.task_status !== 'RUNNING' || new Date(current.lease_until) <= new Date()) throw problem(409, 'Artifact lease is no longer active.');
         const prior = (await client.query('SELECT * FROM artifacts WHERE artifact_id=$1', [artifactId])).rows[0];
         if (prior) {
@@ -141,13 +143,14 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
           try { cursor = JSON.parse(Buffer.from(url.searchParams.get('cursor'), 'base64url').toString()); } catch { throw problem(400, 'Invalid list cursor.'); }
           if (!Array.isArray(cursor) || cursor.length !== 2 || !Number.isFinite(Date.parse(cursor[0])) || typeof cursor[1] !== 'string') throw problem(400, 'Invalid list cursor.');
         }
-        const rows = (await db.query(`SELECT task_id,kind,objective,status,worker_id,created_at,updated_at,created_at::text AS cursor_time FROM tasks WHERE user_id=$1
-          AND ($2::timestamptz IS NULL OR (created_at,task_id)<($2::timestamptz,$3::text)) ORDER BY created_at DESC,task_id DESC LIMIT 51`, [session.user_id, cursor?.[0] || null, cursor?.[1] || null])).rows;
+        const rows = (await db.query(`SELECT t.task_id,t.kind,t.objective,t.status,t.worker_id,t.created_at,t.updated_at,j.progress, t.created_at::text AS cursor_time
+          FROM tasks t LEFT JOIN LATERAL (SELECT progress FROM jobs WHERE jobs.task_id=t.task_id ORDER BY jobs.created_at DESC LIMIT 1) j ON true WHERE t.user_id=$1
+          AND ($2::timestamptz IS NULL OR (t.created_at,t.task_id)<($2::timestamptz,$3::text)) ORDER BY t.created_at DESC,t.task_id DESC LIMIT 51`, [session.user_id, cursor?.[0] || null, cursor?.[1] || null])).rows;
         const items = rows.slice(0, 50), last = items.at(-1);
         return json(res, 200, { tasks: items.map(({ cursor_time, ...item }) => item), nextCursor: rows.length > 50 ? Buffer.from(JSON.stringify([last.cursor_time, last.task_id])).toString('base64url') : null });
       }
     }
-    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events))?$/);
+    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun))?$/);
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
       const session = await user(req, req.method !== 'GET');
@@ -156,6 +159,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         const value = await tasks.cancelTask(db, task[1], session.user_id);
         return json(res, value.status === 'CANCELING' ? 202 : 200, value);
       }
+      if (req.method === 'POST' && task[2] === 'rerun') return json(res, 202, await tasks.rerunTask(db, task[1], session.user_id, await body(req)));
     }
     const artifact = url.pathname.match(/^\/artifacts\/([a-zA-Z0-9-]{1,100})$/);
     if (req.method === 'GET' && artifact) {
@@ -203,7 +207,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const insecureHttp = process.env.ALLOW_INSECURE_HTTP === 'true' && url.protocol === 'http:';
   if (url.origin !== origin || (url.protocol !== 'https:' && !localDev && !insecureHttp)) throw new Error('Set PUBLIC_ORIGIN to trusted HTTPS, or explicitly enable an approved HTTP test origin.');
   const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='002_phase1_accounts.sql'");
+  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='004_task_followups.sql'");
   if (!schema.rowCount) throw new Error('Run npm run migrate before starting the API.');
   const maxUsers = Number(process.env.MAX_USERS || 10);
   if (!Number.isInteger(maxUsers) || maxUsers < 1) throw new Error('MAX_USERS must be a positive integer.');

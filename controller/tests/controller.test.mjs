@@ -6,6 +6,7 @@ import test from 'node:test';
 import { createController } from '../core/sandbox-controller.mjs';
 import { readJson, sha256File } from '../core/common/fs.mjs';
 import { compilePlan } from '../core/common/plan.mjs';
+import { normalizeProgress } from '../api/tasks.mjs';
 
 function fixture() {
   return {
@@ -103,4 +104,17 @@ test('compiled plans preserve task tool allocation and result contracts', () => 
   assert.deepEqual(plan.plan.tasks[0].tools, ['Assets4AI catalog']);
   assert.deepEqual(plan.plan.tasks[0].resultContract.required, ['selected', 'rejected']);
   assert.equal(plan.plan.tasks[0].retryPolicy.maxAttempts, 2);
+});
+
+test('worker telemetry is normalized to bounded task progress', () => {
+  const progress = normalizeProgress({ phase: 'CRAFTING', goal: '  Build the scene  ', tool: { name: 'Blender', command: 'blender.exe' },
+    steps: { completed: 4, total: 7 }, prompt: '  use the current plan  ', projectFiles: [{ name: 'Main.umap', path: 'Content/Main.umap', size: 42, updatedAt: '2026-01-01T00:00:00Z' }] });
+  assert.equal(progress.phase, 'crafting');
+  assert.equal(progress.goal, 'Build the scene');
+  assert.deepEqual(progress.steps, { completed: 4, total: 7 });
+  assert.equal(progress.tool, 'Blender');
+  assert.equal(progress.command, 'blender.exe');
+  assert.equal(progress.projectFiles[0].name, 'Main.umap');
+  assert.equal(normalizeProgress(null), null);
+  assert.equal(normalizeProgress({ tool: null, prompt: null }).tool, null);
 });

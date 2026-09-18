@@ -14,7 +14,7 @@ export function killProcessTree(pid) {
   });
 }
 
-export function runCommand(command, args, { cwd, timeoutMs, signal, input, stdoutFile, stderrFile } = {}) {
+export function runCommand(command, args, { cwd, timeoutMs, signal, input, stdoutFile, stderrFile, onStdout } = {}) {
   signal?.throwIfAborted();
   return new Promise(resolve => {
     const startedAt = new Date().toISOString();
@@ -37,7 +37,7 @@ export function runCommand(command, args, { cwd, timeoutMs, signal, input, stdou
     }
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); });
+    child.stdout?.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); try { onStdout?.(data); } catch { /* Telemetry must not interrupt the command. */ } });
     child.stderr?.on('data', data => { stderr = (stderr + data).slice(-2 * 1024 * 1024); });
     child.stdin?.on('error', error => {
       if (!['EPIPE', 'ERR_STREAM_DESTROYED'].includes(error.code)) { ioError = error.message; stop(); }

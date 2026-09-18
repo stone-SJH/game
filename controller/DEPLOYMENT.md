@@ -69,7 +69,21 @@ npm run test:unit
 npm run migrate
 ```
 
-The runner records checksums in `schema_migrations`. Do not manually run `002_phase1_accounts.sql` or edit an applied migration. Historical pilot tasks remain unassigned to real users; the API excludes them. An explicit audited adoption tool is still pending.
+The runner records checksums in `schema_migrations`. Do not manually run an individual migration or edit an applied migration. The current release applies the worker telemetry and task follow-up migrations after the account migration. Historical pilot tasks remain unassigned to real users; the API excludes them. An explicit audited adoption tool is still pending.
+
+Worker telemetry requires the matching worker update. The controller accepts older protocol-2
+workers during the upgrade, but their tasks have no detailed progress until the agent is updated.
+Terminal tasks can create another run with a modification prompt, a renewed 24-hour deadline and
+the same task/workspace/worker assignment. Previous runs and artifacts remain available. Replayed
+results acknowledge the original run without changing a later run. Continuation retains workspace
+files and prompt history; it does not resume an in-memory Codex session.
+
+The telemetry implementation is a controller-role path exception: actual worker process state,
+prompts and local file timestamps must be collected in `worker/agent/`. Its worker tests and the
+controller heartbeat/continuation integration tests verify that interface. Run Windows-specific
+tests on the worker before activating its update. On Linux, run the embedded PostgreSQL integration
+suite as a non-root user from an accessible checkout; a file-level test result without the individual
+database cases is not evidence that the integration tests ran.
 
 5. Issue limited invitation codes and enroll workers through the administrative CLI:
 
@@ -112,3 +126,5 @@ Run admin commands with the same Compose `run --rm --no-deps controller` prefix.
 ## Rollback
 
 Keep database/workspaces/artifacts intact. Roll back to an ownership-aware release or maintenance mode. The old shared-token API and unauthenticated download route are not acceptable rollback targets once account-owned tasks exist.
+After a follow-up run is created, retain support for multiple runs per task when rolling back;
+the earlier single-run scheduler is not compatible with that history.

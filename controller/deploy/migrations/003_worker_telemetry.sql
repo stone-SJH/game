@@ -1,0 +1,1 @@
+ALTER TABLE jobs ADD COLUMN progress JSONB NOT NULL DEFAULT '{}'::jsonb;

@@ -93,6 +93,25 @@ test('worker binding and allocation prevent duplicate dispatch; cancellation fen
   assert.equal((await request('/v1/worker/step-result', { headers: agentHeaders, data: finish })).value.status, 'CANCELED');
   assert.equal((await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), bootId: 'old-boot' } })).status, 409);
 });
+test('worker telemetry is persisted and exposed with the task stream', async () => {
+  const task = await create(), job = await claim();
+  const progress = { phase: 'crafting', status: 'running', goal: 'Build the playable scene', step: 'asset-authoring', tool: 'Blender', command: 'blender.exe',
+    steps: { completed: 2, total: 5 }, iteration: 2, iterationTotal: 4, prompt: 'Create the scene and verify the lighting.',
+    screenshots: [{ name: 'latest.png', path: 'captures/latest.png', size: 2048, updatedAt: new Date().toISOString() }],
+    projectFiles: [{ name: 'Main.umap', path: 'Content/Main.umap', size: 4096, updatedAt: new Date().toISOString() }],
+    logFiles: [{ name: 'build.log', path: 'run/build.log', size: 128, updatedAt: new Date().toISOString() }] };
+  assert.equal((await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress } })).status, 200);
+  const view = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(view.progress.phase, 'crafting');
+  assert.deepEqual(view.progress.steps, { completed: 2, total: 5 });
+  assert.equal(view.progress.tool, 'Blender');
+  assert.equal(view.progress.goal, progress.goal);
+  assert.equal(view.progress.screenshots[0].name, 'latest.png');
+  assert.equal(view.worker.workerId, workerId);
+  assert.equal(view.worker.status, 'ONLINE');
+  assert.equal(view.events.at(-1).event_type, 'WORKER_PROGRESS');
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress } });
+});
 test('verified artifacts are owner-scoped and completed work is immutable', async () => {
   const task = await create(), job = await claim(), ids = [];
   for (const [name, bytes, type] of [['production-report.json', Buffer.from('{"passed":true}'), 'application/json']]) {
@@ -108,12 +127,50 @@ test('verified artifacts are owner-scoped and completed work is immutable', asyn
   assert.equal((await request(`/v1/tasks/${task.taskId}/cancel`,{account:alice,data:{}})).value.status,'COMPLETED');
   assert.equal('leaseToken' in (await request(`/v1/tasks/${task.taskId}`,{account:alice})).value.result,false);
 });
+test('terminal tasks can queue a follow-up run on the same workspace', async () => {
+  const task = await create(), first = await claim();
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true } });
+  await db.query("UPDATE tasks SET deadline_at=now()-interval '1 second' WHERE task_id=$1", [task.taskId]);
+  const queued = await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Add a second playable route and keep the existing work.' } });
+  assert.equal(queued.status, 202);
+  const beforeClaim = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(beforeClaim.status, 'QUEUED');
+  assert.equal(beforeClaim.workspaceId, task.workspaceId);
+  assert.equal(beforeClaim.currentPrompt, 'Add a second playable route and keep the existing work.');
+  assert.equal(beforeClaim.runs.length, 2);
+  assert.ok(Date.parse(beforeClaim.deadlineAt) > Date.now());
+  assert.equal((await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Duplicate submission' } })).status, 409);
+  assert.equal((await request(`/v1/tasks/${task.taskId}/rerun`, { account: bob, data: { prompt: 'Other user' } })).status, 404);
+  const duplicate = await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true } });
+  assert.equal(duplicate.value.duplicate, true);
+  assert.equal(duplicate.value.status, 'FAILED');
+  const lateHeartbeat = await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(first), progress: { phase: 'crafting' } } });
+  assert.equal(lateHeartbeat.value.action, 'STOP');
+  assert.equal((await request(`/v1/tasks/${task.taskId}`, { account: alice })).value.progress, null);
+  const second = await claim();
+  assert.equal(second.taskId, task.taskId);
+  assert.equal(second.workspaceId, task.workspaceId);
+  assert.match(second.objective, /Follow-up modification request/);
+  const lateArtifact = Buffer.from('late artifact');
+  const lateUpload = await fetch(`${origin}/v1/worker/artifacts/${task.taskId}/late-artifact`, { method: 'POST', headers: {
+    ...agentHeaders, 'x-job-id': first.jobId, 'x-boot-id': first.bootId, 'x-lease-token': first.leaseToken,
+    'x-artifact-name': 'late.txt', 'x-artifact-sha256': digest(lateArtifact), 'content-type': 'text/plain'
+  }, body: lateArtifact });
+  assert.equal(lateUpload.status, 409);
+  assert.equal((await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(second), status: 'FAIL', stopConfirmed: true } })).value.status, 'FAILED');
+  assert.equal((await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Change the lighting only.' } })).status, 202);
+  const third = await claim();
+  assert.match(third.objective, /Add a second playable route/);
+  assert.match(third.objective, /Change the lighting only/);
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(third), status: 'FAIL', stopConfirmed: true } });
+});
 test('long Windows process keeps renewing its lease; cancellation kills its descendant', async () => {
   const task = await create(), root = path.join(fixture.root, 'worker');
   const marker = path.join(fixture.root, 'descendant.pid');
   let childPid;
   const running = runAgent({ control:origin,workerId,token:workerToken,root,once:true,intervalMs:100,
     execute:async (job,ctx)=>{
+      ctx.reportProgress({ phase:'building', status:'running', goal:job.objective, step:'long-running-build', tool:'dotnet', steps:{completed:1,total:3} });
       const script = `const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});fs.writeFileSync(${JSON.stringify(marker)},String(c.pid));setInterval(()=>{},1000);`;
       const result = await runCommand(process.execPath,['-e',script],{cwd:fixture.root,timeoutMs:15000,signal:ctx.signal});
       return {status:'CANCELED',stopConfirmed:result.stopConfirmed,artifactIds:[]};
@@ -121,7 +178,10 @@ test('long Windows process keeps renewing its lease; cancellation kills its desc
   for(let i=0;i<100;i++){ const value=await fs.readFile(marker,'utf8').catch(()=>null);if(value){childPid=Number(value);break;}await delay(50); }
   assert.ok(childPid,'Child process started');
   await delay(2000);
-  assert.equal((await request(`/v1/tasks/${task.taskId}`,{account:alice})).value.status,'RUNNING');
+  const liveView = (await request(`/v1/tasks/${task.taskId}`,{account:alice})).value;
+  assert.equal(liveView.status,'RUNNING');
+  assert.equal(liveView.progress.phase, 'building');
+  assert.equal(liveView.progress.tool, 'dotnet');
   const lease=(await db.query('SELECT lease_until FROM jobs WHERE task_id=$1',[task.taskId])).rows[0];
   assert.ok(new Date(lease.lease_until)>new Date());
   await request(`/v1/tasks/${task.taskId}/cancel`,{account:alice,data:{}});
