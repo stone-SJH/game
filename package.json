@@ -9,6 +9,7 @@
     "test": "npm run test:worker && npm --prefix controller test",
     "test:worker": "node --test worker/tests/*.test.mjs",
     "controller": "npm --prefix controller start",
-    "worker": "node worker/agent/agent.mjs"
+    "worker": "node worker/agent/agent.mjs",
+    "worker:monitor": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File worker/deploy/monitor-worker.ps1"
   }
 }

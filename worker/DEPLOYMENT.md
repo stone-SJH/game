@@ -85,6 +85,47 @@ Store settings in `runtime/config/worker.env.ps1` using `deploy/worker.env.ps1.e
 
 The launcher preserves environment overrides for Blender/Unreal. Validate Node and tool versions and controller connectivity before start. Never publish credentials in evidence logs.
 
+## Foreground monitoring
+
+Open a separate PowerShell or Command Prompt and run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\game\worker\deploy\monitor-worker.ps1
+```
+
+From the checkout, `npm run worker:monitor` runs the same monitor. It refreshes
+every two seconds; Ctrl+C closes the monitor. The monitor does not start, stop,
+claim or cancel worker tasks, renew leases, or write runtime files.
+It loads credentials from `runtime/config/worker.env.ps1` without putting them
+on the command line. The default runtime belongs to the script's checkout,
+even if the shell still has an old `YAHAHAGAME_WORKER_ROOT` environment value.
+
+```powershell
+# Change the refresh interval or explicitly select another runtime.
+& D:\game\worker\deploy\monitor-worker.ps1 -WorkerRoot 'D:\game\runtime' -IntervalSeconds 5
+# Print a single snapshot, optionally as JSON.
+& D:\game\worker\deploy\monitor-worker.ps1 -Once
+& D:\game\worker\deploy\monitor-worker.ps1 -Once -Json
+```
+
+The display includes the local journal phase, task/workspace/run IDs, latest
+Codex/Unreal/playtest step, descendant process PIDs, cumulative CPU time, memory,
+recent file activity and bounded log tails. Worker and lease credentials are
+redacted. Directory scanning is bounded and skips generated caches; file activity
+and CPU time are diagnostic signals, not proof of successful task progress.
+`INTERRUPTED` means a journal remains with no worker process; `RESULT` means final
+result delivery is pending. A journal read or process query failure is `UNKNOWN`.
+
+When the controller includes `GET /v1/worker/status`, the monitor also shows its
+authoritative task/job state, lease expiry, cancellation reason, queue count and
+heartbeat age. This endpoint accepts only the enrolled worker's credentials,
+performs SELECT queries only, and does not expose lease tokens. Heartbeats older
+than 15 seconds are marked stale. Older controllers return `UNSUPPORTED`; network
+failures remain visible while local monitoring continues and remote reads retry.
+In those cases the controller's task state is explicitly `UNKNOWN`.
+Deploy the controller endpoint through its normal deployment workflow between
+tasks; the local monitor can be used immediately without restarting the worker.
+
 ## Workspace and execution
 
 Each task receives a persistent `workspaceId` and a new empty project directory at `workspaces/<workspaceId>/project`, with output under `workspaces/<workspaceId>/runs/<runId>`. The browser sends only the objective. The production worker invokes the installed `yahahagame-production` skill through Codex CLI in that workspace, writes its stage manifests, and requires a real `.uproject`, `scene-preview` image, packaged playable `.exe`, and `acceptance/acceptance-report.json` before completion. It launches the packaged executable with a bounded playtest before uploading final artifacts; bootstrap images and editor startup logs are diagnostic only. Incomplete or transiently failed iterations are retained and retried after `CODEX_RETRY_DELAY_MS` (default 10 seconds) until the task deadline, cancellation, an explicit hard-failure marker, or a tool timeout.
