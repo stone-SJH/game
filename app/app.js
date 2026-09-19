@@ -109,12 +109,7 @@ function progressPanel(task) {
   }
   return panel;
 }
-function iterationSummaryPanel(task) {
-  const section = node('section', undefined, 'iteration-summaries'); section.append(node('h3', 'Iteration summaries'));
-  const summaries = Array.isArray(task.iterationSummaries) ? task.iterationSummaries : [];
-  if (!summaries.length) { section.append(node('div', 'No completed iteration summary yet', 'empty')); return section; }
-  const list = node('ol');
-  for (const [index, summary] of summaries.entries()) {
+function iterationSummaryRow(summary, task, index) {
     const row = node('li', undefined, `iteration-summary ${String(summary.status || '').toLowerCase()}`);
     const heading = node('div', undefined, 'iteration-summary-heading');
     heading.append(node('strong', summary.iteration === null ? `Run ${index + 1}` : `Iteration ${summary.iteration}`), status(summary.status || 'RUNNING'));
@@ -148,9 +143,43 @@ function iterationSummaryPanel(task) {
       const link = node('a', 'Download full failure report'); link.href = `/artifacts/${encodeURIComponent(summary.diagnosticArtifactId)}`; link.target = '_blank'; link.rel = 'noopener'; link.className = 'iteration-diagnostic-download'; row.append(link);
     }
     if (summary.updatedAt) row.append(node('time', date(summary.updatedAt)));
-    list.append(row);
+    return row;
+}
+function iterationSummaryBuckets(task) {
+  const summaries = Array.isArray(task.iterationSummaries) ? task.iterationSummaries : [];
+  const latestRunAt = Date.parse(task.runs?.[0]?.createdAt || '');
+  if (!Number.isFinite(latestRunAt)) return { current: summaries, archived: [] };
+  const current = [], archived = [];
+  for (const summary of summaries) {
+    const updatedAt = Date.parse(summary.updatedAt || '');
+    if (Number.isFinite(updatedAt) && updatedAt < latestRunAt) archived.push(summary);
+    else current.push(summary);
   }
-  section.append(list); return section;
+  return { current, archived };
+}
+function iterationSummaryPanel(task) {
+  const section = node('section', undefined, 'iteration-summaries'); section.append(node('h3', 'Current iteration summaries'));
+  const { current, archived } = iterationSummaryBuckets(task);
+  if (!current.length && !archived.length) { section.append(node('div', 'No completed iteration summary yet', 'empty')); return section; }
+  if (current.length) {
+    const list = node('ol');
+    current.forEach((summary, index) => list.append(iterationSummaryRow(summary, task, index)));
+    section.append(list);
+  }
+  if (archived.length) {
+    const history = document.createElement('details'); history.className = 'iteration-history';
+    history.append(node('summary', `Archived previous-run iterations (${archived.length})`));
+    let loaded = false;
+    history.addEventListener('toggle', () => {
+      if (!history.open || loaded) return;
+      loaded = true;
+      const list = node('ol');
+      archived.forEach((summary, index) => list.append(iterationSummaryRow(summary, task, index)));
+      history.append(list);
+    });
+    section.append(history);
+  }
+  return section;
 }
 function artifactPanel(task, taskId) {
   const section = node('section', undefined, 'artifact-panel'), heading = node('div', undefined, 'artifact-heading');
@@ -268,7 +297,7 @@ async function refreshDetail() {
   const displayTask = await loadCompletedArtifacts(task, target);
   if (epoch !== generation || target !== selected) return;
   const pane = $('detail');
-  const summarySignature = (task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|');
+  const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
   const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
   const completedOutputSignature = `${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
   if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
