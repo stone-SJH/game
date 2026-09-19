@@ -169,7 +169,9 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   const root = await fixture(t), { entrypoint, wrapper } = await fakeCli(root);
   environment(t, { CODEX_CMD: process.platform === 'win32' ? wrapper : entrypoint, CODEX_MAX_ATTEMPTS: '1', CODEX_TIMEOUT_MS: '10000' });
   const job = { taskId: 'fixture-task', workspaceId: `workspace ${chinese}`, runId: 'run with spaces', objective };
-  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  const uploads = [];
+  const result = await executeJob(job, { root, signal: new AbortController().signal,
+    uploadFile: async (name, file, contentType, options) => { uploads.push({ name, options }); return name; } });
   // The fixture only checks transport; it deliberately supplies no game deliverables.
   assert.equal(result.status, 'FAIL');
   assert.match(result.reason, /Production deliverables missing/);
@@ -185,6 +187,10 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   assert.equal(received.args.some(arg => arg.includes(objective)), false);
   assert.equal(await fs.readFile(path.join(output, 'codex-production-session-1.txt'), 'utf8'), received.input);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')), received);
+  assert.deepEqual(uploads.find(item => item.name === 'iteration-monitor-1.json')?.options, { timeoutMs: 10000 });
+  const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
+  assert.equal(report.iterationReviews[0].action, 'stop');
+  assert.ok(result.artifactIds.includes('iteration-monitor-1.json'));
 });
 
 test('telemetry includes the newest workspace files beyond the first directory entries', async t => {
