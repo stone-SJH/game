@@ -34,7 +34,7 @@ test('playable package archive contains the complete packaged directory', async 
   await fs.writeFile(path.join(packageRoot, 'Warden.exe'), 'launcher');
   await fs.writeFile(path.join(packageRoot, 'Warden', 'Content', 'game.pak'), 'content');
   await archivePackage(packageRoot, archive, new AbortController().signal);
-  const listing = await runCommand(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-tf', path.basename(archive)], { cwd: path.dirname(archive), timeoutMs: 10000 });
+  const listing = await runCommand(process.platform === 'win32' ? '7z.exe' : 'tar', process.platform === 'win32' ? ['l', '-ba', path.basename(archive)] : ['-tf', path.basename(archive)], { cwd: path.dirname(archive), timeoutMs: 10000 });
   assert.equal(listing.exitCode, 0, listing.stderr);
   assert.match(listing.stdout, /Warden\.exe/);
   assert.match(listing.stdout, /game\.pak/);

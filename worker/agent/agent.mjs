@@ -21,13 +21,16 @@ const normalizePath = value => value.split(path.sep).join('/');
 export async function archivePackage(packageRoot, destination, signal) {
   await fsp.rm(destination, { force: true });
   const windows = process.platform === 'win32';
-  const command = windows ? 'tar.exe' : 'tar';
+  const sevenZip = windows ? findSevenZip() : null;
+  const command = sevenZip || (windows ? 'tar.exe' : 'tar');
   const extension = windows ? '.zip' : '.tar.gz';
   const temporaryName = `.yahahagame-package-${crypto.randomUUID()}${extension}`;
   const temporary = path.join(packageRoot, temporaryName);
-  const args = windows
-    ? ['-a', '-c', '-f', temporaryName, `--exclude=./${temporaryName}`, '.']
-    : ['-czf', temporaryName, `--exclude=./${temporaryName}`, '.'];
+  const args = sevenZip
+    ? ['a', '-tzip', '-mx=1', temporaryName, '.', `-xr!${temporaryName}`]
+    : windows
+      ? ['-a', '-c', '-f', temporaryName, `--exclude=./${temporaryName}`, '.']
+      : ['-czf', temporaryName, `--exclude=./${temporaryName}`, '.'];
   const result = await runCommand(command, args, {
     cwd: packageRoot,
     signal,
@@ -40,6 +43,22 @@ export async function archivePackage(packageRoot, destination, signal) {
   try { await fsp.rename(temporary, destination); }
   finally { await fsp.rm(temporary, { force: true }); }
   return destination;
+}
+
+function findSevenZip() {
+  const candidates = [process.env.SEVEN_ZIP_EXE, '7z.exe', '7zz.exe',
+    'C:\\Program Files\\7-Zip\\7z.exe', 'C:\\ProgramData\\chocolatey\\bin\\7z.exe'].filter(Boolean);
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate)) {
+      try { if (fs.existsSync(candidate)) return candidate; } catch { /* Try the next installation. */ }
+      continue;
+    }
+    for (const directory of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+      const file = path.join(directory.replace(/^"|"$/g, ''), candidate);
+      try { if (fs.existsSync(file)) return file; } catch { /* Try the next PATH entry. */ }
+    }
+  }
+  return null;
 }
 
 function playablePackageName(attempt) {
