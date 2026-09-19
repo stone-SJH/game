@@ -108,13 +108,35 @@ test('compiled plans preserve task tool allocation and result contracts', () => 
 
 test('worker telemetry is normalized to bounded task progress', () => {
   const progress = normalizeProgress({ phase: 'CRAFTING', goal: '  Build the scene  ', tool: { name: 'Blender', command: 'blender.exe' },
-    steps: { completed: 4, total: 7 }, prompt: '  use the current plan  ', projectFiles: [{ name: 'Main.umap', path: 'Content/Main.umap', size: 42, updatedAt: '2026-01-01T00:00:00Z' }] });
+    steps: { completed: 4, total: 7 }, prompt: '  use the current plan  ',
+    diagnostic: { stage: 'unreal-project-validation-4', attempt: 4, message: 'No diagnostic output.', exitCode: 1, stderr: '  validation output  ' },
+    screenshots: Array.from({ length: 5 }, (_, index) => ({ name: `screen-${index}.png` })),
+    projectFiles: Array.from({ length: 6 }, (_, index) => ({ name: `file-${index}.umap` })),
+    logFiles: Array.from({ length: 6 }, (_, index) => ({ name: `log-${index}.log` })) });
   assert.equal(progress.phase, 'crafting');
   assert.equal(progress.goal, 'Build the scene');
   assert.deepEqual(progress.steps, { completed: 4, total: 7 });
   assert.equal(progress.tool, 'Blender');
   assert.equal(progress.command, 'blender.exe');
-  assert.equal(progress.projectFiles[0].name, 'Main.umap');
+  assert.equal(progress.error, 'No diagnostic output.');
+  assert.deepEqual(progress.diagnostic, { stage: 'unreal-project-validation-4', category: 'unreal-validation', command: 'blender.exe', attempt: 4, message: 'No diagnostic output.', exitCode: 1, stderr: 'validation output', logFiles: ['unreal-project-validation-4.stdout.jsonl', 'unreal-project-validation-4.stderr.log'] });
+  assert.equal(progress.projectFiles[0].name, 'file-0.umap');
+  assert.equal(progress.screenshots.length, 2);
+  assert.equal(progress.projectFiles.length, 4);
+  assert.equal(progress.logFiles.length, 4);
+  const workerText = normalizeProgress({ phase: 'failed', status: 'failed', step: 'Iteration 8: retry',
+    error: '[workspace-cleanup] production-orchestrator-8 failed (exit 1):\nstderr:\nThe directory is not empty. (145)' });
+  assert.equal(workerText.diagnostic.category, 'workspace-cleanup');
+  assert.equal(workerText.diagnostic.stage, 'production-orchestrator-8');
+  assert.equal(workerText.diagnostic.exitCode, 1);
+  assert.match(workerText.diagnostic.stderr, /145/);
+  const genericWorkerCategory = normalizeProgress({ phase: 'failed', status: 'failed', step: 'Iteration 8: retry',
+    error: '[project-or-unknown] production-orchestrator-8 failed (exit 1): stale arg0 temporary directory cleanup failed, Windows error 145' });
+  assert.equal(genericWorkerCategory.diagnostic.category, 'workspace-cleanup');
+  const noOutput = normalizeProgress({ phase: 'failed', status: 'failed', step: 'Iteration 4: repair-project',
+    error: 'unreal-project-validation-4 failed (exit 1):\nNo diagnostic output.' });
+  assert.equal(noOutput.diagnostic.category, 'missing-output');
+  assert.equal(noOutput.diagnostic.noOutput, true);
   assert.equal(normalizeProgress(null), null);
   assert.equal(normalizeProgress({ tool: null, prompt: null }).tool, null);
 });

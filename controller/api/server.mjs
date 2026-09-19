@@ -10,6 +10,7 @@ import pg from 'pg';
 import { authenticate, sessionFor, sessionCookie, rateLimit } from './accounts.mjs';
 import { digest, problem } from './database.mjs';
 import * as tasks from './tasks.mjs';
+import { getPngPreview } from './image-preview.mjs';
 
 export function createServer({ db, artifactRoot, origin, secureCookies = true, maxUsers = 10, leaseMs = 120000,
   appRoot = fileURLToPath(new URL('../../app/', import.meta.url)), maxArtifactBytes = 2 * 1024 ** 3 }) {
@@ -75,6 +76,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         await tasks.event(client, taskId, 'ARTIFACT_CREATED', { artifactId, name });
         return { artifactId, name, sha256: actual, sizeBytes: size };
       });
+      tasks.invalidateArtifactCache(taskId);
       json(res, 201, result);
     } catch (error) {
       if (published) await fsp.rm(target, { force: true });
@@ -94,10 +96,10 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
       try {
         if (closed) return;
         if (!await sessionFor(db, req)) return res.end();
-        const events = (await db.query('SELECT event_id,event_type,payload,created_at FROM task_events WHERE task_id=$1 AND event_id>$2 ORDER BY event_id LIMIT 200', [taskId, cursor])).rows;
+        const events = (await db.query('SELECT event_id,event_type,created_at FROM task_events WHERE task_id=$1 AND event_id>$2 ORDER BY event_id LIMIT 200', [taskId, cursor])).rows;
         for (const row of events) { cursor = row.event_id; res.write(`id: ${cursor}\ndata: ${JSON.stringify(row)}\n\n`); }
         if (!events.length) res.write(': heartbeat\n\n');
-        if (!closed) timer = setTimeout(pump, 2000);
+        if (!closed) timer = setTimeout(pump, events.length ? 250 : 15000);
       } catch { res.end(); }
     };
     await pump();
@@ -150,10 +152,11 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         return json(res, 200, { tasks: items.map(({ cursor_time, ...item }) => item), nextCursor: rows.length > 50 ? Buffer.from(JSON.stringify([last.cursor_time, last.task_id])).toString('base64url') : null });
       }
     }
-    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun))?$/);
+    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|artifacts))?$/);
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
       const session = await user(req, req.method !== 'GET');
+      if (req.method === 'GET' && task[2] === 'artifacts') return json(res, 200, await tasks.artifactView(db, task[1], session.user_id, { cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit') }));
       if (req.method === 'GET' && !task[2]) return json(res, 200, await tasks.taskView(db, task[1], session.user_id));
       if (req.method === 'POST' && task[2] === 'cancel') {
         const value = await tasks.cancelTask(db, task[1], session.user_id);
@@ -166,12 +169,23 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
       const session = await user(req);
       const row = (await db.query('SELECT a.* FROM artifacts a JOIN tasks t USING(task_id) WHERE a.artifact_id=$1 AND t.user_id=$2 AND a.verified=true', [artifact[1], session.user_id])).rows[0];
       if (!row) throw problem(404, 'Artifact not found.');
-      const stat = await fsp.stat(row.storage_path).catch(() => null);
+      const sourceStat = await fsp.stat(row.storage_path).catch(() => null);
+      if (!sourceStat) throw problem(404, 'Artifact file missing.');
+      const preview = url.searchParams.get('preview') === '1';
+      let storagePath = row.storage_path, contentType = row.content_type;
+      if (preview && row.content_type === 'image/png') {
+        const generated = await getPngPreview({ sourcePath: row.storage_path, cacheRoot: path.join(artifactRoot, '.previews'), artifactId: row.artifact_id });
+        if (!generated) throw problem(415, 'Preview is unavailable for this image.');
+        storagePath = generated; contentType = 'image/png';
+      }
+      const stat = storagePath === row.storage_path ? sourceStat : await fsp.stat(storagePath).catch(() => null);
       if (!stat) throw problem(404, 'Artifact file missing.');
-      const inline = ['image/png', 'image/jpeg', 'image/webp', 'video/mp4'].includes(row.content_type);
-      res.writeHead(200, { 'content-type': row.content_type, 'content-length': stat.size, 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff',
+      const inline = ['image/png', 'image/jpeg', 'image/webp', 'video/mp4'].includes(contentType);
+      const etag = `"${row.sha256}-${preview ? 'preview' : 'original'}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag, 'cache-control': 'private, max-age=31536000, immutable' }); return res.end(); }
+      res.writeHead(200, { 'content-type': contentType, 'content-length': stat.size, etag, 'last-modified': new Date(row.created_at).toUTCString(), 'cache-control': 'private, max-age=31536000, immutable', 'x-content-type-options': 'nosniff',
         'content-security-policy': "sandbox; default-src 'none'", 'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${row.name}"` });
-      return pipeline(fs.createReadStream(row.storage_path), res);
+      return pipeline(fs.createReadStream(storagePath), res);
     }
     const uploadMatch = url.pathname.match(/^\/v1\/worker\/artifacts\/([a-zA-Z0-9-]{1,100})\/([a-zA-Z0-9-]{1,100})$/);
     if (req.method === 'POST' && uploadMatch) return upload(req, res, uploadMatch[1], uploadMatch[2]);
@@ -211,7 +225,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const insecureHttp = process.env.ALLOW_INSECURE_HTTP === 'true' && url.protocol === 'http:';
   if (url.origin !== origin || (url.protocol !== 'https:' && !localDev && !insecureHttp)) throw new Error('Set PUBLIC_ORIGIN to trusted HTTPS, or explicitly enable an approved HTTP test origin.');
   const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='004_task_followups.sql'");
+  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='006_progress_events.sql'");
   if (!schema.rowCount) throw new Error('Run npm run migrate before starting the API.');
   const maxUsers = Number(process.env.MAX_USERS || 10);
   if (!Number.isInteger(maxUsers) || maxUsers < 1) throw new Error('MAX_USERS must be a positive integer.');
