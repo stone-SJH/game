@@ -4,8 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { executeJob } from '../agent/agent.mjs';
-import { codexInvocation, commandDiagnostic, isCodexTempCleanupFailure, projectValidationArgs } from '../agent/production-harness.mjs';
+import { archivePackage, executeJob } from '../agent/agent.mjs';
+import { codexInvocation, commandDiagnostic, projectValidationArgs } from '../agent/production-harness.mjs';
+import { runProductionHarness } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
 const chinese = '\u4e2d\u6587\u6218\u6597\u573a\u666f';
@@ -25,9 +26,63 @@ test('command diagnostics include process errors, stderr, and stdout', () => {
   assert.match(diagnostic, /stdout:\n503 Service Unavailable/);
 });
 
-test('Codex temporary-directory cleanup failures are classified as tooling failures', () => {
-  assert.equal(isCodexTempCleanupFailure({ stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)' }), true);
-  assert.equal(isCodexTempCleanupFailure({ stderr: 'The project failed validation.' }), false);
+test('playable package archive contains the complete packaged directory', async t => {
+  const root = await fixture(t);
+  const packageRoot = path.join(root, 'package', 'Windows');
+  const archive = path.join(root, 'playable.zip');
+  await fs.mkdir(path.join(packageRoot, 'Warden', 'Content'), { recursive: true });
+  await fs.writeFile(path.join(packageRoot, 'Warden.exe'), 'launcher');
+  await fs.writeFile(path.join(packageRoot, 'Warden', 'Content', 'game.pak'), 'content');
+  await archivePackage(packageRoot, archive, new AbortController().signal);
+  const listing = await runCommand(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-tf', path.basename(archive)], { cwd: path.dirname(archive), timeoutMs: 10000 });
+  assert.equal(listing.exitCode, 0, listing.stderr);
+  assert.match(listing.stdout, /Warden\.exe/);
+  assert.match(listing.stdout, /game\.pak/);
+});
+
+test('playable checkpoint is published before a later acceptance failure', async t => {
+  const root = await fixture(t);
+  const project = path.join(root, 'project');
+  const output = path.join(root, 'run');
+  const skill = path.join(root, 'skill.md');
+  const packageFile = path.join(project, 'package', 'Windows', 'Game.exe');
+  const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
+    'level-blockout-and-traversal', 'gameplay-foundation-and-input', 'camera-combat-ai-and-feel',
+    'world-materials-fx-audio-and-ui', 'integration-build-and-playtest', 'package-and-acceptance'];
+  await fs.writeFile(skill, 'fixture skill');
+  environment(t, { YAHAHA_PRODUCTION_SKILL: skill, CODEX_MAX_ATTEMPTS: '1', CODEX_RETRY_DELAY_MS: '1' });
+  const checkpoints = [];
+  const step = async name => {
+    if (name.startsWith('production-orchestrator')) {
+      await fs.mkdir(path.dirname(packageFile), { recursive: true });
+      await fs.writeFile(path.join(project, 'Game.uproject'), '{}');
+      await fs.writeFile(path.join(project, 'scene-preview.png'), 'preview');
+      await fs.writeFile(packageFile, 'game');
+      await fs.mkdir(path.join(project, 'provenance'), { recursive: true });
+      await fs.mkdir(path.join(project, 'plan'), { recursive: true });
+      await fs.mkdir(path.join(project, 'acceptance'), { recursive: true });
+      await fs.writeFile(path.join(project, 'workspace-manifest.json'), '{}');
+      await fs.writeFile(path.join(project, 'provenance', 'asset-manifest.json'), '{}');
+      await fs.writeFile(path.join(project, 'plan', 'stage-manifest.json'), JSON.stringify({ stages: stages.map(id => ({ id, status: 'ACCEPTED' })) }));
+      await fs.writeFile(path.join(project, 'acceptance', 'playtest-evidence.json'), '{}');
+      await fs.writeFile(path.join(project, 'acceptance', 'acceptance-report.json'), JSON.stringify({ protocol: 1, passed: false, criteria: [{ status: 'FAIL' }] }));
+      for (const stage of stages) {
+        const directory = path.join(project, 'stages', stage);
+        await fs.mkdir(directory, { recursive: true });
+        await fs.writeFile(path.join(directory, 'stage-report.json'), JSON.stringify({ status: 'ACCEPTED' }));
+        await fs.writeFile(path.join(directory, 'evidence.json'), JSON.stringify({ criteria: [{ status: 'PASS' }] }));
+      }
+    }
+    return { exitCode: 0, timedOut: false, error: null, stderr: '', stdout: '', stopConfirmed: true };
+  };
+  await assert.rejects(runProductionHarness({
+    job: { taskId: 'task', runId: 'run', workspaceId: 'workspace', objective: 'fixture' }, project, output,
+    signal: new AbortController().signal, step, unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {},
+    onIterationPackage: async value => checkpoints.push(value),
+  }), /Acceptance report does not prove|retry budget exhausted/);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].attempt, 1);
+  assert.equal(checkpoints[0].packageFile, packageFile);
 });
 
 async function fixture(t) {
@@ -115,7 +170,9 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   const root = await fixture(t), { entrypoint, wrapper } = await fakeCli(root);
   environment(t, { CODEX_CMD: process.platform === 'win32' ? wrapper : entrypoint, CODEX_MAX_ATTEMPTS: '1', CODEX_TIMEOUT_MS: '10000' });
   const job = { taskId: 'fixture-task', workspaceId: `workspace ${chinese}`, runId: 'run with spaces', objective };
-  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  const uploads = [];
+  const result = await executeJob(job, { root, signal: new AbortController().signal,
+    uploadFile: async (name, file, contentType, options) => { uploads.push({ name, options }); return name; } });
   // The fixture only checks transport; it deliberately supplies no game deliverables.
   assert.equal(result.status, 'FAIL');
   assert.match(result.reason, /Production deliverables missing/);
@@ -131,6 +188,10 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   assert.equal(received.args.some(arg => arg.includes(objective)), false);
   assert.equal(await fs.readFile(path.join(output, 'codex-production-session-1.txt'), 'utf8'), received.input);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')), received);
+  assert.deepEqual(uploads.find(item => item.name === 'iteration-monitor-1.json')?.options, { timeoutMs: 10000 });
+  const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
+  assert.equal(report.iterationReviews[0].action, 'stop');
+  assert.ok(result.artifactIds.includes('iteration-monitor-1.json'));
 });
 
 test('production Codex attempts use an isolated temporary directory', async t => {
@@ -147,18 +208,31 @@ test('production Codex attempts use an isolated temporary directory', async t =>
   assert.notEqual(record.temp, process.env.TEMP);
 });
 
-test('Codex temporary-directory cleanup failure does not enter unlimited production retries', async t => {
+test('service failures with cleanup warnings use bounded retries and publish the actual cause', async t => {
   const root = await fixture(t), { entrypoint } = await fakeCli(root, {
     exitCode: 1,
-    stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)',
+    stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)\nHTTP 503 Service Unavailable',
+    recordEnvironment: true,
   });
-  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000' });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000',
+    ITERATION_SAME_FAILURE_LIMIT: '3', ITERATION_FAILURE_LIMIT: '8' });
   const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
   const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
   assert.equal(result.status, 'FAIL');
-  assert.match(result.reason, /temporary-directory cleanup failed/i);
+  assert.match(result.reason, /Iteration monitor stopped at iteration 3/);
+  assert.match(result.reason, /503 Service Unavailable/);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
-  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 1);
+  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 3);
+  const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
+  assert.deepEqual(report.iterationReviews.map(review => [review.category, review.action, review.aiInvoked]),
+    [['service', 'retry', false], ['service', 'retry', false], ['service', 'stop', false]]);
+  const temps = new Set();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const record = JSON.parse(await fs.readFile(path.join(output, `production-orchestrator-${attempt}.stdout.jsonl`), 'utf8'));
+    temps.add(record.temp);
+    await assert.rejects(fs.stat(record.temp), { code: 'ENOENT' });
+  }
+  assert.equal(temps.size, 3);
 });
 
 test('telemetry includes the newest workspace files beyond the first directory entries', async t => {

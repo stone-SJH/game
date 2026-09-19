@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { classifyIterationFailure, createIterationMonitor } from './iteration-monitor.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -26,7 +27,7 @@ async function filesUnder(directory) {
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (!['.git', 'DerivedDataCache', 'Intermediate'].includes(entry.name)) pending.push(full);
+        if (!['.git', 'DerivedDataCache', 'Intermediate', 'history'].includes(entry.name)) pending.push(full);
       } else if (entry.isFile()) files.push(full);
     }
   }
@@ -116,12 +117,6 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
-export function isCodexTempCleanupFailure(result) {
-  return /failed to clean up stale arg0 temp dirs|os error 145/i.test([
-    result?.error, result?.stderr, result?.stdout,
-  ].filter(Boolean).join('\n'));
-}
-
 async function createCodexTempDirectory() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'yahahagame-codex-'));
 }
@@ -131,7 +126,7 @@ async function removeCodexTempDirectory(directory) {
   await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
 }
 
-export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {} }) {
+export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
   const context = {
@@ -163,6 +158,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
   const maxAttempts = Number(process.env.CODEX_MAX_ATTEMPTS || 0);
   const retryDelayMs = Number(process.env.CODEX_RETRY_DELAY_MS || 10000);
   const invocation = codexInvocation([]);
+  const review = createIterationMonitor({ job, project, output, signal, step, invocation, reportProgress, onReview: onIterationReview });
+  let feedback = null;
   let attempt = 0;
   while (true) {
     attempt++;
@@ -176,10 +173,19 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Before finishing, ensure these exact deliverables exist: one .uproject, scene-preview.png (or .jpg/.webp), a packaged playable .exe, workspace-manifest.json, provenance/asset-manifest.json, plan/stage-manifest.json, stage-report.json and evidence.json for every planned stage, acceptance/playtest-evidence.json, and acceptance/acceptance-report.json with passing gameplay evidence. Keep all paths relative to the workspace.',
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
+      ...(feedback ? [
+        'The previous iteration failed. Repair this specific failure before doing any additional production work. Preserve working assets and gameplay; do not add a new feature just because this is another iteration.',
+        `Monitor decision: ${feedback.action}. Failure stage: ${feedback.stage}.`,
+        `Diagnosis: ${feedback.reason}`,
+        `Repair instructions: ${feedback.repairInstructions}`,
+        `Diagnostics: ${JSON.stringify(feedback.diagnostics)}`,
+        'The full decision is in plan/iteration-feedback.json. Do not edit it or change acceptance rules to hide the failure.',
+      ] : []),
     ].join('\n');
     await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt, iterationTotal: maxAttempts || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     let codexTemp;
+    let stage = 'production-orchestrator';
     try {
       codexTemp = await createCodexTempDirectory();
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
@@ -192,46 +198,63 @@ export async function runProductionHarness({ job, project, output, signal, step,
       }
       if (await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) throw Object.assign(new Error('Production marked as impossible by the worker.'), { hardFailure: true });
 
+      stage = 'deliverables';
       const deliverables = await inspectProduction(project);
       if (deliverables.missing.length) throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}.`);
-      await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
+      stage = 'unreal-project-validation';
+      try {
+        await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
+          result => !result.error && result.exitCode === 0 && !result.timedOut);
+      } catch (error) {
+        if (signal.aborted || classifyIterationFailure(error, stage).action !== 'replace-validator') throw error;
+        const decision = await review({ attempt, stage, error });
+        if (decision.action === 'stop') throw Object.assign(new Error(decision.reason), { hardFailure: true, reviewed: true });
+        // Only an obsolete Help invocation can take this recovery path, once per iteration.
+        stage = 'unreal-project-validation-repair';
+        await step(`unreal-project-validation-repair-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
+          result => !result.error && result.exitCode === 0 && !result.timedOut);
+      }
+      stage = 'packaged-game-playtest';
+      await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
         result => !result.error && result.exitCode === 0 && !result.timedOut);
+      stage = 'package-publication';
+      await onIterationPackage({ attempt, project, packageRoot: path.dirname(deliverables.files.packageFile), packageFile: deliverables.files.packageFile });
+      stage = 'acceptance-report';
       let acceptance;
       try { acceptance = JSON.parse(await fs.readFile(deliverables.files.acceptanceReport, 'utf8')); } catch (error) { throw new Error(`Invalid acceptance report: ${error.message}`); }
       const criteria = acceptance.criteria || acceptance.acceptanceCriteria;
       if (acceptance.protocol !== 1 || !(acceptance.passed === true || acceptance.accepted === true || acceptance.status === 'PASS') || !Array.isArray(criteria) || !criteria.length || criteria.some(item => item.status !== 'PASS')) {
         throw new Error('Acceptance report does not prove a passing packaged game.');
       }
+      stage = 'stage-manifest';
       let stageManifest;
       try { stageManifest = JSON.parse(await fs.readFile(deliverables.files.stageManifest, 'utf8')); } catch (error) { throw new Error(`Invalid stage manifest: ${error.message}`); }
       if (!Array.isArray(stageManifest.stages) || stageManifest.stages.length !== STAGES.length || stageManifest.stages.some(stage => stage.status !== 'ACCEPTED')) {
         throw new Error('Stage manifest does not show every production stage as ACCEPTED.');
       }
-      for (const stage of STAGES) {
-        const reportPath = deliverables.files[`${stage}-report`];
-        const evidencePath = deliverables.files[`${stage}-evidence`];
+      for (const stageId of STAGES) {
+        stage = `stage-evidence:${stageId}`;
+        const reportPath = deliverables.files[`${stageId}-report`];
+        const evidencePath = deliverables.files[`${stageId}-evidence`];
         let report, evidence;
-        try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); evidence = JSON.parse(await fs.readFile(evidencePath, 'utf8')); } catch (error) { throw new Error(`Invalid ${stage} handoff: ${error.message}`); }
+        try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); evidence = JSON.parse(await fs.readFile(evidencePath, 'utf8')); } catch (error) { throw new Error(`Invalid ${stageId} handoff: ${error.message}`); }
         if (!['ACCEPTED', 'PASS'].includes(report.status) || (Array.isArray(evidence.criteria) && evidence.criteria.some(item => item.status !== 'PASS'))) {
-          throw new Error(`Stage ${stage} does not contain passing evidence.`);
+          throw new Error(`Stage ${stageId} does not contain passing evidence.`);
         }
       }
-      await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
-        result => !result.error && result.exitCode === 0 && !result.timedOut);
+      await review({ attempt, stage: 'complete' });
       return deliverables;
     } catch (error) {
       await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {
         attempt, failedAt: new Date().toISOString(), error: error.message,
-        exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
+        stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
       });
-      if (isCodexTempCleanupFailure(error.result)) {
-        throw Object.assign(new Error(`Codex CLI temporary-directory cleanup failed.\n${commandDiagnostic(error.result)}`), {
-          hardFailure: true, toolingFailure: true, result: error.result,
-        });
-      }
-      if (signal.aborted || error.stopConfirmed === false || error.hardFailure || error.result?.timedOut || error.result?.error || error.result?.exitCode === 2) throw error;
-      if (maxAttempts > 0 && attempt >= maxAttempts) throw new Error(`Production retry budget exhausted after ${attempt} iterations: ${error.message}`);
-      await delay(retryDelayMs, undefined, { signal });
+      if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || error.reviewed) throw error;
+      feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });
+      if (feedback.action === 'stop') throw new Error(`Iteration monitor stopped at iteration ${attempt}: ${feedback.reason}`);
+      const waitMs = feedback.category === 'service' ? Math.min(300000, retryDelayMs * 2 ** Math.min(feedback.occurrences - 1, 5)) : retryDelayMs;
+      await reportProgress({ phase: 'retrying', step: `Retry after iteration ${attempt} (${Math.ceil(waitMs / 1000)}s)`, error: feedback.reason });
+      await delay(waitMs, undefined, { signal });
     } finally {
       await removeCodexTempDirectory(codexTemp);
     }

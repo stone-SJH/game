@@ -1,9 +1,10 @@
 const $ = id => document.getElementById(id);
-let session, registering = false, selected, cursor, stream, poll, generation = 0;
+let session, registering = false, selected, cursor, stream, poll, refreshTimer, refreshInFlight = false, refreshAgain = false, refreshNeedsList = false, generation = 0;
 let items = [];
+let previewObserver;
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 function signedOut() {
-  generation++; session = null; stream?.close(); clearInterval(poll); items = []; selected = null;
+  generation++; session = null; stream?.close(); clearInterval(poll); clearTimeout(refreshTimer); refreshTimer = null; refreshInFlight = false; refreshAgain = false; refreshNeedsList = false; previewObserver?.disconnect(); items = []; selected = null;
   $('auth').hidden = false; $('workspace').hidden = true; $('account').hidden = true;
   $('task-list').replaceChildren(); $('detail').replaceChildren(); $('create-dialog').close(); $('followup-dialog').close();
 }
@@ -17,9 +18,30 @@ function node(tag, text, className) { const el = document.createElement(tag); if
 function status(value) { return node('span', value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
 function date(value) { return new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
 function dateOrDash(value) { return value ? date(value) : 'No update yet'; }
+function lazyPreview(url, alt) {
+  const image = node('img'); image.alt = alt; image.loading = 'lazy'; image.decoding = 'async'; image.fetchPriority = 'low'; image.dataset.src = url;
+  if ('IntersectionObserver' in window) {
+    previewObserver ||= new IntersectionObserver(entries => entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      const target = entry.target; target.src = target.dataset.src; target.removeAttribute('data-src'); previewObserver.unobserve(target);
+    }), { rootMargin: '240px' });
+    previewObserver.observe(image);
+  } else image.src = url;
+  return image;
+}
+function releaseLazyPreviews(root) {
+  root?.querySelectorAll('img[data-src]').forEach(image => previewObserver?.unobserve(image));
+}
 function progressPercent(progress) {
-  const completed = progress?.steps?.completed, total = progress?.steps?.total;
-  return Number.isInteger(completed) && Number.isInteger(total) && total > 0 ? Math.max(0, Math.min(100, Math.round(completed / total * 100))) : null;
+  const serverPercent = Number(progress?.percent);
+  if (Number.isFinite(serverPercent)) return Math.max(0, Math.min(100, Math.round(serverPercent)));
+  const phase = String(progress?.phase || '').toLowerCase(), currentStatus = String(progress?.status || '').toLowerCase();
+  const completed = Number(progress?.steps?.completed), total = Number(progress?.steps?.total);
+  const stepPercent = Number.isFinite(completed) && Number.isFinite(total) && total > 0 ? Math.round(Math.max(0, Math.min(1, completed / total)) * 100) : 0;
+  const phasePercent = { preparing: 5, planning: 15, thinking: 30, crafting: 50, building: 70, evaluating: 90, completed: 100, failed: 95, canceled: 95 }[phase] || 0;
+  const iteration = Number(progress?.iteration), iterationTotal = Number(progress?.iterationTotal);
+  if (Number.isFinite(iteration) && Number.isFinite(iterationTotal) && iterationTotal > 0) return Math.max(phasePercent, Math.round(Math.max(0, Math.min(1, (iteration - 1 + stepPercent / 100) / iterationTotal)) * 100), currentStatus === 'running' ? 1 : 0);
+  return Math.max(stepPercent, phasePercent, currentStatus === 'running' ? 1 : 0);
 }
 function fileList(title, entries, emptyText = 'No files reported yet') {
   const section = node('section', undefined, 'telemetry-files');
@@ -66,12 +88,15 @@ function progressPanel(task) {
   const screenshots = node('section', undefined, 'telemetry-files'); screenshots.append(node('h4', 'Recent screenshots'));
   if (!progress.screenshots?.length) screenshots.append(node('div', 'No screenshots reported yet', 'empty'));
   else {
-    const list = node('ul');
+    const list = node('div', undefined, 'screenshot-grid');
     for (const entry of progress.screenshots) {
-      const row = node('li');
-      if (entry.downloadUrl) { const link = node('a', entry.name || entry.path); link.href = entry.downloadUrl; link.target = '_blank'; link.rel = 'noopener'; row.append(link); }
-      else row.append(node('strong', entry.name || entry.path));
-      row.append(node('small', `${entry.path || ''}${entry.updatedAt ? ` · ${date(entry.updatedAt)}` : ''}`)); list.append(row);
+      const row = node('figure', undefined, 'screenshot-card');
+      if (entry.previewUrl && entry.downloadUrl) {
+        const link = node('a'); link.href = entry.downloadUrl; link.target = '_blank'; link.rel = 'noopener'; link.append(lazyPreview(entry.previewUrl, entry.name || entry.path)); row.append(link);
+      } else if (entry.downloadUrl) {
+        const link = node('a', entry.name || entry.path); link.href = entry.downloadUrl; link.target = '_blank'; link.rel = 'noopener'; row.append(link);
+      } else row.append(node('strong', entry.name || entry.path));
+      row.append(node('figcaption', `${entry.name || entry.path || 'Unnamed image'}${entry.updatedAt ? ` · ${date(entry.updatedAt)}` : ''}`)); list.append(row);
     }
     screenshots.append(list);
   }
@@ -83,18 +108,86 @@ function progressPanel(task) {
   }
   return panel;
 }
-function runHistory(task) {
-  if (!task.runs?.length) return node('div');
-  const section = node('section', undefined, 'run-history'); section.append(node('h3', 'Runs'));
+function iterationSummaryPanel(task) {
+  const section = node('section', undefined, 'iteration-summaries'); section.append(node('h3', 'Iteration summaries'));
+  const summaries = Array.isArray(task.iterationSummaries) ? task.iterationSummaries : [];
+  if (!summaries.length) { section.append(node('div', 'No completed iteration summary yet', 'empty')); return section; }
   const list = node('ol');
-  for (const run of task.runs) {
-    const row = node('li');
-    const title = node('strong', `${run.status.replaceAll('_', ' ')} · ${date(run.createdAt)}`);
-    row.append(title);
-    if (run.followUpPrompt) row.append(node('p', run.followUpPrompt));
+  for (const [index, summary] of summaries.entries()) {
+    const row = node('li', undefined, `iteration-summary ${String(summary.status || '').toLowerCase()}`);
+    const heading = node('div', undefined, 'iteration-summary-heading');
+    heading.append(node('strong', summary.iteration === null ? `Run ${index + 1}` : `Iteration ${summary.iteration}`), status(summary.status || 'RUNNING'));
+    row.append(heading);
+    if (summary.step) row.append(node('div', `Stage: ${summary.step}`, 'iteration-summary-step'));
+    const goal = node('div', undefined, 'iteration-summary-goal'); goal.append(node('dt', 'Goal'), node('dd', summary.goal || task.objective));
+    const result = node('div', undefined, 'iteration-summary-result'); result.append(node('dt', 'Result'), node('dd', summary.summary || 'No result summary yet.'));
+    row.append(goal, result);
+    const failures = Array.isArray(summary.failureReasons) ? summary.failureReasons : [];
+    if (failures.length) {
+      const diagnostics = node('ul', undefined, 'iteration-diagnostics');
+      for (const failure of failures) {
+        const item = node('li');
+        const facts = [failure.category, failure.stage, failure.attempt ? `attempt ${failure.attempt}` : '', Number.isInteger(failure.exitCode) ? `exit ${failure.exitCode}` : '', failure.timedOut ? 'timed out' : ''].filter(Boolean);
+        item.append(node('strong', facts.join(' · ') || 'Failure diagnostic'), node('p', failure.message || 'No diagnostic message.'));
+        if (failure.command) item.append(node('div', `Command: ${failure.command}`, 'iteration-summary-step'));
+        if (failure.completedSteps?.length) item.append(node('div', `Completed before failure: ${failure.completedSteps.join(', ')}`, 'iteration-summary-step'));
+        if (failure.noOutput) item.append(node('div', 'No process output was captured; inspect the recorded stage logs and exit code.', 'iteration-summary-warning'));
+        if (failure.logFiles?.length) item.append(node('div', `Logs: ${failure.logFiles.join(', ')}`, 'iteration-summary-step'));
+        if (failure.stderr || failure.stdout) {
+          const output = document.createElement('details'); output.append(node('summary', 'Process output'));
+          if (failure.stderr) output.append(node('pre', `stderr\n${failure.stderr}`));
+          if (failure.stdout) output.append(node('pre', `stdout\n${failure.stdout}`));
+          item.append(output);
+        }
+        diagnostics.append(item);
+      }
+      row.append(diagnostics);
+    } else if (summary.diagnosticMissing) row.append(node('div', 'Worker did not report a failure diagnostic for this retry.', 'iteration-summary-warning'));
+    if (summary.diagnosticArtifactId) {
+      const link = node('a', 'Download full failure report'); link.href = `/artifacts/${encodeURIComponent(summary.diagnosticArtifactId)}`; link.target = '_blank'; link.rel = 'noopener'; link.className = 'iteration-diagnostic-download'; row.append(link);
+    }
+    if (summary.updatedAt) row.append(node('time', date(summary.updatedAt)));
     list.append(row);
   }
   section.append(list); return section;
+}
+function artifactPanel(task, taskId) {
+  const section = node('section', undefined, 'artifact-panel'), heading = node('div', undefined, 'artifact-heading');
+  heading.append(node('h3', 'Artifacts'));
+  const count = Number(task.artifactCount || 0), bytes = Number(task.artifactBytes || 0);
+  const summary = node('small', count ? `${task.artifacts.length} of ${count} · ${bytes.toLocaleString()} bytes` : 'No artifacts yet'); heading.append(summary); section.append(heading);
+  const grid = node('div', undefined, 'artifacts');
+  const append = artifact => {
+    const figure = node('figure', undefined, 'artifact');
+    if (artifact.content_type?.startsWith('image/')) {
+      if (artifact.previewUrl) {
+        const imageLink = node('a'); imageLink.href = artifact.downloadUrl; imageLink.target = '_blank'; imageLink.rel = 'noopener'; imageLink.append(lazyPreview(artifact.previewUrl, artifact.name)); figure.append(imageLink);
+      } else figure.append(node('div', 'Open image to load', 'artifact-placeholder'));
+    }
+    const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl;
+    const packageFile = /\.(?:zip|7z|tar(?:\.gz)?|exe)$/i.test(artifact.name);
+    if (artifact.content_type?.startsWith('image/')) { link.target = '_blank'; link.rel = 'noopener'; }
+    else { link.download = artifact.name; caption.append(node('span', packageFile ? 'Playable package / download' : 'Download', 'artifact-kind')); }
+    caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`), node('small', `SHA-256 ${artifact.sha256}`)); figure.append(caption); grid.append(figure);
+  };
+  if (!task.artifacts.length) grid.append(node('div', 'No artifacts yet', 'empty'));
+  else task.artifacts.forEach(append);
+  section.append(grid);
+  let nextCursor = task.artifactsNextCursor;
+  if (nextCursor) {
+    const more = node('button', 'Load more artifacts'); more.className = 'artifact-more';
+    more.onclick = async () => {
+      more.disabled = true;
+      try {
+        const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}`);
+        if (selected !== taskId) return;
+        page.artifacts.forEach(append); nextCursor = page.nextCursor; more.hidden = !nextCursor;
+        summary.textContent = `${grid.querySelectorAll('.artifact').length} of ${Number(page.count).toLocaleString()} · ${Number(page.bytes).toLocaleString()} bytes`;
+      } catch (error) { notice(error.message); } finally { more.disabled = false; }
+    };
+    section.append(more);
+  }
+  return section;
 }
 function renderList() {
   const list = $('task-list'); list.replaceChildren();
@@ -122,7 +215,21 @@ async function refreshDetail() {
   const target = selected, epoch = generation;
   const task = await api(`/v1/tasks/${target}`);
   if (epoch !== generation || target !== selected) return;
-  const pane = $('detail'); pane.replaceChildren();
+  const pane = $('detail');
+  const summarySignature = (task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|');
+  const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
+  if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
+    const progress = pane.querySelector('.worker-progress');
+    releaseLazyPreviews(progress); progress?.replaceWith(progressPanel(task));
+    if (pane.dataset.summarySignature !== summarySignature) pane.querySelector('.iteration-summaries')?.replaceWith(iterationSummaryPanel(task));
+    if (pane.dataset.artifactSignature !== artifactSignature) {
+      const artifacts = pane.querySelector('.artifact-panel'); releaseLazyPreviews(artifacts); artifacts?.replaceWith(artifactPanel(task, target));
+    }
+    pane.dataset.summarySignature = summarySignature; pane.dataset.artifactSignature = artifactSignature;
+    return task;
+  }
+  previewObserver?.disconnect(); pane.replaceChildren(); pane.dataset.taskId = target; pane.dataset.status = task.status;
+  pane.dataset.summarySignature = summarySignature; pane.dataset.artifactSignature = artifactSignature;
   const top = node('div', undefined, 'detail-top'); top.append(status(task.status));
   if (task.allowedActions.includes('cancel')) {
     const cancel = node('button', 'Cancel task'); cancel.onclick = async () => {
@@ -140,29 +247,40 @@ async function refreshDetail() {
   for (const [label, value] of [['Worker',task.workerId || 'Waiting for assigned worker'], ['Created',date(task.createdAt)], ['Workspace',task.workspaceId || 'Unassigned'], ['Run request',task.currentPrompt || 'Initial task'], ['Task',task.taskId]]) {
     const group = node('div'); group.append(node('dt',label),node('dd',value)); details.append(group);
   }
-  pane.append(details, progressPanel(task), runHistory(task), node('h3','Activity'));
-  const activity = node('ol', undefined, 'activity');
-  for (const event of task.events.slice(-12)) {
-    const row = node('li'); row.append(node('time',new Date(event.created_at).toLocaleTimeString()),node('span',event.event_type.replaceAll('_',' '))); activity.append(row);
-  }
-  pane.append(activity,node('h3','Artifacts'));
-  if (!task.artifacts.length) pane.append(node('div','No artifacts yet','empty'));
-  const artifacts = node('div',undefined,'artifacts');
-  for (const artifact of task.artifacts) {
-    const figure = node('figure',undefined,'artifact');
-    if (['image/png','image/jpeg','image/webp'].includes(artifact.content_type)) { const img = node('img'); img.src=artifact.downloadUrl; img.alt=artifact.name; img.loading='lazy'; figure.append(img); }
-    const caption=node('figcaption'), link=node('a',artifact.name); link.href=artifact.downloadUrl; link.target='_blank'; link.rel='noopener';
-    caption.append(link,node('small',`${Number(artifact.size_bytes).toLocaleString()} bytes`),node('small',`SHA-256 ${artifact.sha256}`)); figure.append(caption); artifacts.append(figure);
-  }
-  pane.append(artifacts);
+  pane.append(details, progressPanel(task), iterationSummaryPanel(task), artifactPanel(task, target));
   if (task.result) { pane.append(node('h3','Result'),node('pre',JSON.stringify(task.result,null,2),'result')); }
   return task;
 }
+function scheduleMonitorRefresh(includeList = false, delay = 250) {
+  if (!session || !selected) return;
+  refreshNeedsList ||= includeList;
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null;
+    if (refreshInFlight) { refreshAgain = true; return; }
+    refreshInFlight = true;
+    const shouldLoadList = refreshNeedsList; refreshNeedsList = false;
+    try {
+      if (shouldLoadList) await loadTasks();
+      await refreshDetail();
+    } catch (error) { notice(error.message); }
+    finally {
+      refreshInFlight = false;
+      if (refreshAgain) { refreshAgain = false; scheduleMonitorRefresh(refreshNeedsList, 500); }
+    }
+  }, delay);
+}
 async function selectTask(taskId) {
-  selected=taskId; location.hash=taskId; stream?.close(); renderList(); const task=await refreshDetail();
+  selected=taskId; location.hash=taskId; stream?.close(); clearTimeout(refreshTimer); refreshTimer = null; refreshNeedsList = false; refreshAgain = false; renderList(); const task=await refreshDetail();
   if (!session || selected!==taskId) return;
   stream=new EventSource(`/v1/tasks/${taskId}/events?after=${task.eventCursor}`);
-  stream.onmessage=()=>refreshDetail().catch(error=>notice(error.message));
+  stream.onmessage=event=>{
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    const eventType = payload.event_type || '';
+    const progressEvent = eventType === 'WORKER_PROGRESS';
+    scheduleMonitorRefresh(!progressEvent, progressEvent ? 3000 : 0);
+  };
 }
 async function signedIn(value) {
   generation++; session=value; notice(); $('auth').hidden=true; $('workspace').hidden=false; $('account').hidden=false; $('username').textContent=value.user.username;
@@ -172,7 +290,7 @@ async function signedIn(value) {
   if (/^task-[a-zA-Z0-9-]+$/.test(requested) && requested!==selected) {
     try { await selectTask(requested); } catch { if(items[0])await selectTask(items[0].task_id); }
   }
-  clearInterval(poll); poll=setInterval(()=>{ loadTasks().then(refreshDetail).catch(error=>notice(error.message)); },5000);
+  clearInterval(poll); poll=setInterval(()=>scheduleMonitorRefresh(true),60000);
 }
 function mode(register) {
   registering=register; $('invite-field').hidden=!register; $('invite').required=register;

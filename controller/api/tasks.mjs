@@ -1,9 +1,16 @@
 import { digest, id, problem, transaction } from './database.mjs';
 
 export const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED']);
+const ARTIFACT_PAGE_SIZE = 5;
+const artifactPageCache = new Map();
+const ARTIFACT_CACHE_TTL = 30_000;
+const ARTIFACT_CACHE_MAX = 128;
 const phases = new Set(['preparing', 'planning', 'thinking', 'crafting', 'building', 'evaluating', 'completed', 'failed', 'canceled', 'working']);
 const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-const integer = (value, max = 9999) => Number.isInteger(value) ? Math.max(0, Math.min(max, value)) : null;
+const integer = (value, max = 9999) => {
+  const number = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isInteger(number) ? Math.max(0, Math.min(max, number)) : null;
+};
 function files(value, limit = 30) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, limit).flatMap(item => {
@@ -15,6 +22,65 @@ function files(value, limit = 30) {
     return [{ name: name || relativePath.split(/[\\/]/).pop(), path: relativePath || name, size: integer(item.size, 2 ** 31), updatedAt, ...(artifactId ? { artifactId } : {}) }];
   });
 }
+function diagnosticCategory(stage, message, stderr, stdout) {
+  const output = `${message}\n${stderr}\n${stdout}`;
+  if (/timed out|timeout/i.test(message)) return 'timeout';
+  if (/stale\s+arg0|error\s*145|directory\s+not\s+empty|(?:temporary|temp)\s+director(?:y|ies).*(?:clean|remov)|clean(?:ing|up).*(?:temporary|temp)/i.test(output)) return 'workspace-cleanup';
+  if (/no diagnostic output/i.test(message) && !stderr && !stdout) return 'missing-output';
+  if (/^unreal-project-validation-/i.test(stage)) return 'unreal-validation';
+  if (/^production-orchestrator-/i.test(stage)) return 'orchestration';
+  if (/^packaged-game-playtest-/i.test(stage)) return 'packaged-playtest';
+  return 'worker-step';
+}
+
+function parseDiagnosticText(value) {
+  let message = text(value, 6000);
+  if (!message) return {};
+  const categoryMatch = message.match(/^\[([a-z][a-z0-9-]{1,79})\]\s*/i);
+  const category = categoryMatch?.[1]?.toLowerCase();
+  if (categoryMatch) message = message.slice(categoryMatch[0].length).trim();
+  const stageMatch = message.match(/^([a-z][a-z0-9-]*(?:-\d+)?)[ \t]+failed\s*\(exit\s+(-?\d+)\):\s*/i);
+  const stage = stageMatch?.[1];
+  const exitCode = stageMatch ? Number(stageMatch[2]) : null;
+  if (stageMatch) message = message.slice(stageMatch[0].length).trim();
+  const stderrMatch = message.match(/(?:^|\n)stderr:\s*\n([\s\S]*?)(?=\nstdout:\s*\n|$)/i);
+  const stdoutMatch = message.match(/(?:^|\n)stdout:\s*\n([\s\S]*)$/i);
+  return { message: message || text(value, 6000), category, stage, exitCode,
+    stderr: stderrMatch?.[1]?.trim(), stdout: stdoutMatch?.[1]?.trim() };
+}
+
+function diagnostic(value, context = {}) {
+  if (!value) return null;
+  const parsed = typeof value === 'string' ? parseDiagnosticText(value) : {};
+  const source = { ...context, ...parsed, ...(typeof value === 'string' ? { message: parsed.message } : value) };
+  if (!source || typeof source !== 'object') return null;
+  const stderr = text(source.stderr, 2400), stdout = text(source.stdout, 2400);
+  const message = text(source.message || source.error || stderr || stdout, 2000);
+  const stage = text(source.stage || source.step, 180);
+  if (!message && !stage && !stderr && !stdout) return null;
+  const reportedCategory = text(source.category, 80);
+  const inferredCategory = diagnosticCategory(stage, message, stderr, stdout);
+  const category = reportedCategory && !['project-or-unknown', 'worker-step'].includes(reportedCategory) ? reportedCategory : inferredCategory;
+  const command = text(source.command, 240);
+  const logFiles = Array.isArray(source.logFiles) ? source.logFiles.flatMap(file => typeof file === 'string' ? [text(file, 240)] : []).slice(0, 4)
+    : stage ? [`${stage}.stdout.jsonl`, `${stage}.stderr.log`] : [];
+  const completedSteps = Array.isArray(source.completedSteps) ? source.completedSteps.flatMap(step => typeof step === 'string' ? [text(step, 180)] : []).slice(-12) : [];
+  const noOutput = source.noOutput === true || (/no diagnostic output/i.test(message) && !stderr && !stdout);
+  return {
+    message: message || 'The worker reported a failure without a message.',
+    ...(stage ? { stage } : {}),
+    ...(category ? { category } : {}),
+    ...(command ? { command } : {}),
+    ...(integer(source.attempt, 999) !== null ? { attempt: integer(source.attempt, 999) } : {}),
+    ...(Number.isInteger(source.exitCode) ? { exitCode: source.exitCode } : {}),
+    ...(source.timedOut === true ? { timedOut: true } : {}),
+    ...(noOutput ? { noOutput: true } : {}),
+    ...(stderr ? { stderr } : {}),
+    ...(stdout ? { stdout } : {}),
+    ...(logFiles.length ? { logFiles } : {}),
+    ...(completedSteps.length ? { completedSteps } : {}),
+  };
+}
 export function normalizeProgress(input, fallbackGoal = '') {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const phaseValue = text(input.phase, 40).toLowerCase();
@@ -22,6 +88,7 @@ export function normalizeProgress(input, fallbackGoal = '') {
   const tool = text(typeof input.tool === 'object' ? input.tool?.name : input.tool, 100);
   const command = text(typeof input.tool === 'object' ? input.tool?.command : input.command, 180);
   const prompt = text(typeof input.prompt === 'object' ? input.prompt?.text : input.prompt, 16000);
+  const failureDiagnostic = diagnostic(input.diagnostic || input.error, { stage: input.step, command });
   const observedAt = Number.isFinite(Date.parse(input.updatedAt)) ? new Date(input.updatedAt).toISOString() : null;
   const steps = input.steps && typeof input.steps === 'object' ? input.steps : input;
   const completed = integer(steps.completed ?? input.stepsCompleted);
@@ -29,7 +96,8 @@ export function normalizeProgress(input, fallbackGoal = '') {
   return {
     phase,
     status: text(input.status, 20).toLowerCase() || 'running',
-    error: text(input.error, 2000) || null,
+    error: text(input.error, 2000) || failureDiagnostic?.message || null,
+    diagnostic: failureDiagnostic,
     goal: text(input.goal || input.taskGoal || fallbackGoal, 4000),
     step: text(input.step || input.stepName, 180),
     tool: tool || null,
@@ -38,9 +106,9 @@ export function normalizeProgress(input, fallbackGoal = '') {
     iteration: integer(input.iteration, 999),
     iterationTotal: integer(input.iterationTotal, 999),
     prompt: prompt || null,
-    screenshots: files(input.screenshots, 20),
-    projectFiles: files(input.projectFiles, 30),
-    logFiles: files(input.logFiles, 30),
+    screenshots: files(input.screenshots, 2),
+    projectFiles: files(input.projectFiles, 4),
+    logFiles: files(input.logFiles, 4),
     observedAt,
     receivedAt: new Date().toISOString(),
   };
@@ -50,10 +118,126 @@ function progressSignature(value) {
   const { receivedAt, observedAt, ...stable } = value;
   return JSON.stringify(stable);
 }
-function progressForUser(value) {
+const phaseProgress = { preparing: 5, planning: 15, thinking: 30, crafting: 50, building: 70, evaluating: 90, completed: 100, failed: 95, canceled: 95, expired: 95 };
+function progressPercent(value, taskStatus = '') {
+  if (!value || typeof value !== 'object') return null;
+  const currentStatus = String(taskStatus || value.status || '').toLowerCase(), currentPhase = String(value.phase || '').toLowerCase();
+  if (currentStatus === 'completed' || currentPhase === 'completed') return 100;
+  const statusProgress = phaseProgress[currentStatus] || 0;
+  const completed = integer(value.steps?.completed ?? value.stepsCompleted, 9999);
+  const total = integer(value.steps?.total ?? value.stepsTotal, 9999);
+  const stepPercent = completed !== null && total > 0 ? Math.round(Math.max(0, Math.min(1, completed / total)) * 100) : null;
+  const iteration = integer(value.iteration, 999999), iterationTotal = integer(value.iterationTotal, 999999);
+  if (iteration !== null && iterationTotal > 0) {
+    const iterationPercent = Math.round(Math.max(0, Math.min(1, (iteration - 1 + (stepPercent ?? 0) / 100) / iterationTotal)) * 100);
+    return Math.max(iterationPercent, phaseProgress[currentPhase] || 0, statusProgress, currentStatus === 'running' ? 1 : 0);
+  }
+  return Math.max(stepPercent ?? 0, phaseProgress[currentPhase] || 0, statusProgress, currentStatus === 'running' ? 1 : 0);
+}
+function progressForUser(value, taskStatus = '') {
   if (!value || typeof value !== 'object') return value;
-  const screenshots = Array.isArray(value.screenshots) ? value.screenshots.map(item => item.artifactId ? { ...item, downloadUrl: `/artifacts/${encodeURIComponent(item.artifactId)}` } : item) : [];
-  return { ...value, screenshots };
+  const screenshots = Array.isArray(value.screenshots) ? value.screenshots.slice(0, 2).map(item => {
+    if (!item.artifactId) return item;
+    const downloadUrl = `/artifacts/${encodeURIComponent(item.artifactId)}`;
+    const previewUrl = /\.png$/i.test(item.name || item.path || '') ? `${downloadUrl}?preview=1` : null;
+    return { ...item, downloadUrl, ...(previewUrl ? { previewUrl } : {}) };
+  }) : [];
+  return { ...value, percent: progressPercent(value, taskStatus), screenshots };
+}
+function runSummary(item, taskStatus) {
+  if (item.resultSummary) return item.resultSummary;
+  const result = item.result && typeof item.result === 'object' ? item.result : {};
+  const report = result.report && typeof result.report === 'object' ? result.report : {};
+  if (report.failure || result.reason) return String(report.failure || result.reason).slice(0, 1000);
+  if (item.status === 'COMPLETED' || report.passed === true) return 'Completed and passed the required validation.';
+  if (item.status === 'CANCELED' || taskStatus === 'CANCELED') return 'Canceled before the iteration completed.';
+  if (item.status === 'EXPIRED' || taskStatus === 'EXPIRED') return 'The iteration deadline expired before completion.';
+  return `Iteration ended with status ${String(item.status || 'UNKNOWN').toLowerCase()}.`;
+}
+function iterationFailures(row) {
+  const failures = Array.isArray(row.failures) ? row.failures : [];
+  const result = [];
+  for (const item of failures) {
+    if (!item || typeof item !== 'object') continue;
+    const value = diagnostic(item.diagnostic || item);
+    if (!value || result.some(existing => JSON.stringify(existing) === JSON.stringify(value))) continue;
+    result.push(value);
+  }
+  return result;
+}
+function iterationSummaries(rows, task, runs, diagnosticArtifacts = {}) {
+  const report = task.result?.report && typeof task.result.report === 'object' ? task.result.report : {};
+  const reportDiagnostics = Array.isArray(report.failureDiagnostics) ? iterationFailures({ failures: report.failureDiagnostics.map(item => ({ diagnostic: item })) }) : [];
+  const reportHasFailure = task.status === 'FAILED' || reportDiagnostics.length > 0 || Boolean(report.failure);
+  const reportArtifactId = reportHasFailure ? text(report.failureDiagnosticsArtifactId, 120) || text(diagnosticArtifacts.report, 120) : '';
+  const grouped = rows.map(row => ({ progress: row.progress || {}, failures: row.failures || [], steps: Array.isArray(row.steps) ? row.steps : [], updatedAt: row.created_at }))
+    .filter(item => integer(item.progress.iteration, 999999) !== null)
+    .sort((a, b) => integer(a.progress.iteration, 999999) - integer(b.progress.iteration, 999999));
+  if (!grouped.length) return runs.filter(item => terminal.has(item.status) || terminal.has(item.jobStatus)).map(item => ({
+    iteration: null,
+    status: item.status,
+    goal: item.objective || task.objective,
+    summary: runSummary(item, task.status),
+    updatedAt: item.finishedAt || item.createdAt,
+    failureReasons: reportDiagnostics,
+    ...(reportArtifactId ? { diagnosticArtifactId: reportArtifactId } : {}),
+    diagnosticMissing: false,
+  }));
+  return grouped.map((item, index) => {
+    const progress = item.progress, iteration = integer(progress.iteration, 999999), next = grouped[index + 1];
+    const observedSteps = Array.isArray(item.steps) ? item.steps.filter(step => typeof step === 'string' && step && !step.startsWith('production iteration ')) : [];
+    const failures = iterationFailures(item).map(failure => failure.completedSteps?.length || !observedSteps.length || !failure.stage ? failure : { ...failure, completedSteps: observedSteps.filter(step => step !== failure.stage).slice(-12) });
+    const continued = Boolean(next);
+    const terminalStatus = continued ? (failures.length ? 'FAILED' : 'RETRIED') : task.status;
+    let summary = failures[0]?.message || progress.error || '';
+    if (!summary && continued) summary = `Iteration was retried before a passing result. No failure diagnostic was reported by the worker.`;
+    if (!summary && terminalStatus === 'COMPLETED') summary = 'Completed and passed the required validation.';
+    if (!summary && terminalStatus === 'EXPIRED') summary = 'The task deadline expired before completion.';
+    if (!summary && terminalStatus === 'CANCELED') summary = 'Canceled before the iteration completed.';
+    if (!summary && terminalStatus === 'FAILED') summary = 'The iteration failed validation.';
+    if (!summary) summary = `In progress: ${progress.step || progress.phase || 'working'}.`;
+    const iterationArtifactId = text(diagnosticArtifacts[iteration], 120) || reportArtifactId;
+    return { iteration, status: terminalStatus, goal: text(progress.goal || task.objective, 4000), summary: summary.slice(0, 1000), step: text(progress.step, 180), failureReasons: failures,
+      ...(iterationArtifactId && (failures.length || terminalStatus === 'FAILED') ? { diagnosticArtifactId: iterationArtifactId } : {}),
+      diagnosticMissing: continued && !failures.length, updatedAt: item.updatedAt, percent: progressPercent(progress) };
+  });
+}
+function artifactCursor(value) {
+  return Buffer.from(JSON.stringify([new Date(value.created_at).toISOString(), value.artifact_id])).toString('base64url');
+}
+function parseArtifactCursor(value) {
+  if (!value) return null;
+  let decoded;
+  try { decoded = JSON.parse(Buffer.from(value, 'base64url').toString()); } catch { throw problem(400, 'Invalid artifact cursor.'); }
+  if (!Array.isArray(decoded) || decoded.length !== 2 || !Number.isFinite(Date.parse(decoded[0])) || typeof decoded[1] !== 'string' || !decoded[1]) throw problem(400, 'Invalid artifact cursor.');
+  return decoded;
+}
+async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PAGE_SIZE } = {}) {
+  const pageSize = Math.max(1, Math.min(100, Number(limit) || ARTIFACT_PAGE_SIZE));
+  const cacheKey = `${taskId}:${pageSize}`;
+  if (!cursor) {
+    const cached = artifactPageCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+  }
+  const rows = (await client.query(`SELECT artifact_id,name,content_type,size_bytes,sha256,created_at
+    FROM artifacts WHERE task_id=$1 AND verified=true
+    AND ($2::timestamptz IS NULL OR (created_at,artifact_id)<($2::timestamptz,$3::text))
+    ORDER BY created_at DESC,artifact_id DESC LIMIT $4`, [taskId, cursor?.[0] || null, cursor?.[1] || null, pageSize + 1])).rows;
+  const hasMore = rows.length > pageSize, selected = rows.slice(0, pageSize), next = selected.at(-1);
+  const summary = (await client.query('SELECT count(*)::int AS count,coalesce(sum(size_bytes),0)::bigint AS bytes FROM artifacts WHERE task_id=$1 AND verified=true', [taskId])).rows[0];
+  const value = { artifacts: selected, nextCursor: hasMore ? artifactCursor(next) : null, count: summary.count, bytes: summary.bytes };
+  if (!cursor) {
+    while (artifactPageCache.size >= ARTIFACT_CACHE_MAX) artifactPageCache.delete(artifactPageCache.keys().next().value);
+    artifactPageCache.set(cacheKey, { expiresAt: Date.now() + ARTIFACT_CACHE_TTL, value });
+  }
+  return value;
+}
+export function invalidateArtifactCache(taskId) {
+  for (const key of artifactPageCache.keys()) if (key.startsWith(`${taskId}:`)) artifactPageCache.delete(key);
+}
+function artifactForUser(value) {
+  const image = ['image/png', 'image/jpeg', 'image/webp'].includes(value.content_type);
+  return { ...value, downloadUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}`, ...(image && value.content_type === 'image/png' ? { previewUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}?preview=1` } : {}) };
 }
 // A short database lock serializes pilot scheduling and state transitions across API processes.
 export const change = (db, fn) => transaction(db, async client => {
@@ -92,7 +276,7 @@ export async function taskView(db, taskId, userId) {
     const task = await ownedTask(client, taskId, userId);
     const workspace = (await client.query('SELECT * FROM workspaces WHERE task_id=$1', [taskId])).rows[0];
     const runs = (await client.query(`SELECT r.run_id,r.status,r.revision_id,r.created_at,r.finished_at,rev.input,
-        j.job_id,j.status AS job_status,j.objective,j.progress,j.lease_until,j.attempt,j.updated_at AS job_updated_at,
+        j.job_id,j.status AS job_status,j.objective,j.progress,j.result,j.lease_until,j.attempt,j.updated_at AS job_updated_at,
         w.status AS worker_status,w.capabilities,w.last_seen_at
       FROM task_runs r JOIN task_revisions rev ON rev.revision_id=r.revision_id
       LEFT JOIN jobs j ON j.run_id=r.run_id LEFT JOIN workers w ON w.worker_id=j.worker_id
@@ -100,19 +284,59 @@ export async function taskView(db, taskId, userId) {
     const run = runs[0];
     const job = (await client.query(`SELECT j.progress,j.lease_until,j.attempt,j.objective,j.updated_at AS job_updated_at,w.status AS worker_status,w.capabilities,w.last_seen_at
       FROM jobs j LEFT JOIN workers w ON w.worker_id=j.worker_id WHERE j.task_id=$1 ORDER BY j.created_at DESC LIMIT 1`, [taskId])).rows[0];
-    const events = (await client.query('SELECT event_id,event_type,payload,created_at FROM task_events WHERE task_id=$1 ORDER BY event_id DESC LIMIT 100', [taskId])).rows.reverse();
-    const artifacts = (await client.query('SELECT artifact_id,name,content_type,size_bytes,sha256,created_at FROM artifacts WHERE task_id=$1 AND verified=true ORDER BY created_at', [taskId])).rows;
-    const progress = job?.progress && Object.keys(job.progress).length ? progressForUser(job.progress) : null;
+    const events = (await client.query('SELECT event_id,event_type,created_at FROM task_events WHERE task_id=$1 ORDER BY event_id DESC LIMIT 50', [taskId])).rows.reverse();
+    const iterationRows = (await client.query(`WITH progress AS (
+        SELECT event_id,created_at,payload->'progress' AS progress,payload->'progress'->>'iteration' AS iteration
+        FROM task_events WHERE task_id=$1 AND event_type='WORKER_PROGRESS'
+          AND (payload->'progress'->>'iteration') ~ '^[0-9]+$'
+      ), latest AS (
+        SELECT DISTINCT ON (iteration) iteration,progress,created_at
+        FROM progress ORDER BY iteration,event_id DESC
+      ), failures AS (
+        SELECT iteration,jsonb_agg(DISTINCT CASE
+          WHEN jsonb_typeof(progress->'diagnostic') = 'object' THEN jsonb_build_object('diagnostic',progress->'diagnostic')
+          ELSE jsonb_build_object('diagnostic',jsonb_build_object('message',NULLIF(progress->>'error',''), 'stage',NULLIF(progress->>'step',''), 'command',NULLIF(progress->>'command','')))
+        END) FILTER (WHERE NULLIF(progress->>'error','') IS NOT NULL OR (progress ? 'diagnostic' AND progress->'diagnostic' <> 'null'::jsonb)) AS failures
+        FROM progress GROUP BY iteration
+      ), steps AS (
+        SELECT iteration,jsonb_agg(DISTINCT NULLIF(progress->>'step','')) FILTER (WHERE NULLIF(progress->>'step','') IS NOT NULL) AS steps
+        FROM progress GROUP BY iteration
+      )
+      SELECT latest.progress,latest.created_at,COALESCE(failures.failures,'[]'::jsonb) AS failures,COALESCE(steps.steps,'[]'::jsonb) AS steps
+      FROM latest LEFT JOIN failures USING (iteration) LEFT JOIN steps USING (iteration)
+      ORDER BY latest.iteration::int`, [taskId])).rows;
+    const artifactResult = await artifactPage(client, taskId);
+    const diagnosticArtifacts = {};
+    for (const artifact of (await client.query(`SELECT artifact_id,name FROM artifacts
+        WHERE task_id=$1 AND job_id=$2 AND verified=true
+          AND (name='production-report.json' OR name ~ '^iteration-monitor-[0-9]+(?:-validator)?\\.json$')
+        ORDER BY created_at DESC`, [taskId, run?.job_id || null])).rows) {
+      if (artifact.name === 'production-report.json') diagnosticArtifacts.report ||= artifact.artifact_id;
+      else {
+        const match = artifact.name.match(/^iteration-monitor-(\d+)(?:-validator)?\.json$/);
+        if (match) diagnosticArtifacts[Number(match[1])] ||= artifact.artifact_id;
+      }
+    }
+    const progress = job?.progress && Object.keys(job.progress).length ? progressForUser(job.progress, task.status) : null;
+    const runsForUser = runs.map(item => ({ runId: item.run_id, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
+      followUpPrompt: item.input?.followUpPrompt || null, createdAt: item.created_at, finishedAt: item.finished_at, resultSummary: runSummary(item, task.status) }));
     return { taskId, ownerId: userId, objective: task.objective, kind: task.kind, status: task.status, workerId: task.worker_id,
       workspaceId: workspace?.workspace_id, runId: run?.run_id, deadlineAt: task.deadline_at, createdAt: task.created_at,
       updatedAt: task.updated_at, result: task.result, currentPrompt: run?.input?.followUpPrompt || null, progress,
       worker: task.worker_id ? { workerId: task.worker_id, status: job?.worker_status || 'OFFLINE', capabilities: job?.capabilities || {}, lastSeenAt: job?.last_seen_at || null,
         leaseUntil: job?.lease_until || null, attempt: job?.attempt || 0, updatedAt: job?.job_updated_at || null } : null,
-      runs: runs.map(item => ({ runId: item.run_id, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
-        followUpPrompt: item.input?.followUpPrompt || null, createdAt: item.created_at, finishedAt: item.finished_at })),
+      runs: runsForUser, iterationSummaries: iterationSummaries(iterationRows, task, runsForUser, diagnosticArtifacts),
       events, eventCursor: events.at(-1)?.event_id || '0',
       allowedActions: terminal.has(task.status) ? ['rerun'] : task.status === 'CANCELING' ? [] : ['cancel'],
-      artifacts: artifacts.map(a => ({ ...a, downloadUrl: `/artifacts/${a.artifact_id}` })) };
+      artifacts: artifactResult.artifacts.map(artifactForUser), artifactCount: artifactResult.count, artifactBytes: artifactResult.bytes,
+      artifactsNextCursor: artifactResult.nextCursor };
+  });
+}
+export async function artifactView(db, taskId, userId, options = {}) {
+  return transaction(db, async client => {
+    await ownedTask(client, taskId, userId);
+    const result = await artifactPage(client, taskId, { cursor: parseArtifactCursor(options.cursor), limit: options.limit });
+    return { artifacts: result.artifacts.map(artifactForUser), count: result.count, bytes: result.bytes, nextCursor: result.nextCursor };
   });
 }
 export async function cancelTask(db, taskId, userId) {

@@ -127,11 +127,65 @@ test('worker telemetry is persisted and exposed with the task stream', async () 
   assert.deepEqual(view.progress.steps, { completed: 2, total: 5 });
   assert.equal(view.progress.tool, 'Blender');
   assert.equal(view.progress.goal, progress.goal);
+  assert.equal(view.progress.percent, 50);
+  assert.equal(view.iterationSummaries.length, 1);
+  assert.equal(view.iterationSummaries[0].goal, progress.goal);
   assert.equal(view.progress.screenshots[0].name, 'latest.png');
   assert.equal(view.worker.workerId, workerId);
   assert.equal(view.worker.status, 'ONLINE');
   assert.equal(view.events.at(-1).event_type, 'WORKER_PROGRESS');
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress } });
+});
+test('iteration retries retain worker failure diagnostics', async () => {
+  const task = await create(), job = await claim();
+  const failed = { phase: 'building', status: 'failed', goal: 'Validate the project', step: 'unreal-project-validation-1', iteration: 1, iterationTotal: 2,
+    error: 'unreal-project-validation-1 failed (exit 1): No diagnostic output.', diagnostic: { stage: 'unreal-project-validation-1', attempt: 1, message: 'No diagnostic output.', category: 'missing-output', command: 'UnrealEditor-Cmd.exe', exitCode: 1, noOutput: true,
+      logFiles: ['unreal-project-validation-1.stdout.jsonl', 'unreal-project-validation-1.stderr.log'], completedSteps: ['production-orchestrator-1'] } };
+  const retry = { phase: 'thinking', status: 'running', goal: 'Validate the project', step: 'production-orchestrator-2', iteration: 2, iterationTotal: 2 };
+  assert.equal((await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: failed } })).status, 200);
+  assert.equal((await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: retry } })).status, 200);
+  const view = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(view.iterationSummaries[0].status, 'FAILED');
+  assert.equal(view.iterationSummaries[0].failureReasons[0].message, 'No diagnostic output.');
+  assert.equal(view.iterationSummaries[0].failureReasons[0].category, 'missing-output');
+  assert.equal(view.iterationSummaries[0].failureReasons[0].noOutput, true);
+  assert.deepEqual(view.iterationSummaries[0].failureReasons[0].completedSteps, ['production-orchestrator-1']);
+  assert.equal(view.iterationSummaries[0].failureReasons[0].exitCode, 1);
+  assert.equal(view.iterationSummaries[1].status, 'RUNNING');
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress: retry } });
+});
+test('iteration diagnostics classify Windows cleanup failures and retain raw output', async () => {
+  const task = await create(), job = await claim();
+  const failed = { phase: 'thinking', status: 'failed', goal: 'Repair the workspace', step: 'production-orchestrator-8', iteration: 8, iterationTotal: 9,
+    error: 'production-orchestrator-8 failed (exit 1): stale arg0 temporary directory cleanup failed, Windows error 145',
+    diagnostic: { stage: 'production-orchestrator-8', attempt: 8, message: 'stale arg0 temporary directory cleanup failed, Windows error 145', exitCode: 1,
+      stderr: 'The directory is not empty. (145)' } };
+  const retry = { phase: 'thinking', status: 'running', goal: 'Repair the workspace', step: 'production-orchestrator-9', iteration: 9, iterationTotal: 9 };
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: failed } });
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: retry } });
+  const view = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  const diagnostic = view.iterationSummaries[0].failureReasons[0];
+  assert.equal(diagnostic.category, 'workspace-cleanup');
+  assert.equal(diagnostic.stage, 'production-orchestrator-8');
+  assert.match(diagnostic.stderr, /145/);
+  assert.deepEqual(diagnostic.logFiles, ['production-orchestrator-8.stdout.jsonl', 'production-orchestrator-8.stderr.log']);
+  const monitorBytes = Buffer.from('{"iteration":8,"action":"repair-project"}'), monitorArtifactId = 'artifact-iteration-monitor-8';
+  const monitorUpload = await fetch(`${origin}/v1/worker/artifacts/${task.taskId}/${monitorArtifactId}`, { method: 'POST', headers: {
+    ...agentHeaders, 'x-job-id': job.jobId, 'x-boot-id': job.bootId, 'x-lease-token': job.leaseToken,
+    'x-artifact-name': 'iteration-monitor-8.json', 'x-artifact-sha256': digest(monitorBytes), 'content-type': 'application/json'
+  }, body: monitorBytes });
+  assert.equal(monitorUpload.status, 201, await monitorUpload.text());
+  const reportBytes = Buffer.from('{"passed":false,"failure":"validation failed"}'), reportArtifactId = 'artifact-failure-report';
+  const reportUpload = await fetch(`${origin}/v1/worker/artifacts/${task.taskId}/${reportArtifactId}`, { method: 'POST', headers: {
+    ...agentHeaders, 'x-job-id': job.jobId, 'x-boot-id': job.bootId, 'x-lease-token': job.leaseToken,
+    'x-artifact-name': 'production-report.json', 'x-artifact-sha256': digest(reportBytes), 'content-type': 'application/json'
+  }, body: reportBytes });
+  assert.equal(reportUpload.status, 201, await reportUpload.text());
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress: retry,
+    report: { passed: false, failure: 'validation failed' }, artifactIds: [reportArtifactId] } });
+  const failedView = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(failedView.iterationSummaries[0].diagnosticArtifactId, monitorArtifactId);
+  assert.equal(failedView.iterationSummaries[1].diagnosticArtifactId, reportArtifactId);
 });
 test('verified artifacts are owner-scoped and completed work is immutable', async () => {
   const task = await create(), job = await claim(), ids = [];
@@ -145,6 +199,8 @@ test('verified artifacts are owner-scoped and completed work is immutable', asyn
   }
   const finish = { ...identity(job), status:'PASS', stopConfirmed:true, artifactIds:ids, report:{passed:true} };
   assert.equal((await request('/v1/worker/step-result',{headers:agentHeaders,data:finish})).value.status,'COMPLETED');
+  const completedView = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(completedView.iterationSummaries[0].diagnosticArtifactId, undefined);
   assert.equal((await request(`/v1/tasks/${task.taskId}/cancel`,{account:alice,data:{}})).value.status,'COMPLETED');
   assert.equal('leaseToken' in (await request(`/v1/tasks/${task.taskId}`,{account:alice})).value.result,false);
 });

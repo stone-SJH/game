@@ -17,6 +17,35 @@ const ignoredDirectories = new Set(['.git', 'Binaries', 'DerivedDataCache', 'Int
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const logExtensions = new Set(['.log', '.jsonl', '.txt']);
 const normalizePath = value => value.split(path.sep).join('/');
+
+export async function archivePackage(packageRoot, destination, signal) {
+  await fsp.rm(destination, { force: true });
+  const windows = process.platform === 'win32';
+  const command = windows ? 'tar.exe' : 'tar';
+  const extension = windows ? '.zip' : '.tar.gz';
+  const temporaryName = `.yahahagame-package-${crypto.randomUUID()}${extension}`;
+  const temporary = path.join(packageRoot, temporaryName);
+  const args = windows
+    ? ['-a', '-c', '-f', temporaryName, `--exclude=./${temporaryName}`, '.']
+    : ['-czf', temporaryName, `--exclude=./${temporaryName}`, '.'];
+  const result = await runCommand(command, args, {
+    cwd: packageRoot,
+    signal,
+    timeoutMs: Number(process.env.PACKAGE_ARCHIVE_TIMEOUT_MS || 60 * 60 * 1000),
+  });
+  if (!result.stopConfirmed || result.error || result.exitCode !== 0 || result.timedOut) {
+    await fsp.rm(temporary, { force: true });
+    throw new Error(`Playable package archive failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`);
+  }
+  try { await fsp.rename(temporary, destination); }
+  finally { await fsp.rm(temporary, { force: true }); }
+  return destination;
+}
+
+function playablePackageName(attempt) {
+  return `playable-package-iteration-${String(attempt).padStart(3, '0')}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
+}
+
 async function recentFiles(root, predicate, limit = 30) {
   const found = [];
   async function visit(directory) {
@@ -51,6 +80,7 @@ async function workspaceSnapshot(project, output) {
   return { projectFiles, logFiles, screenshots };
 }
 function phaseForStep(name) {
+  if (name.startsWith('iteration-diagnosis')) return 'reviewing';
   if (name.startsWith('production-orchestrator')) return 'thinking';
   if (name.startsWith('unreal-project-validation')) return 'building';
   if (name.startsWith('packaged-game-playtest')) return 'evaluating';
@@ -78,6 +108,8 @@ export async function executeJob(job, ctx) {
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
   const logs = [], artifactIds = [];
+  const playablePackages = [];
+  const iterationReviews = [];
   const uploadedScreenshots = new Map();
   let currentProgress = { phase: 'preparing', goal: job.objective, status: 'running', steps: { completed: 0, total: 3 } };
   let publishing = Promise.resolve();
@@ -115,8 +147,9 @@ export async function executeJob(job, ctx) {
   snapshotTimer.unref?.();
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
-    const codexStep = name.startsWith('production-orchestrator');
-    await publish({ phase: phaseForStep(name), step: name, tool: codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
+    const monitorStep = name.startsWith('iteration-diagnosis');
+    const codexStep = name.startsWith('production-orchestrator') || monitorStep;
+    await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
     await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
@@ -145,14 +178,40 @@ export async function executeJob(job, ctx) {
     const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
     logs.push({ name, ...result, passed });
     if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`), { result });
-    await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
+    if (!monitorStep) await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }
   const unreal = process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe';
   let failure;
   let production;
   try {
-    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish });
+    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
+      onIterationReview: async ({ file, record }) => {
+        const review = { iteration: record.iteration, action: record.action, category: record.category, reason: record.reason,
+          aiInvoked: record.aiInvoked, file: path.basename(file) };
+        iterationReviews.push(review);
+        try {
+          review.artifactId = await uploadFile(path.basename(file), file, 'application/json', { timeoutMs: 10000 });
+          artifactIds.push(review.artifactId);
+        } catch (error) {
+          review.artifactUploadError = error.message;
+          throw error;
+        }
+      },
+      onIterationPackage: async ({ attempt, packageRoot }) => {
+        if (typeof uploadFile !== 'function') return;
+        const name = playablePackageName(attempt);
+        const archiveFile = path.join(output, name);
+        try {
+          await archivePackage(packageRoot, archiveFile, signal);
+          const artifactId = await uploadFile(name, archiveFile, artifactContentType(archiveFile));
+          artifactIds.push(artifactId);
+          playablePackages.push({ iteration: attempt, name, path: name, artifactId });
+          await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifact: name });
+        } catch (error) {
+          await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifactError: error.message });
+        }
+      } });
     for (const file of Object.values(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file)));
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
@@ -164,7 +223,8 @@ export async function executeJob(job, ctx) {
   }
   await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective });
   const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
-    deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null };
+    deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null,
+    playablePackages, iterationReviews };
   const reportName = 'production-report.json';
   const file = path.join(output, reportName);
   await atomicJson(file, report);
@@ -229,7 +289,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     await atomicJson(journal, { phase: 'RUNNING', bootId, job });
     let result;
     try {
-      result = await execute(job, { root, signal: controller.signal, reportProgress, uploadFile: async (name, file, contentType) => {
+      result = await execute(job, { root, signal: controller.signal, reportProgress, uploadFile: async (name, file, contentType, { timeoutMs = 60 * 60000 } = {}) => {
         controller.signal.throwIfAborted();
         const hash = crypto.createHash('sha256');
         for await (const chunk of fs.createReadStream(file, { signal: controller.signal })) hash.update(chunk);
@@ -237,7 +297,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
         const artifactId = `artifact-${crypto.createHash('sha256').update(`${job.jobId}:${name}:${sha}`).digest('hex')}`;
         const response = await fetch(`${control}/v1/worker/artifacts/${job.taskId}/${artifactId}`, { method: 'POST', duplex: 'half',
           headers: { ...headers, 'x-boot-id': bootId, 'x-job-id': job.jobId, 'x-lease-token': job.leaseToken, 'x-artifact-name': name, 'x-artifact-sha256': sha, 'content-type': contentType },
-          body: fs.createReadStream(file), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60 * 60000)]) });
+          body: fs.createReadStream(file), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]) });
         if (!response.ok) throw new Error(`Artifact upload failed (${response.status}).`);
         return (await response.json()).artifactId;
       } });

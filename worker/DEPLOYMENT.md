@@ -128,9 +128,9 @@ tasks; the local monitor can be used immediately without restarting the worker.
 
 ## Workspace and execution
 
-Each task receives a persistent `workspaceId` and a new empty project directory at `workspaces/<workspaceId>/project`, with output under `workspaces/<workspaceId>/runs/<runId>`. The browser sends only the objective. The production worker invokes the installed `yahahagame-production` skill through Codex CLI in that workspace, writes its stage manifests, and requires a real `.uproject`, `scene-preview` image, packaged playable `.exe`, and `acceptance/acceptance-report.json` before completion. It launches the packaged executable with a bounded playtest before uploading final artifacts; bootstrap images and editor startup logs are diagnostic only. Incomplete or transiently failed iterations are retained and retried after `CODEX_RETRY_DELAY_MS` (default 10 seconds) until the task deadline, cancellation, an explicit hard-failure marker, or a tool timeout.
+Each task receives a persistent `workspaceId` and a new empty project directory at `workspaces/<workspaceId>/project`, with output under `workspaces/<workspaceId>/runs/<runId>`. The browser sends only the objective. The production worker invokes the installed `yahahagame-production` skill through Codex CLI in that workspace, writes its stage manifests, and requires a real `.uproject`, `scene-preview` image, packaged playable `.exe`, and `acceptance/acceptance-report.json` before completion. It launches the packaged executable with a bounded playtest before uploading final artifacts; bootstrap images and editor startup logs are diagnostic only. Failed iterations retain their evidence and pass through the iteration monitor before retrying. Cancellation, deadlines, uncertain process shutdown, hard failures, command timeouts and finite monitor budgets stop execution.
 
-Heartbeat/control remains active during commands and streamed uploads. Windows cancellation uses process-tree termination; the agent confirms shutdown before acknowledging completion/cancellation. A local lease deadline also stops execution if the controller cannot renew it.
+Heartbeat/control remains active during commands and streamed uploads. After each packaged executable passes the bounded launch check, the worker archives the complete Windows package directory and uploads it as `playable-package-iteration-NNN.zip`; this exposes playable checkpoints before later acceptance gates finish. Windows cancellation uses process-tree termination; the agent confirms shutdown before acknowledging completion/cancellation. A local lease deadline also stops execution if the controller cannot renew it. Package archives are subject to the controller's 2 GiB artifact limit and the worker's `PACKAGE_ARCHIVE_TIMEOUT_MS` (default 60 minutes).
 
 Codex runs through Node and its npm package entrypoint (or a configured native
 executable). `CODEX_CMD` accepts a JS entrypoint, a native executable, or the npm
@@ -139,6 +139,45 @@ UTF-8 to `codex exec -` and stdin is closed after writing. Each step writes live
 stdout/stderr and a result JSON under its run directory. Codex CLI usage errors
 (exit code 2) and process launch errors fail immediately instead of retrying.
 Run `npm run test:worker` for the stdin, argument, launch and cancellation tests.
+
+### Iteration monitor
+
+Every completed iteration receives a small rule-based review. Known service failures use bounded
+backoff (10 seconds, then 20 seconds by default), not another diagnostic AI call. A missing
+`HelpCommandlet` can only trigger the fixed `LoadPackage` probe on the same deliverables. If
+`LoadPackage` itself is unavailable, the run stops with a validator configuration failure. The
+monitor cannot remove validation gates or treat a skipped check as PASS.
+
+Only a second occurrence of an otherwise unknown failure can invoke the independent Codex
+diagnostic process. It receives bounded diagnostic text, uses a read-only sandbox, and disables
+shell execution, MCP servers, apps, browser/computer tools, plugins/hooks and child agents. It
+does not load project instructions or production skills. Its validated JSON response may only
+recommend a project repair, a bounded retry, or a stop. Infrastructure repair recommendations
+stop the run. The production agent performs project repairs on the next iteration; it receives
+the last diagnosis in its prompt. Neither the monitor nor its advice changes the core skill,
+worker source/configuration, retry budgets or acceptance criteria.
+
+Settings belong in the protected `runtime/config/worker.env.ps1` and apply after a worker restart:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `ITERATION_SAME_FAILURE_LIMIT` | `3` | Stop on the third occurrence of the same failure signature in a run. |
+| `ITERATION_FAILURE_LIMIT` | `8` | Stop after eight failures even when signatures change. |
+| `ITERATION_MONITOR_MAX_CALLS` | `2` | At most two diagnostic AI calls per run; `0` disables AI while retaining rules. Maximum 2. |
+| `ITERATION_MONITOR_TIMEOUT_MS` | `60000` | Per-call wall-clock budget, including process startup. Maximum 60000. |
+
+`CODEX_MAX_ATTEMPTS` remains an additional production limit; `0` does not disable these monitor
+limits. Diagnostic AI therefore adds at most two minutes per run, apart from process teardown
+and report transfer. Failed/unavailable diagnostics fall back to the same bounded rule policy;
+the monitor never recursively diagnoses itself. Task cancellation and lease expiry also apply
+during diagnosis and retry delays.
+
+Decisions are saved as `runs/<runId>/iteration-monitor-N.json` (with `-validator` for a probe
+replacement), copied to `project/plan/iteration-feedback.json`, and uploaded as artifacts with a
+10-second upload timeout. Failed uploads preserve local evidence and report the error. Existing
+browser progress fields show the reason/action, and `production-report.json` includes the review
+index. Stopping is reported as task failure, not a synthetic user cancellation or completion;
+the retained workspace can be continued after the underlying issue is addressed.
 
 `journal/execution.json` records active work and pending final results. Pending results are replayed after reconnect/restart. An agent restart with a `RUNNING` journal is deliberately blocked until the old process tree and workspace are checked; automatic interrupted-step recovery and pause/resume are not yet implemented. Do not delete the journal or clear the controller allocation merely to bypass that guard.
 
