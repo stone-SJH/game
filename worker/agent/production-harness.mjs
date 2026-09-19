@@ -117,6 +117,34 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
+export function acceptanceFailureDetails(acceptance, criteria) {
+  const failedCriteria = criteria.filter(item => item?.status !== 'PASS').map(item => ({
+    id: item?.id || item?.name || item?.criterion || 'unnamed',
+    status: item?.status || 'UNKNOWN',
+    pass: item?.pass,
+  }));
+  return {
+    status: acceptance.status,
+    passed: acceptance.passed === true,
+    accepted: acceptance.accepted === true,
+    pass: acceptance.pass === true,
+    failedCriteria,
+    technicalDeliveryStatus: acceptance.technicalDeliveryStatus,
+    gameplayStatus: acceptance.gameplayStatus,
+    packagedGameStatus: acceptance.packagedGameStatus,
+    visualStatus: acceptance.visualStatus,
+  };
+}
+
+function acceptanceFailureMessage(details) {
+  const failures = details.failedCriteria.map(item => `${item.id}:${item.status}`).join(', ') || 'none recorded';
+  const summary = [
+    `Acceptance report does not prove a passing packaged game. Failed criteria: ${failures}.`,
+    `Report status=${details.status || 'missing'}, pass=${details.pass}, packagedGameStatus=${details.packagedGameStatus || 'unknown'}, visualStatus=${details.visualStatus || 'unknown'}.`,
+  ];
+  return summary.join(' ');
+}
+
 async function createCodexTempDirectory() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'yahahagame-codex-'));
 }
@@ -224,7 +252,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
       try { acceptance = JSON.parse(await fs.readFile(deliverables.files.acceptanceReport, 'utf8')); } catch (error) { throw new Error(`Invalid acceptance report: ${error.message}`); }
       const criteria = acceptance.criteria || acceptance.acceptanceCriteria;
       if (acceptance.protocol !== 1 || !(acceptance.passed === true || acceptance.accepted === true || acceptance.status === 'PASS') || !Array.isArray(criteria) || !criteria.length || criteria.some(item => item.status !== 'PASS')) {
-        throw new Error('Acceptance report does not prove a passing packaged game.');
+        const details = acceptanceFailureDetails(acceptance, Array.isArray(criteria) ? criteria : []);
+        throw Object.assign(new Error(acceptanceFailureMessage(details)), { acceptanceFailure: details });
       }
       stage = 'stage-manifest';
       let stageManifest;
@@ -248,6 +277,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {
         attempt, failedAt: new Date().toISOString(), error: error.message,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
+        acceptanceFailure: error.acceptanceFailure,
       });
       if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || error.reviewed) throw error;
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });

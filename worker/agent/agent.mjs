@@ -13,10 +13,25 @@ async function atomicJson(file, value) {
   await fsp.rename(temp, file);
 }
 
-const ignoredDirectories = new Set(['.git', 'Binaries', 'DerivedDataCache', 'Intermediate', 'node_modules']);
+const ignoredDirectories = new Set([
+  '.git', 'Binaries', 'Build', 'cache', 'Content', 'DerivedDataCache', 'history', 'Intermediate',
+  'node_modules', 'package', 'Saved', 'Source', 'Windows',
+]);
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const logExtensions = new Set(['.log', '.jsonl', '.txt']);
 const normalizePath = value => value.split(path.sep).join('/');
+
+const projectSnapshotRoots = [
+  { path: '.', maxDepth: 0 },
+  ...['acceptance', 'art', 'checkpoints', 'logs', 'plan', 'provenance', 'stages', 'tools']
+    .map(directory => ({ path: directory, maxDepth: Infinity })),
+];
+const projectLogRoots = ['acceptance', 'logs', 'plan', 'stages'].map(path => ({ path, maxDepth: Infinity }));
+const projectImageRoots = [
+  { path: '.', maxDepth: 0 },
+  { path: 'acceptance', maxDepth: Infinity },
+  { path: 'art', maxDepth: Infinity },
+];
 
 export async function archivePackage(packageRoot, destination, signal) {
   await fsp.rm(destination, { force: true });
@@ -65,35 +80,36 @@ function playablePackageName(attempt) {
   return `playable-package-iteration-${String(attempt).padStart(3, '0')}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
 }
 
-async function recentFiles(root, predicate, limit = 30) {
+async function recentFiles(root, predicate, limit = 30, roots = [{ path: '.', maxDepth: Infinity }]) {
   const found = [];
-  async function visit(directory) {
+  async function visit(directory, depth, maxDepth) {
     let entries;
     try { entries = await fsp.readdir(directory, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
-      if (entry.isDirectory()) { if (!ignoredDirectories.has(entry.name)) await visit(path.join(directory, entry.name)); continue; }
+      if (entry.isDirectory()) {
+        if (!ignoredDirectories.has(entry.name) && depth < maxDepth) await visit(path.join(directory, entry.name), depth + 1, maxDepth);
+        continue;
+      }
       if (!entry.isFile()) continue;
       const file = path.join(directory, entry.name);
       if (!predicate(file, entry.name)) continue;
       try {
         const stat = await fsp.stat(file);
         found.push({ name: entry.name, path: normalizePath(path.relative(root, file)), size: stat.size, updatedAt: stat.mtime.toISOString() });
-        found.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-        if (found.length > limit) found.pop();
       } catch { /* A file can disappear while a tool is writing it. */ }
     }
   }
-  await visit(root);
+  for (const spec of roots) await visit(path.join(root, spec.path), 0, spec.maxDepth);
   return found.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, limit);
 }
 async function workspaceSnapshot(project, output) {
-  const projectFiles = await recentFiles(project, (file, name) => !file.split(path.sep).includes('Saved') && !logExtensions.has(path.extname(name).toLowerCase()), 30);
+  const projectFiles = await recentFiles(project, (file, name) => !logExtensions.has(path.extname(name).toLowerCase()), 30, projectSnapshotRoots);
   const logFiles = [
-    ...(await recentFiles(project, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20)).map(file => ({ ...file, path: `project/${file.path}` })),
+    ...(await recentFiles(project, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20, projectLogRoots)).map(file => ({ ...file, path: `project/${file.path}` })),
     ...(await recentFiles(output, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20)).map(file => ({ ...file, path: `run/${file.path}` })),
   ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 30);
   const screenshots = [
-    ...(await recentFiles(project, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12)).map(file => ({ ...file, path: `project/${file.path}` })),
+    ...(await recentFiles(project, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12, projectImageRoots)).map(file => ({ ...file, path: `project/${file.path}` })),
     ...(await recentFiles(output, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12)).map(file => ({ ...file, path: `run/${file.path}` })),
   ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 20);
   return { projectFiles, logFiles, screenshots };
@@ -132,10 +148,26 @@ export async function executeJob(job, ctx) {
   const uploadedScreenshots = new Map();
   let currentProgress = { phase: 'preparing', goal: job.objective, status: 'running', steps: { completed: 0, total: 3 } };
   let publishing = Promise.resolve();
+  const snapshotCacheMs = Math.max(1000, Number(process.env.WORKSPACE_SNAPSHOT_CACHE_MS || 10000) || 10000);
+  let snapshotCache = null;
+  let snapshotCacheAt = 0;
+  let snapshotPromise = null;
+  const getSnapshot = async () => {
+    if (snapshotCache && Date.now() - snapshotCacheAt < snapshotCacheMs) return snapshotCache;
+    if (!snapshotPromise) {
+      snapshotPromise = workspaceSnapshot(project, output).then(snapshot => {
+        snapshotCache = snapshot;
+        snapshotCacheAt = Date.now();
+        return snapshot;
+      }).finally(() => { snapshotPromise = null; });
+    }
+    return snapshotPromise;
+  };
+  const invalidateSnapshot = () => { snapshotCache = null; snapshotCacheAt = 0; };
   const publish = patch => {
     const next = publishing.then(async () => {
       if (signal.aborted) return;
-      const snapshot = await workspaceSnapshot(project, output);
+      const snapshot = await getSnapshot();
       if (typeof uploadFile === 'function') {
         for (const screenshot of snapshot.screenshots.slice(0, 4)) {
           const key = `${screenshot.path}:${screenshot.updatedAt}`;
@@ -158,11 +190,12 @@ export async function executeJob(job, ctx) {
     return next;
   };
   let snapshotPending = false;
+  const snapshotIntervalMs = Math.max(5000, Number(process.env.WORKSPACE_SNAPSHOT_INTERVAL_MS || 15000) || 15000);
   const snapshotTimer = setInterval(() => {
     if (snapshotPending) return;
     snapshotPending = true;
     publish({}).catch(() => {}).finally(() => { snapshotPending = false; });
-  }, 5000);
+  }, snapshotIntervalMs);
   snapshotTimer.unref?.();
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
@@ -191,6 +224,7 @@ export async function executeJob(job, ctx) {
     const result = await runCommand(command, args, { ...options, cwd, timeoutMs, signal,
       onStdout,
       stdoutFile: path.join(output, `${name}.stdout.jsonl`), stderrFile: path.join(output, `${name}.stderr.log`) });
+    invalidateSnapshot();
     await atomicJson(stepFile, { name, ...result });
     if (!result.stopConfirmed) throw Object.assign(new Error(result.error), { stopConfirmed: false });
     signal.throwIfAborted();

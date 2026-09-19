@@ -65,7 +65,9 @@ test('playable checkpoint is published before a later acceptance failure', async
       await fs.writeFile(path.join(project, 'provenance', 'asset-manifest.json'), '{}');
       await fs.writeFile(path.join(project, 'plan', 'stage-manifest.json'), JSON.stringify({ stages: stages.map(id => ({ id, status: 'ACCEPTED' })) }));
       await fs.writeFile(path.join(project, 'acceptance', 'playtest-evidence.json'), '{}');
-      await fs.writeFile(path.join(project, 'acceptance', 'acceptance-report.json'), JSON.stringify({ protocol: 1, passed: false, criteria: [{ status: 'FAIL' }] }));
+      await fs.writeFile(path.join(project, 'acceptance', 'acceptance-report.json'), JSON.stringify({
+        protocol: 1, status: 'FAILED', visualStatus: 'FAIL', criteria: [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }],
+      }));
       for (const stage of stages) {
         const directory = path.join(project, 'stages', stage);
         await fs.mkdir(directory, { recursive: true });
@@ -79,7 +81,10 @@ test('playable checkpoint is published before a later acceptance failure', async
     job: { taskId: 'task', runId: 'run', workspaceId: 'workspace', objective: 'fixture' }, project, output,
     signal: new AbortController().signal, step, unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {},
     onIterationPackage: async value => checkpoints.push(value),
-  }), /Acceptance report does not prove|retry budget exhausted/);
+  }), error => {
+    assert.match(error.message, /Failed criteria: near-aaa-visual-fidelity:FAIL/);
+    return true;
+  });
   assert.equal(checkpoints.length, 1);
   assert.equal(checkpoints[0].attempt, 1);
   assert.equal(checkpoints[0].packageFile, packageFile);
@@ -246,12 +251,15 @@ test('telemetry includes the newest workspace files beyond the first directory e
     await fs.writeFile(file, 'existing project data');
     await fs.utimes(file, 1000 + index, 1000 + index);
   }
+  await fs.mkdir(path.join(project, 'cache'), { recursive: true });
+  await fs.writeFile(path.join(project, 'cache', 'newest-cache-entry.uasset'), 'heavy cache data');
   const latest = path.join(project, 'zzz-latest.umap');
   await fs.writeFile(latest, 'latest scene');
   const progress = [];
   await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name,
     reportProgress: value => progress.push(value) });
   assert.ok(progress.some(value => value.projectFiles.some(file => file.name === 'zzz-latest.umap')));
+  assert.ok(progress.every(value => !value.projectFiles.some(file => file.name === 'newest-cache-entry.uasset')));
   assert.ok(progress.every(value => value.projectFiles.length <= 30));
   assert.equal(await fs.readFile(latest, 'utf8'), 'latest scene');
 });

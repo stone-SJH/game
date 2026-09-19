@@ -32,6 +32,9 @@ export function classifyIterationFailure(error, stage) {
   if (stage === 'production-orchestrator' && /\b(?:429|502|503|504)\b[^\n]*(?:Unavailable|Gateway|rate|request|response)|(?:HTTP|status(?: code)?)\s*[:=]?\s*(?:429|502|503|504)\b|\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/i.test(diagnostic)) {
     return { category: 'service', action: 'retry' };
   }
+  if (stage === 'acceptance-report' && error.acceptanceFailure) {
+    return { category: 'project-or-unknown', action: 'repair-project' };
+  }
   return { category: 'project-or-unknown', action: 'repair-project' };
 }
 
@@ -90,10 +93,12 @@ export function createIterationMonitor({ job, project, output, signal, step, inv
       ...classified, fingerprint, occurrences, failures, limits: settings,
       reason: error ? String(error.message).slice(0, 2000) : 'All production gates passed.',
       repairInstructions: error ? `Repair the failure at ${stage}. Inspect the recorded diagnostics and preserve working content. Do not add unrelated features or weaken acceptance criteria.` : '',
+      acceptanceFailure: error?.acceptanceFailure || null,
       diagnostics: error ? {
         message: String(error.message).slice(0, 6000),
         command: error.result?.command, args: error.result?.args,
         exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
+        acceptanceFailure: error.acceptanceFailure,
         stdout: String(error.result?.stdout || '').slice(-12000), stderr: String(error.result?.stderr || '').slice(-6000),
       } : null,
     };
@@ -103,6 +108,9 @@ export function createIterationMonitor({ job, project, output, signal, step, inv
     }
     if (record.category === 'service') {
       record.repairInstructions = 'Retry the interrupted production work from existing state. This is an upstream service error; do not change game content to repair it.';
+    }
+    if (record.acceptanceFailure?.failedCriteria?.length) {
+      record.repairInstructions = `Repair the recorded acceptance criteria: ${record.acceptanceFailure.failedCriteria.map(item => `${item.id}:${item.status}`).join(', ')}. Preserve passing packaged-game and gameplay evidence; do not weaken acceptance rules.`;
     }
     if (record.action === 'repair-project' && occurrences >= 2 && calls < settings.maxCalls) {
       calls++;

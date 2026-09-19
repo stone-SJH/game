@@ -2,9 +2,10 @@ const $ = id => document.getElementById(id);
 let session, registering = false, selected, cursor, stream, poll, refreshTimer, refreshInFlight = false, refreshAgain = false, refreshNeedsList = false, generation = 0;
 let items = [];
 let previewObserver;
+const completedArtifactCache = new Map();
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 function signedOut() {
-  generation++; session = null; stream?.close(); clearInterval(poll); clearTimeout(refreshTimer); refreshTimer = null; refreshInFlight = false; refreshAgain = false; refreshNeedsList = false; previewObserver?.disconnect(); items = []; selected = null;
+  generation++; session = null; stream?.close(); clearInterval(poll); clearTimeout(refreshTimer); refreshTimer = null; refreshInFlight = false; refreshAgain = false; refreshNeedsList = false; previewObserver?.disconnect(); completedArtifactCache.clear(); items = []; selected = null;
   $('auth').hidden = false; $('workspace').hidden = true; $('account').hidden = true;
   $('task-list').replaceChildren(); $('detail').replaceChildren(); $('create-dialog').close(); $('followup-dialog').close();
 }
@@ -189,6 +190,55 @@ function artifactPanel(task, taskId) {
   }
   return section;
 }
+function isPlayablePackage(artifact) {
+  return /(?:^|-)playable-package-.*\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '') || /\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '');
+}
+function isFeaturedArtifact(artifact) {
+  return isPlayablePackage(artifact) || /(?:\.exe|\.uproject)$/i.test(artifact.name || '') || /^(?:scene-preview|acceptance-report|production-report|workspace-manifest|asset-manifest|stage-manifest|playtest-evidence)\.json(?:\.png)?$/i.test(artifact.name || '') || /^(?:scene-preview)\.(?:png|jpe?g|webp)$/i.test(artifact.name || '');
+}
+function featuredArtifactCard(artifact, packageArtifact = false) {
+  const figure = node('figure', undefined, `completed-output${packageArtifact ? ' completed-output-package' : ''}`);
+  if (artifact.content_type?.startsWith('image/')) {
+    if (artifact.previewUrl) {
+      const imageLink = node('a'); imageLink.href = artifact.downloadUrl; imageLink.target = '_blank'; imageLink.rel = 'noopener'; imageLink.append(lazyPreview(artifact.previewUrl, artifact.name)); figure.append(imageLink);
+    } else figure.append(node('div', 'Open image to load', 'artifact-placeholder'));
+  }
+  const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl; link.download = artifact.name;
+  caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+  if (packageArtifact) caption.append(node('strong', 'Playable package', 'completed-output-label'));
+  figure.append(caption);
+  return figure;
+}
+function completedOutputsPanel(task) {
+  if (task.status !== 'COMPLETED') return null;
+  const section = node('section', undefined, 'completed-outputs');
+  const heading = node('div', undefined, 'completed-outputs-heading');
+  heading.append(node('h3', 'Completed outputs'), node('span', 'Ready to download'));
+  section.append(heading);
+  const artifacts = Array.isArray(task.completedArtifacts) ? task.completedArtifacts : task.artifacts || [];
+  const packages = artifacts.filter(isPlayablePackage).sort((a, b) => String(b.name).localeCompare(String(a.name)));
+  const keyArtifacts = artifacts.filter(item => !isPlayablePackage(item) && isFeaturedArtifact(item)).slice(0, 8);
+  const packageGroup = node('div', undefined, 'completed-output-group');
+  packageGroup.append(node('h4', 'Playable packages'));
+  if (!packages.length) packageGroup.append(node('p', 'No playable package was uploaded for this task.', 'completed-outputs-empty'));
+  else { const grid = node('div', undefined, 'completed-output-list'); packages.forEach(item => grid.append(featuredArtifactCard(item, true))); packageGroup.append(grid); }
+  section.append(packageGroup);
+  if (keyArtifacts.length) {
+    const keyGroup = node('div', undefined, 'completed-output-group'); keyGroup.append(node('h4', 'Key artifacts'));
+    const grid = node('div', undefined, 'completed-output-list'); keyArtifacts.forEach(item => grid.append(featuredArtifactCard(item))); keyGroup.append(grid); section.append(keyGroup);
+  }
+  return section;
+}
+async function loadCompletedArtifacts(task, taskId) {
+  if (task.status !== 'COMPLETED' || Number(task.artifactCount || 0) <= (task.artifacts?.length || 0)) return task;
+  const cached = completedArtifactCache.get(taskId);
+  if (cached) return { ...task, completedArtifacts: cached };
+  try {
+    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100`);
+    completedArtifactCache.set(taskId, page.artifacts || []);
+    return { ...task, completedArtifacts: page.artifacts || [] };
+  } catch { return task; }
+}
 function renderList() {
   const list = $('task-list'); list.replaceChildren();
   if (!items.length) list.append(node('div', 'No tasks yet', 'empty'));
@@ -215,9 +265,12 @@ async function refreshDetail() {
   const target = selected, epoch = generation;
   const task = await api(`/v1/tasks/${target}`);
   if (epoch !== generation || target !== selected) return;
+  const displayTask = await loadCompletedArtifacts(task, target);
+  if (epoch !== generation || target !== selected) return;
   const pane = $('detail');
   const summarySignature = (task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|');
   const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
+  const completedOutputSignature = `${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
   if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
     const progress = pane.querySelector('.worker-progress');
     releaseLazyPreviews(progress); progress?.replaceWith(progressPanel(task));
@@ -225,11 +278,15 @@ async function refreshDetail() {
     if (pane.dataset.artifactSignature !== artifactSignature) {
       const artifacts = pane.querySelector('.artifact-panel'); releaseLazyPreviews(artifacts); artifacts?.replaceWith(artifactPanel(task, target));
     }
+    if (pane.dataset.completedOutputSignature !== completedOutputSignature) {
+      const outputs = pane.querySelector('.completed-outputs'); releaseLazyPreviews(outputs); const replacement = completedOutputsPanel(displayTask); replacement ? outputs?.replaceWith(replacement) : outputs?.remove();
+    }
     pane.dataset.summarySignature = summarySignature; pane.dataset.artifactSignature = artifactSignature;
+    pane.dataset.completedOutputSignature = completedOutputSignature;
     return task;
   }
   previewObserver?.disconnect(); pane.replaceChildren(); pane.dataset.taskId = target; pane.dataset.status = task.status;
-  pane.dataset.summarySignature = summarySignature; pane.dataset.artifactSignature = artifactSignature;
+  pane.dataset.summarySignature = summarySignature; pane.dataset.artifactSignature = artifactSignature; pane.dataset.completedOutputSignature = completedOutputSignature;
   const top = node('div', undefined, 'detail-top'); top.append(status(task.status));
   if (task.allowedActions.includes('cancel')) {
     const cancel = node('button', 'Cancel task'); cancel.onclick = async () => {
@@ -247,7 +304,8 @@ async function refreshDetail() {
   for (const [label, value] of [['Worker',task.workerId || 'Waiting for assigned worker'], ['Created',date(task.createdAt)], ['Workspace',task.workspaceId || 'Unassigned'], ['Run request',task.currentPrompt || 'Initial task'], ['Task',task.taskId]]) {
     const group = node('div'); group.append(node('dt',label),node('dd',value)); details.append(group);
   }
-  pane.append(details, progressPanel(task), iterationSummaryPanel(task), artifactPanel(task, target));
+  const completedOutputs = completedOutputsPanel(displayTask);
+  pane.append(...(completedOutputs ? [completedOutputs] : []), details, progressPanel(task), iterationSummaryPanel(task), artifactPanel(task, target));
   if (task.result) { pane.append(node('h3','Result'),node('pre',JSON.stringify(task.result,null,2),'result')); }
   return task;
 }
