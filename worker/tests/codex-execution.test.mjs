@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executeJob } from '../agent/agent.mjs';
-import { codexInvocation, commandDiagnostic, projectValidationArgs } from '../agent/production-harness.mjs';
+import { codexInvocation, commandDiagnostic, isCodexTempCleanupFailure, projectValidationArgs } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
 const chinese = '\u4e2d\u6587\u6218\u6597\u573a\u666f';
@@ -23,6 +23,11 @@ test('command diagnostics include process errors, stderr, and stdout', () => {
   assert.match(diagnostic, /process error:\nspawn failed/);
   assert.match(diagnostic, /stderr:\ncleanup warning/);
   assert.match(diagnostic, /stdout:\n503 Service Unavailable/);
+});
+
+test('Codex temporary-directory cleanup failures are classified as tooling failures', () => {
+  assert.equal(isCodexTempCleanupFailure({ stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)' }), true);
+  assert.equal(isCodexTempCleanupFailure({ stderr: 'The project failed validation.' }), false);
 });
 
 async function fixture(t) {
@@ -43,7 +48,7 @@ function environment(t, values) {
   });
 }
 
-async function fakeCli(root, { exitCode = 0, delayMs = 0 } = {}) {
+async function fakeCli(root, { exitCode = 0, delayMs = 0, stderr = '', recordEnvironment = false } = {}) {
   const packageRoot = path.join(root, 'node_modules', '@openai', 'codex');
   const entrypoint = path.join(packageRoot, 'bin', 'codex.mjs');
   await fs.mkdir(path.dirname(entrypoint), { recursive: true });
@@ -58,10 +63,11 @@ async function fakeCli(root, { exitCode = 0, delayMs = 0 } = {}) {
     for await (const chunk of process.stdin) chunks.push(chunk);
     const input = Buffer.concat(chunks).toString('utf8');
     const args = process.argv.slice(2);
-    const record = { args, input, cwd: process.cwd() };
+    const record = { args, input, cwd: process.cwd(), ...(${recordEnvironment ? 'true' : 'false'} ? { temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: process.env.TMPDIR } : {}) };
     console.log(JSON.stringify(record));
     if (args.includes('-o')) await fs.writeFile(args[args.indexOf('-o') + 1], input);
     if (${exitCode} === 2) console.error("error: unexpected argument 'are' found");
+    if (${JSON.stringify(stderr)}) console.error(${JSON.stringify(stderr)});
     await new Promise(resolve => setTimeout(resolve, ${delayMs}));
     process.exitCode = ${exitCode};
   `);
@@ -125,6 +131,34 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   assert.equal(received.args.some(arg => arg.includes(objective)), false);
   assert.equal(await fs.readFile(path.join(output, 'codex-production-session-1.txt'), 'utf8'), received.input);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')), received);
+});
+
+test('production Codex attempts use an isolated temporary directory', async t => {
+  const root = await fixture(t), { entrypoint } = await fakeCli(root, { recordEnvironment: true });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '1', CODEX_TIMEOUT_MS: '10000' });
+  const job = { taskId: 'temp-task', workspaceId: 'temp-workspace', runId: 'run', objective };
+  await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
+  const record = JSON.parse((await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')));
+  assert.ok(record.temp && record.tmp && record.tmpdir);
+  assert.equal(record.temp, record.tmp);
+  assert.equal(record.temp, record.tmpdir);
+  assert.equal(path.dirname(record.temp), path.resolve(os.tmpdir()));
+  assert.notEqual(record.temp, process.env.TEMP);
+});
+
+test('Codex temporary-directory cleanup failure does not enter unlimited production retries', async t => {
+  const root = await fixture(t), { entrypoint } = await fakeCli(root, {
+    exitCode: 1,
+    stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)',
+  });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000' });
+  const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
+  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  assert.equal(result.status, 'FAIL');
+  assert.match(result.reason, /temporary-directory cleanup failed/i);
+  const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
+  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 1);
 });
 
 test('telemetry includes the newest workspace files beyond the first directory entries', async t => {

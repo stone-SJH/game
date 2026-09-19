@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -115,6 +116,21 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
+export function isCodexTempCleanupFailure(result) {
+  return /failed to clean up stale arg0 temp dirs|os error 145/i.test([
+    result?.error, result?.stderr, result?.stdout,
+  ].filter(Boolean).join('\n'));
+}
+
+async function createCodexTempDirectory() {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'yahahagame-codex-'));
+}
+
+async function removeCodexTempDirectory(directory) {
+  if (!directory) return;
+  await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+}
+
 export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
@@ -163,9 +179,14 @@ export async function runProductionHarness({ job, project, output, signal, step,
     ].join('\n');
     await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt, iterationTotal: maxAttempts || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
+    let codexTemp;
     try {
+      codexTemp = await createCodexTempDirectory();
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
-      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, { input: prompt });
+      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, {
+        input: prompt,
+        env: { ...process.env, TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
+      });
       if (/\b(?:HARD_FAILURE|TASK_IMPOSSIBLE)\b/i.test(`${orchestration.stdout}\n${orchestration.stderr}`)) {
         throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
       }
@@ -203,9 +224,16 @@ export async function runProductionHarness({ job, project, output, signal, step,
         attempt, failedAt: new Date().toISOString(), error: error.message,
         exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
       });
+      if (isCodexTempCleanupFailure(error.result)) {
+        throw Object.assign(new Error(`Codex CLI temporary-directory cleanup failed.\n${commandDiagnostic(error.result)}`), {
+          hardFailure: true, toolingFailure: true, result: error.result,
+        });
+      }
       if (signal.aborted || error.stopConfirmed === false || error.hardFailure || error.result?.timedOut || error.result?.error || error.result?.exitCode === 2) throw error;
       if (maxAttempts > 0 && attempt >= maxAttempts) throw new Error(`Production retry budget exhausted after ${attempt} iterations: ${error.message}`);
       await delay(retryDelayMs, undefined, { signal });
+    } finally {
+      await removeCodexTempDirectory(codexTemp);
     }
   }
 }
