@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -116,6 +117,15 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
+async function createCodexTempDirectory() {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'yahahagame-codex-'));
+}
+
+async function removeCodexTempDirectory(directory) {
+  if (!directory) return;
+  await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+}
+
 export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
@@ -174,10 +184,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
     ].join('\n');
     await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt, iterationTotal: maxAttempts || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
+    let codexTemp;
     let stage = 'production-orchestrator';
     try {
+      codexTemp = await createCodexTempDirectory();
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
-      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, { input: prompt });
+      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, {
+        input: prompt,
+        env: { ...process.env, TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
+      });
       if (/\b(?:HARD_FAILURE|TASK_IMPOSSIBLE)\b/i.test(`${orchestration.stdout}\n${orchestration.stderr}`)) {
         throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
       }
@@ -240,6 +255,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
       const waitMs = feedback.category === 'service' ? Math.min(300000, retryDelayMs * 2 ** Math.min(feedback.occurrences - 1, 5)) : retryDelayMs;
       await reportProgress({ phase: 'retrying', step: `Retry after iteration ${attempt} (${Math.ceil(waitMs / 1000)}s)`, error: feedback.reason });
       await delay(waitMs, undefined, { signal });
+    } finally {
+      await removeCodexTempDirectory(codexTemp);
     }
   }
 }

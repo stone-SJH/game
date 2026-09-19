@@ -103,7 +103,7 @@ function environment(t, values) {
   });
 }
 
-async function fakeCli(root, { exitCode = 0, delayMs = 0 } = {}) {
+async function fakeCli(root, { exitCode = 0, delayMs = 0, stderr = '', recordEnvironment = false } = {}) {
   const packageRoot = path.join(root, 'node_modules', '@openai', 'codex');
   const entrypoint = path.join(packageRoot, 'bin', 'codex.mjs');
   await fs.mkdir(path.dirname(entrypoint), { recursive: true });
@@ -118,10 +118,11 @@ async function fakeCli(root, { exitCode = 0, delayMs = 0 } = {}) {
     for await (const chunk of process.stdin) chunks.push(chunk);
     const input = Buffer.concat(chunks).toString('utf8');
     const args = process.argv.slice(2);
-    const record = { args, input, cwd: process.cwd() };
+    const record = { args, input, cwd: process.cwd(), ...(${recordEnvironment ? 'true' : 'false'} ? { temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: process.env.TMPDIR } : {}) };
     console.log(JSON.stringify(record));
     if (args.includes('-o')) await fs.writeFile(args[args.indexOf('-o') + 1], input);
     if (${exitCode} === 2) console.error("error: unexpected argument 'are' found");
+    if (${JSON.stringify(stderr)}) console.error(${JSON.stringify(stderr)});
     await new Promise(resolve => setTimeout(resolve, ${delayMs}));
     process.exitCode = ${exitCode};
   `);
@@ -191,6 +192,47 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
   assert.equal(report.iterationReviews[0].action, 'stop');
   assert.ok(result.artifactIds.includes('iteration-monitor-1.json'));
+});
+
+test('production Codex attempts use an isolated temporary directory', async t => {
+  const root = await fixture(t), { entrypoint } = await fakeCli(root, { recordEnvironment: true });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '1', CODEX_TIMEOUT_MS: '10000' });
+  const job = { taskId: 'temp-task', workspaceId: 'temp-workspace', runId: 'run', objective };
+  await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
+  const record = JSON.parse((await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')));
+  assert.ok(record.temp && record.tmp && record.tmpdir);
+  assert.equal(record.temp, record.tmp);
+  assert.equal(record.temp, record.tmpdir);
+  assert.equal(path.dirname(record.temp), path.resolve(os.tmpdir()));
+  assert.notEqual(record.temp, process.env.TEMP);
+});
+
+test('service failures with cleanup warnings use bounded retries and publish the actual cause', async t => {
+  const root = await fixture(t), { entrypoint } = await fakeCli(root, {
+    exitCode: 1,
+    stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)\nHTTP 503 Service Unavailable',
+    recordEnvironment: true,
+  });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000',
+    ITERATION_SAME_FAILURE_LIMIT: '3', ITERATION_FAILURE_LIMIT: '8' });
+  const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
+  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
+  assert.equal(result.status, 'FAIL');
+  assert.match(result.reason, /Iteration monitor stopped at iteration 3/);
+  assert.match(result.reason, /503 Service Unavailable/);
+  const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
+  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 3);
+  const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
+  assert.deepEqual(report.iterationReviews.map(review => [review.category, review.action, review.aiInvoked]),
+    [['service', 'retry', false], ['service', 'retry', false], ['service', 'stop', false]]);
+  const temps = new Set();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const record = JSON.parse(await fs.readFile(path.join(output, `production-orchestrator-${attempt}.stdout.jsonl`), 'utf8'));
+    temps.add(record.temp);
+    await assert.rejects(fs.stat(record.temp), { code: 'ENOENT' });
+  }
+  assert.equal(temps.size, 3);
 });
 
 test('telemetry includes the newest workspace files beyond the first directory entries', async t => {
