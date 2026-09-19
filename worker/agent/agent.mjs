@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand, maintainLease } from './process-runner.mjs';
-import { artifactContentType, runProductionHarness } from './production-harness.mjs';
+import { artifactContentType, commandDiagnostic, runProductionHarness } from './production-harness.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -144,7 +144,7 @@ export async function executeJob(job, ctx) {
     signal.throwIfAborted();
     const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
     logs.push({ name, ...result, passed });
-    if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}): ${result.error || result.stderr.trim().slice(-1000) || 'No diagnostic output.'}`), { result });
+    if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`), { result });
     await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }

@@ -90,6 +90,31 @@ export function codexInvocation(args, command = codexCommand()) {
   return { command, args };
 }
 
+export function projectValidationArgs(projectFile) {
+  return [
+    `-project=${projectFile}`,
+    '-run=LoadPackage',
+    '-all',
+    '-projectonly',
+    '-fast',
+    '-unattended',
+    '-nop4',
+    '-nosplash',
+    '-nullrhi',
+    '-NoSound',
+  ];
+}
+
+export function commandDiagnostic(result, limit = 2000) {
+  const parts = [];
+  if (result?.error) parts.push(`process error:\n${String(result.error).trim()}`);
+  for (const [label, value] of [['stderr', result?.stderr], ['stdout', result?.stdout]]) {
+    const text = String(value || '').trim();
+    if (text) parts.push(`${label}:\n${text.slice(-limit)}`);
+  }
+  return parts.join('\n') || 'No diagnostic output.';
+}
+
 export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
@@ -148,7 +173,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
 
       const deliverables = await inspectProduction(project);
       if (deliverables.missing.length) throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}.`);
-      await step(`unreal-project-validation-${attempt}`, unreal, [deliverables.files.projectFile, '-run=Help', '-unattended', '-nop4', '-nosplash', '-nullrhi'], 180000, project,
+      await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
         result => !result.error && result.exitCode === 0 && !result.timedOut);
       let acceptance;
       try { acceptance = JSON.parse(await fs.readFile(deliverables.files.acceptanceReport, 'utf8')); } catch (error) { throw new Error(`Invalid acceptance report: ${error.message}`); }

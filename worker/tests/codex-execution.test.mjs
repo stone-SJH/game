@@ -5,11 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executeJob } from '../agent/agent.mjs';
-import { codexInvocation } from '../agent/production-harness.mjs';
+import { codexInvocation, commandDiagnostic, projectValidationArgs } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
 const chinese = '\u4e2d\u6587\u6218\u6597\u573a\u666f';
 const objective = `${chinese} with spaces\nsecond line\r\n"quoted" & | < > ^ %PATH% !VAR! $(literal) \\`;
+
+test('Unreal project validation uses a real package-loading commandlet', () => {
+  assert.deepEqual(projectValidationArgs('D:/workspace/Warden.uproject'), [
+    '-project=D:/workspace/Warden.uproject', '-run=LoadPackage', '-all', '-projectonly', '-fast',
+    '-unattended', '-nop4', '-nosplash', '-nullrhi', '-NoSound',
+  ]);
+});
+
+test('command diagnostics include process errors, stderr, and stdout', () => {
+  const diagnostic = commandDiagnostic({ error: 'spawn failed', stderr: 'cleanup warning', stdout: '503 Service Unavailable' });
+  assert.match(diagnostic, /process error:\nspawn failed/);
+  assert.match(diagnostic, /stderr:\ncleanup warning/);
+  assert.match(diagnostic, /stdout:\n503 Service Unavailable/);
+});
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'worker invocation '));
