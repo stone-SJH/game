@@ -50,6 +50,22 @@ test('failure classification distinguishes Help probe, service outage and cleanu
   assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true }), 'production-orchestrator').action, 'stop');
 });
 
+test('acceptance failures preserve the failing criteria for bounded repair', async t => {
+  const f = await fixture(t), review = createIterationMonitor(f);
+  const error = Object.assign(failed('Acceptance report does not prove a passing packaged game. Failed criteria: near-aaa-visual-fidelity:FAIL.'), {
+    acceptanceFailure: {
+      status: 'FAILED', pass: false, visualStatus: 'FAIL',
+      failedCriteria: [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }],
+    },
+  });
+  const record = await review({ attempt: 1, stage: 'acceptance-report', error });
+  assert.equal(record.action, 'repair-project');
+  assert.deepEqual(record.acceptanceFailure.failedCriteria, [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }]);
+  assert.match(record.repairInstructions, /near-aaa-visual-fidelity:FAIL/);
+  const saved = JSON.parse(await fs.readFile(path.join(f.output, 'iteration-monitor-1.json'), 'utf8'));
+  assert.deepEqual(saved.diagnostics.acceptanceFailure.failedCriteria, [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }]);
+});
+
 test('first failure uses rules; second uses restricted AI; third stops despite unlimited production retries', async t => {
   const f = await fixture(t), review = createIterationMonitor(f);
   const error = attempt => failed(`unreal-project-validation-${attempt} failed (exit 1):\nMap missing`, { stdout: 'Missing default map' });
