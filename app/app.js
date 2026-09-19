@@ -150,8 +150,12 @@ async function refreshDetail() {
   const artifacts = node('div',undefined,'artifacts');
   for (const artifact of task.artifacts) {
     const figure = node('figure',undefined,'artifact');
-    if (['image/png','image/jpeg','image/webp'].includes(artifact.content_type)) { const img = node('img'); img.src=artifact.downloadUrl; img.alt=artifact.name; img.loading='lazy'; figure.append(img); }
-    const caption=node('figcaption'), link=node('a',artifact.name); link.href=artifact.downloadUrl; link.target='_blank'; link.rel='noopener';
+    const image = ['image/png','image/jpeg','image/webp'].includes(artifact.content_type);
+    if (image) { const img = node('img'); img.src=artifact.downloadUrl; img.alt=artifact.name; img.loading='lazy'; figure.append(img); }
+    const packageFile = /\.(?:zip|7z|tar(?:\.gz)?|exe)$/i.test(artifact.name);
+    const caption=node('figcaption'), link=node('a',artifact.name); link.href=artifact.downloadUrl;
+    if (image) { link.target='_blank'; link.rel='noopener'; }
+    else { link.download=artifact.name; caption.append(node('span', packageFile ? 'Playable package / download' : 'Download', 'artifact-kind')); }
     caption.append(link,node('small',`${Number(artifact.size_bytes).toLocaleString()} bytes`),node('small',`SHA-256 ${artifact.sha256}`)); figure.append(caption); artifacts.append(figure);
   }
   pane.append(artifacts);

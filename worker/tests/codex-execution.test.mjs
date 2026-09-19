@@ -4,8 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { executeJob } from '../agent/agent.mjs';
+import { archivePackage, executeJob } from '../agent/agent.mjs';
 import { codexInvocation, commandDiagnostic, projectValidationArgs } from '../agent/production-harness.mjs';
+import { runProductionHarness } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
 const chinese = '\u4e2d\u6587\u6218\u6597\u573a\u666f';
@@ -23,6 +24,65 @@ test('command diagnostics include process errors, stderr, and stdout', () => {
   assert.match(diagnostic, /process error:\nspawn failed/);
   assert.match(diagnostic, /stderr:\ncleanup warning/);
   assert.match(diagnostic, /stdout:\n503 Service Unavailable/);
+});
+
+test('playable package archive contains the complete packaged directory', async t => {
+  const root = await fixture(t);
+  const packageRoot = path.join(root, 'package', 'Windows');
+  const archive = path.join(root, 'playable.zip');
+  await fs.mkdir(path.join(packageRoot, 'Warden', 'Content'), { recursive: true });
+  await fs.writeFile(path.join(packageRoot, 'Warden.exe'), 'launcher');
+  await fs.writeFile(path.join(packageRoot, 'Warden', 'Content', 'game.pak'), 'content');
+  await archivePackage(packageRoot, archive, new AbortController().signal);
+  const listing = await runCommand(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-tf', path.basename(archive)], { cwd: path.dirname(archive), timeoutMs: 10000 });
+  assert.equal(listing.exitCode, 0, listing.stderr);
+  assert.match(listing.stdout, /Warden\.exe/);
+  assert.match(listing.stdout, /game\.pak/);
+});
+
+test('playable checkpoint is published before a later acceptance failure', async t => {
+  const root = await fixture(t);
+  const project = path.join(root, 'project');
+  const output = path.join(root, 'run');
+  const skill = path.join(root, 'skill.md');
+  const packageFile = path.join(project, 'package', 'Windows', 'Game.exe');
+  const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
+    'level-blockout-and-traversal', 'gameplay-foundation-and-input', 'camera-combat-ai-and-feel',
+    'world-materials-fx-audio-and-ui', 'integration-build-and-playtest', 'package-and-acceptance'];
+  await fs.writeFile(skill, 'fixture skill');
+  environment(t, { YAHAHA_PRODUCTION_SKILL: skill, CODEX_MAX_ATTEMPTS: '1', CODEX_RETRY_DELAY_MS: '1' });
+  const checkpoints = [];
+  const step = async name => {
+    if (name.startsWith('production-orchestrator')) {
+      await fs.mkdir(path.dirname(packageFile), { recursive: true });
+      await fs.writeFile(path.join(project, 'Game.uproject'), '{}');
+      await fs.writeFile(path.join(project, 'scene-preview.png'), 'preview');
+      await fs.writeFile(packageFile, 'game');
+      await fs.mkdir(path.join(project, 'provenance'), { recursive: true });
+      await fs.mkdir(path.join(project, 'plan'), { recursive: true });
+      await fs.mkdir(path.join(project, 'acceptance'), { recursive: true });
+      await fs.writeFile(path.join(project, 'workspace-manifest.json'), '{}');
+      await fs.writeFile(path.join(project, 'provenance', 'asset-manifest.json'), '{}');
+      await fs.writeFile(path.join(project, 'plan', 'stage-manifest.json'), JSON.stringify({ stages: stages.map(id => ({ id, status: 'ACCEPTED' })) }));
+      await fs.writeFile(path.join(project, 'acceptance', 'playtest-evidence.json'), '{}');
+      await fs.writeFile(path.join(project, 'acceptance', 'acceptance-report.json'), JSON.stringify({ protocol: 1, passed: false, criteria: [{ status: 'FAIL' }] }));
+      for (const stage of stages) {
+        const directory = path.join(project, 'stages', stage);
+        await fs.mkdir(directory, { recursive: true });
+        await fs.writeFile(path.join(directory, 'stage-report.json'), JSON.stringify({ status: 'ACCEPTED' }));
+        await fs.writeFile(path.join(directory, 'evidence.json'), JSON.stringify({ criteria: [{ status: 'PASS' }] }));
+      }
+    }
+    return { exitCode: 0, timedOut: false, error: null, stderr: '', stdout: '', stopConfirmed: true };
+  };
+  await assert.rejects(runProductionHarness({
+    job: { taskId: 'task', runId: 'run', workspaceId: 'workspace', objective: 'fixture' }, project, output,
+    signal: new AbortController().signal, step, unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {},
+    onIterationPackage: async value => checkpoints.push(value),
+  }), /Acceptance report does not prove|retry budget exhausted/);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].attempt, 1);
+  assert.equal(checkpoints[0].packageFile, packageFile);
 });
 
 async function fixture(t) {

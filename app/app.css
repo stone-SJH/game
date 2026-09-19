@@ -4,3 +4,4 @@
 .progress-error{color:#a63b2c;background:#fff1ee;border-left:3px solid #c4513d;padding:10px 12px;margin:12px 0;overflow-wrap:anywhere}
 .status.stale{color:#a25a18}
 .run-history{margin:0 0 28px}.run-history ol{list-style:none;padding:0;margin:0}.run-history li{border-bottom:1px solid #e6e9ea;padding:10px 0}.run-history strong{font-size:12px;text-transform:capitalize}.run-history p{margin:6px 0 0;color:#667271;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.artifact-kind{display:block;color:#778282;font-size:11px;margin-bottom:7px;text-transform:uppercase;letter-spacing:0}

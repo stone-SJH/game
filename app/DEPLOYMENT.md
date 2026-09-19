@@ -9,4 +9,4 @@ Use the same origin for the page, sessions, `/v1/*` and `/artifacts/*`; the API'
 
 Register using an operator-issued single-use invitation, or log in. Confirm that creating/reopening tasks reads the owner's server-side list, artifacts download only for that owner, logout removes access, and cancellation displays pending versus confirmed state. User registration does not allocate a worker; the operator must enroll and bind one.
 
-The current view includes task events, artifact images/downloads and final reports. Pause/resume and conversation are still Phase 1 backlog. Deploy the matching controller API from the same Git commit, and do not roll back to the old shared-token frontend/API after multi-user data exists.
+The current view includes task events, artifact images/downloads, playable package archives from successful worker iterations, and final reports. Pause/resume and conversation are still Phase 1 backlog. Deploy the matching controller API from the same Git commit, and do not roll back to the old shared-token frontend/API after multi-user data exists.

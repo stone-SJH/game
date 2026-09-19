@@ -17,6 +17,35 @@ const ignoredDirectories = new Set(['.git', 'Binaries', 'DerivedDataCache', 'Int
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const logExtensions = new Set(['.log', '.jsonl', '.txt']);
 const normalizePath = value => value.split(path.sep).join('/');
+
+export async function archivePackage(packageRoot, destination, signal) {
+  await fsp.rm(destination, { force: true });
+  const windows = process.platform === 'win32';
+  const command = windows ? 'tar.exe' : 'tar';
+  const extension = windows ? '.zip' : '.tar.gz';
+  const temporaryName = `.yahahagame-package-${crypto.randomUUID()}${extension}`;
+  const temporary = path.join(packageRoot, temporaryName);
+  const args = windows
+    ? ['-a', '-c', '-f', temporaryName, `--exclude=./${temporaryName}`, '.']
+    : ['-czf', temporaryName, `--exclude=./${temporaryName}`, '.'];
+  const result = await runCommand(command, args, {
+    cwd: packageRoot,
+    signal,
+    timeoutMs: Number(process.env.PACKAGE_ARCHIVE_TIMEOUT_MS || 60 * 60 * 1000),
+  });
+  if (!result.stopConfirmed || result.error || result.exitCode !== 0 || result.timedOut) {
+    await fsp.rm(temporary, { force: true });
+    throw new Error(`Playable package archive failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`);
+  }
+  try { await fsp.rename(temporary, destination); }
+  finally { await fsp.rm(temporary, { force: true }); }
+  return destination;
+}
+
+function playablePackageName(attempt) {
+  return `playable-package-iteration-${String(attempt).padStart(3, '0')}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
+}
+
 async function recentFiles(root, predicate, limit = 30) {
   const found = [];
   async function visit(directory) {
@@ -78,6 +107,7 @@ export async function executeJob(job, ctx) {
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
   const logs = [], artifactIds = [];
+  const playablePackages = [];
   const uploadedScreenshots = new Map();
   let currentProgress = { phase: 'preparing', goal: job.objective, status: 'running', steps: { completed: 0, total: 3 } };
   let publishing = Promise.resolve();
@@ -152,7 +182,21 @@ export async function executeJob(job, ctx) {
   let failure;
   let production;
   try {
-    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish });
+    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
+      onIterationPackage: async ({ attempt, packageRoot }) => {
+        if (typeof uploadFile !== 'function') return;
+        const name = playablePackageName(attempt);
+        const archiveFile = path.join(output, name);
+        try {
+          await archivePackage(packageRoot, archiveFile, signal);
+          const artifactId = await uploadFile(name, archiveFile, artifactContentType(archiveFile));
+          artifactIds.push(artifactId);
+          playablePackages.push({ iteration: attempt, name, path: name, artifactId });
+          await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifact: name });
+        } catch (error) {
+          await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifactError: error.message });
+        }
+      } });
     for (const file of Object.values(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file)));
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
@@ -164,7 +208,8 @@ export async function executeJob(job, ctx) {
   }
   await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective });
   const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
-    deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null };
+    deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null,
+    playablePackages };
   const reportName = 'production-report.json';
   const file = path.join(output, reportName);
   await atomicJson(file, report);

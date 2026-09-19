@@ -25,7 +25,7 @@ async function filesUnder(directory) {
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (!['.git', 'DerivedDataCache', 'Intermediate'].includes(entry.name)) pending.push(full);
+        if (!['.git', 'DerivedDataCache', 'Intermediate', 'history'].includes(entry.name)) pending.push(full);
       } else if (entry.isFile()) files.push(full);
     }
   }
@@ -115,7 +115,7 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
-export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {} }) {
+export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
   const context = {
@@ -175,6 +175,9 @@ export async function runProductionHarness({ job, project, output, signal, step,
       if (deliverables.missing.length) throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}.`);
       await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
         result => !result.error && result.exitCode === 0 && !result.timedOut);
+      await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
+        result => !result.error && result.exitCode === 0 && !result.timedOut);
+      await onIterationPackage({ attempt, project, packageRoot: path.dirname(deliverables.files.packageFile), packageFile: deliverables.files.packageFile });
       let acceptance;
       try { acceptance = JSON.parse(await fs.readFile(deliverables.files.acceptanceReport, 'utf8')); } catch (error) { throw new Error(`Invalid acceptance report: ${error.message}`); }
       const criteria = acceptance.criteria || acceptance.acceptanceCriteria;
@@ -195,8 +198,6 @@ export async function runProductionHarness({ job, project, output, signal, step,
           throw new Error(`Stage ${stage} does not contain passing evidence.`);
         }
       }
-      await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
-        result => !result.error && result.exitCode === 0 && !result.timedOut);
       return deliverables;
     } catch (error) {
       await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {
