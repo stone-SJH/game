@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { archivePackage, executeJob } from '../agent/agent.mjs';
-import { codexInvocation, commandDiagnostic, projectValidationArgs } from '../agent/production-harness.mjs';
+import { codexInvocation, commandDiagnostic, hasHardFailureMarker, projectValidationArgs } from '../agent/production-harness.mjs';
 import { runProductionHarness } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
@@ -24,6 +24,19 @@ test('command diagnostics include process errors, stderr, and stdout', () => {
   assert.match(diagnostic, /process error:\nspawn failed/);
   assert.match(diagnostic, /stderr:\ncleanup warning/);
   assert.match(diagnostic, /stdout:\n503 Service Unavailable/);
+});
+
+test('hard-failure detection ignores command text and accepts explicit markers', () => {
+  const commandEvent = JSON.stringify({ type: 'item.completed', item: {
+    type: 'command_execution', command: "print('hard_failure', False); print('TASK_IMPOSSIBLE')",
+  }});
+  const agentEvent = JSON.stringify({ type: 'item.completed', item: {
+    type: 'agent_message', text: 'HARD_FAILURE: the installed toolchain cannot satisfy the objective',
+  }});
+  assert.equal(hasHardFailureMarker(commandEvent), false);
+  assert.equal(hasHardFailureMarker(`${commandEvent}\n${agentEvent}`), true);
+  assert.equal(hasHardFailureMarker('TASK_IMPOSSIBLE: no compatible renderer'), true);
+  assert.equal(hasHardFailureMarker('the word HARD_FAILURE appears in documentation'), false);
 });
 
 test('playable package archive contains the complete packaged directory', async t => {

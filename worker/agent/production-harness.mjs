@@ -117,6 +117,24 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
+function explicitHardFailureLine(value) {
+  return /^\s*(?:HARD_FAILURE|TASK_IMPOSSIBLE)\s*(?::|[-!]?)\s*(?:\S|$)/i.test(String(value || ''));
+}
+
+export function hasHardFailureMarker(output) {
+  const text = String(output || '');
+  for (const line of text.split(/\r?\n/)) {
+    let event;
+    try { event = JSON.parse(line); } catch { event = null; }
+    if (event?.item?.type === 'agent_message') {
+      if (String(event.item.text || '').split(/\r?\n/).some(explicitHardFailureLine)) return true;
+      continue;
+    }
+    if (!event && explicitHardFailureLine(line)) return true;
+  }
+  return false;
+}
+
 function actualType(value) {
   if (value === null || value === undefined) return 'missing';
   if (Array.isArray(value)) return 'array';
@@ -279,7 +297,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
         input: prompt,
         env: { ...process.env, TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
       });
-      if (/\b(?:HARD_FAILURE|TASK_IMPOSSIBLE)\b/i.test(`${orchestration.stdout}\n${orchestration.stderr}`)) {
+      if (hasHardFailureMarker(`${orchestration.stdout}\n${orchestration.stderr}`)) {
         throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
       }
       if (await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) throw Object.assign(new Error('Production marked as impossible by the worker.'), { hardFailure: true });
