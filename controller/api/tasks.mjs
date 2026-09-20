@@ -272,7 +272,11 @@ async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PA
     WHERE ${filters.join(' AND ')} ORDER BY a.created_at DESC,a.artifact_id DESC LIMIT $${filterParams.length}`, filterParams)).rows;
   const hasMore = rows.length > pageSize, selected = rows.slice(0, pageSize), next = selected.at(-1);
   const summaryFilters = cursor ? filters.slice(0, -1) : filters;
-  const summaryParams = cursor ? filterParams.slice(0, -1) : filterParams, summary = (await client.query(`SELECT count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
+  // The page query appends the cursor values and LIMIT after the filters. The
+  // summary query has neither the cursor predicate nor LIMIT, so remove those
+  // parameters before binding it. Without this, PostgreSQL rejects the query
+  // with a prepared-statement parameter count error when opening a task.
+  const summaryParams = cursor ? filterParams.slice(0, -3) : filterParams.slice(0, -1), summary = (await client.query(`SELECT count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
     FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id
     LEFT JOIN task_runs r ON r.run_id=j.run_id LEFT JOIN task_revisions rev ON rev.revision_id=r.revision_id
     WHERE ${summaryFilters.join(' AND ')}`, summaryParams)).rows[0];
