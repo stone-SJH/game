@@ -219,52 +219,69 @@ function artifactCard(artifact) {
 function artifactPanel(task, taskId) {
   const section = node('section', undefined, 'artifact-panel'), heading = node('div', undefined, 'artifact-heading');
   heading.append(node('h3', 'All artifacts'));
-  const count = Number(task.artifactCount || 0), bytes = Number(task.artifactBytes || 0);
   const summary = node('small'); heading.append(summary); section.append(heading);
-  let loadedArtifacts = [...(task.artifacts || [])], activeType = 'all', nextCursor = task.artifactsNextCursor;
-  const filters = node('div', undefined, 'artifact-filters');
+  const facets = Array.isArray(task.artifactFacets) && task.artifactFacets.length ? task.artifactFacets : [{ taskRevision: task.taskRevision, count: task.artifactCount || 0, bytes: task.artifactBytes || 0, types: {} }];
+  const revisionKey = value => Number.isInteger(value) ? String(value) : 'legacy';
+  let activeRevision = revisionKey(Number.isInteger(task.taskRevision) ? task.taskRevision : facets[0]?.taskRevision);
+  let activeType = 'all', loadedArtifacts = [], nextCursor = null, loadedKey = '';
+  const revisionFilters = node('div', undefined, 'artifact-revision-filters'), typeFilters = node('div', undefined, 'artifact-filters');
   const groups = node('div', undefined, 'artifact-groups');
-  const more = node('button', 'Load more artifacts'); more.className = 'artifact-more'; more.hidden = !nextCursor;
-  const filterButtons = new Map();
-  for (const [type, label] of Object.entries(artifactTypeLabels)) {
-    const button = node('button', label); button.type = 'button'; button.className = 'artifact-filter'; button.setAttribute('aria-pressed', type === activeType ? 'true' : 'false');
-    button.onclick = () => { activeType = type; render(); }; filters.append(button); filterButtons.set(type, button);
+  const more = node('button', 'Load more artifacts'); more.className = 'artifact-more'; more.hidden = true;
+  function facet() { return facets.find(item => revisionKey(item.taskRevision) === activeRevision) || { taskRevision: null, count: 0, bytes: 0, types: {} }; }
+  function query() {
+    const revision = activeRevision === 'legacy' ? 'legacy' : activeRevision;
+    return `revision=${encodeURIComponent(revision)}&type=${encodeURIComponent(activeType)}&limit=5`;
   }
   function render() {
-    const filtered = loadedArtifacts.filter(item => activeType === 'all' || artifactTypeOf(item) === activeType);
-    summary.textContent = count ? `${filtered.length} shown · ${loadedArtifacts.length} loaded of ${count} · ${bytes.toLocaleString()} bytes` : 'No artifacts yet';
-    for (const [type, button] of filterButtons) {
-      button.setAttribute('aria-pressed', type === activeType ? 'true' : 'false');
-      const amount = type === 'all' ? loadedArtifacts.length : loadedArtifacts.filter(item => artifactTypeOf(item) === type).length;
-      button.textContent = `${artifactTypeLabels[type]} (${amount})`;
+    const current = facet(), typeCounts = current.types || {}, total = activeType === 'all' ? Number(current.count || 0) : Number(typeCounts[activeType]?.count || 0);
+    summary.textContent = `${loadedArtifacts.length} shown · ${total} total · ${Number(activeType === 'all' ? current.bytes : typeCounts[activeType]?.bytes || 0).toLocaleString()} bytes`;
+    revisionFilters.replaceChildren();
+    for (const item of facets) {
+      const key = revisionKey(item.taskRevision), label = Number.isInteger(item.taskRevision) ? `Task Revision ${item.taskRevision}` : 'Legacy / unassigned';
+      const button = node('button', `${label} (${Number(item.count || 0)})`); button.type = 'button'; button.className = 'artifact-filter'; button.setAttribute('aria-pressed', key === activeRevision ? 'true' : 'false');
+      button.onclick = () => { if (key === activeRevision) return; activeRevision = key; activeType = 'all'; load(true); }; revisionFilters.append(button);
+    }
+    typeFilters.replaceChildren();
+    for (const [type, label] of Object.entries(artifactTypeLabels)) {
+      const amount = type === 'all' ? Number(current.count || 0) : Number(typeCounts[type]?.count || 0);
+      const button = node('button', `${label} (${amount})`); button.type = 'button'; button.className = 'artifact-filter'; button.setAttribute('aria-pressed', type === activeType ? 'true' : 'false');
+      button.onclick = () => { if (type === activeType) return; activeType = type; load(true); }; typeFilters.append(button);
     }
     groups.replaceChildren();
-    if (!filtered.length) { groups.append(node('div', 'No artifacts in this category', 'empty')); return; }
-    const byRevision = new Map();
-    for (const artifact of filtered) {
-      const key = Number.isInteger(artifact.taskRevision) ? artifact.taskRevision : 0;
-      if (!byRevision.has(key)) byRevision.set(key, []);
-      byRevision.get(key).push(artifact);
-    }
-    for (const [revision, artifacts] of [...byRevision.entries()].sort((a, b) => b[0] - a[0])) {
+    if (!loadedArtifacts.length) groups.append(node('div', 'No artifacts in this category', 'empty'));
+    else {
       const group = node('section', undefined, 'artifact-group');
-      group.append(node('h4', revision ? `Task revision ${revision}` : 'Unassigned task revision'));
-      const grid = node('div', undefined, 'artifacts');
-      artifacts.sort((a, b) => Date.parse(b.created_at || b.createdAt || 0) - Date.parse(a.created_at || a.createdAt || 0)).forEach(item => grid.append(artifactCard(item)));
-      group.append(grid); groups.append(group);
+      group.append(node('h4', Number.isInteger(current.taskRevision) ? `Task Revision ${current.taskRevision}` : 'Legacy / unassigned'));
+      const grid = node('div', undefined, 'artifacts'); loadedArtifacts.forEach(item => grid.append(artifactCard(item))); group.append(grid); groups.append(group);
     }
+    more.hidden = !nextCursor;
   }
-  more.onclick = async () => {
+  async function load(reset = false) {
+    const key = `${activeRevision}:${activeType}`;
+    if (reset) { loadedArtifacts = []; nextCursor = null; loadedKey = ''; render(); }
+    if (loadedKey === key && !reset) return;
     more.disabled = true;
     try {
-      const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}`);
+      const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?${query()}`);
+      if (selected !== taskId || key !== `${activeRevision}:${activeType}`) return;
+      loadedArtifacts = page.artifacts || []; nextCursor = page.nextCursor; loadedKey = key; render();
+    } catch (error) { notice(error.message); } finally { more.disabled = false; }
+  }
+  more.onclick = async () => {
+    if (!nextCursor) return;
+    more.disabled = true;
+    try {
+      const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?${query()}&cursor=${encodeURIComponent(nextCursor)}`);
       if (selected !== taskId) return;
-      const seen = new Set(loadedArtifacts.map(item => item.artifact_id));
-      loadedArtifacts.push(...page.artifacts.filter(item => !seen.has(item.artifact_id)));
-      nextCursor = page.nextCursor; more.hidden = !nextCursor; render();
+      const seen = new Set(loadedArtifacts.map(item => item.artifact_id)); loadedArtifacts.push(...(page.artifacts || []).filter(item => !seen.has(item.artifact_id)));
+      nextCursor = page.nextCursor; render();
     } catch (error) { notice(error.message); } finally { more.disabled = false; }
   };
-  section.append(filters, groups, more); render(); return section;
+  section.append(revisionFilters, typeFilters, groups, more);
+  const initialKey = `${activeRevision}:all`, initial = (task.artifacts || []).filter(item => revisionKey(item.taskRevision) === activeRevision);
+  if (activeType === 'all' && initial.length) { loadedArtifacts = initial; nextCursor = task.artifactsNextCursor; loadedKey = initialKey; render(); }
+  else load(true);
+  return section;
 }
 function isPlayablePackage(artifact) {
   return /(?:^|-)playable-package-.*\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '') || /\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '');
@@ -324,8 +341,8 @@ async function loadCompletedArtifacts(task, taskId) {
   const cached = completedArtifactCache.get(cacheKey);
   if (cached) return { ...task, completedArtifacts: cached };
   try {
-    const runQuery = task.runId ? `&runId=${encodeURIComponent(task.runId)}` : '';
-    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100${runQuery}`);
+    const revisionQuery = Number.isInteger(task.taskRevision) ? `&revision=${encodeURIComponent(task.taskRevision)}` : '';
+    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100${revisionQuery}`);
     completedArtifactCache.set(cacheKey, page.artifacts || []);
     return { ...task, completedArtifacts: page.artifacts || [] };
   } catch { return task; }
@@ -360,7 +377,7 @@ async function refreshDetail() {
   if (epoch !== generation || target !== selected) return;
   const pane = $('detail');
   const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.taskRevision}:${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
-  const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
+  const artifactSignature = `${task.taskRevision || ''}:${JSON.stringify(task.artifactFacets || [])}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
   const completedOutputSignature = `${task.runId || ''}:${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
   if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
     const progress = pane.querySelector('.worker-progress');

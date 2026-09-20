@@ -5,6 +5,13 @@ const ARTIFACT_PAGE_SIZE = 5;
 const artifactPageCache = new Map();
 const ARTIFACT_CACHE_TTL = 30_000;
 const ARTIFACT_CACHE_MAX = 128;
+const artifactTypeSql = `CASE
+  WHEN lower(a.name) ~ '(\\.zip|\\.7z|\\.tar(\\.gz)?)$' OR lower(a.name) LIKE '%playable-package%' THEN 'playable-package'
+  WHEN lower(a.name) ~ '\\.exe$' OR lower(a.content_type) = 'application/x-msdownload' THEN 'executable'
+  WHEN lower(a.content_type) LIKE 'image/%' OR lower(a.name) ~ '\\.(png|jpe?g|webp|bmp|gif)$' THEN 'image'
+  WHEN lower(a.name) ~ '(stderr|stdout|session|diagnostic|log)' OR lower(a.name) ~ '\\.(log|jsonl|txt|out|err)$' THEN 'log'
+  WHEN lower(a.content_type) = 'application/json' OR lower(a.name) ~ '\\.json$' THEN 'report'
+  ELSE 'other' END`;
 const phases = new Set(['preparing', 'planning', 'thinking', 'crafting', 'building', 'evaluating', 'completed', 'failed', 'canceled', 'working']);
 const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const integer = (value, max = 9999) => {
@@ -245,22 +252,30 @@ function parseArtifactCursor(value) {
   if (!Array.isArray(decoded) || decoded.length !== 2 || !Number.isFinite(Date.parse(decoded[0])) || typeof decoded[1] !== 'string' || !decoded[1]) throw problem(400, 'Invalid artifact cursor.');
   return decoded;
 }
-async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PAGE_SIZE, runId = null } = {}) {
+async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PAGE_SIZE, runId = null, revision = null, type = 'all' } = {}) {
   const pageSize = Math.max(1, Math.min(100, Number(limit) || ARTIFACT_PAGE_SIZE));
-  const cacheKey = `${taskId}:${pageSize}:${runId || '*'}`;
+  const cacheKey = `${taskId}:${pageSize}:${runId || '*'}:${revision?.kind || 'all'}:${revision?.value ?? '*'}:${type}`;
   if (!cursor) {
     const cached = artifactPageCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
   }
-  const rows = (await client.query(`SELECT a.artifact_id,a.name,a.content_type,a.size_bytes,a.sha256,a.created_at,j.run_id,rev.revision_number AS task_revision
+  const filterParams = [taskId], filters = ['a.task_id=$1', 'a.verified=true'];
+  if (runId) { filterParams.push(runId); filters.push(`j.run_id=$${filterParams.length}`); }
+  if (revision?.kind === 'number') { filterParams.push(revision.value); filters.push(`rev.revision_number=$${filterParams.length}`); }
+  if (revision?.kind === 'legacy') filters.push('rev.revision_number IS NULL');
+  if (type && type !== 'all') { filterParams.push(type); filters.push(`${artifactTypeSql}=$${filterParams.length}`); }
+  if (cursor) { filterParams.push(cursor[0], cursor[1]); filters.push(`(a.created_at,a.artifact_id)<($${filterParams.length - 1}::timestamptz,$${filterParams.length}::text)`); }
+  filterParams.push(pageSize + 1);
+  const rows = (await client.query(`SELECT a.artifact_id,a.name,a.content_type,a.size_bytes,a.sha256,a.created_at,j.run_id,rev.revision_number AS task_revision,
+      ${artifactTypeSql} AS artifact_type
     FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id LEFT JOIN task_runs r ON r.run_id=j.run_id LEFT JOIN task_revisions rev ON rev.revision_id=r.revision_id
-    WHERE a.task_id=$1 AND a.verified=true AND ($2::text IS NULL OR j.run_id=$2)
-    AND ($3::timestamptz IS NULL OR (a.created_at,a.artifact_id)<($3::timestamptz,$4::text))
-    ORDER BY a.created_at DESC,a.artifact_id DESC LIMIT $5`, [taskId, runId || null, cursor?.[0] || null, cursor?.[1] || null, pageSize + 1])).rows;
+    WHERE ${filters.join(' AND ')} ORDER BY a.created_at DESC,a.artifact_id DESC LIMIT $${filterParams.length}`, filterParams)).rows;
   const hasMore = rows.length > pageSize, selected = rows.slice(0, pageSize), next = selected.at(-1);
-  const summary = (await client.query(`SELECT count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
+  const summaryFilters = cursor ? filters.slice(0, -1) : filters;
+  const summaryParams = cursor ? filterParams.slice(0, -1) : filterParams, summary = (await client.query(`SELECT count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
     FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id
-    WHERE a.task_id=$1 AND a.verified=true AND ($2::text IS NULL OR j.run_id=$2)`, [taskId, runId || null])).rows[0];
+    LEFT JOIN task_runs r ON r.run_id=j.run_id LEFT JOIN task_revisions rev ON rev.revision_id=r.revision_id
+    WHERE ${summaryFilters.join(' AND ')}`, summaryParams)).rows[0];
   const value = { artifacts: selected, nextCursor: hasMore ? artifactCursor(next) : null, count: summary.count, bytes: summary.bytes };
   if (!cursor) {
     while (artifactPageCache.size >= ARTIFACT_CACHE_MAX) artifactPageCache.delete(artifactPageCache.keys().next().value);
@@ -284,11 +299,43 @@ function artifactIteration(name) {
   const match = String(name || '').match(/^(?:playable-package-iteration|iteration-monitor-)(\d+)/i);
   return match ? Number(match[1]) : null;
 }
+function parseArtifactRevision(value) {
+  if (value === undefined || value === null || value === '' || value === 'all') return null;
+  if (value === 'legacy') return { kind: 'legacy' };
+  if (/^\d+$/.test(String(value))) return { kind: 'number', value: Number(value) };
+  throw problem(400, 'Invalid task revision filter.');
+}
+function parseArtifactType(value) {
+  const type = String(value || 'all');
+  if (!['all', 'image', 'log', 'playable-package', 'executable', 'report', 'other'].includes(type)) throw problem(400, 'Invalid artifact type filter.');
+  return type;
+}
 function artifactForUser(value) {
   const image = ['image/png', 'image/jpeg', 'image/webp'].includes(value.content_type);
   return { ...value, runId: value.run_id || null, taskRevision: Number.isInteger(value.task_revision) ? value.task_revision : null,
-    iteration: artifactIteration(value.name), artifactType: artifactType(value.name, value.content_type), createdAt: value.created_at,
+    iteration: artifactIteration(value.name), artifactType: value.artifact_type || artifactType(value.name, value.content_type), createdAt: value.created_at,
     downloadUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}`, ...(image && value.content_type === 'image/png' ? { previewUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}?preview=1` } : {}) };
+}
+async function artifactFacets(client, taskId, runs) {
+  const rows = (await client.query(`SELECT rev.revision_number AS task_revision,${artifactTypeSql} AS artifact_type,
+      count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
+    FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id LEFT JOIN task_runs r ON r.run_id=j.run_id LEFT JOIN task_revisions rev ON rev.revision_id=r.revision_id
+    WHERE a.task_id=$1 AND a.verified=true GROUP BY rev.revision_number,${artifactTypeSql}`, [taskId])).rows;
+  const byRevision = new Map();
+  for (const run of runs) {
+    const key = run.revision_number === null ? 'legacy' : String(run.revision_number);
+    byRevision.set(key, { taskRevision: Number.isInteger(run.revision_number) ? run.revision_number : null, runId: run.run_id,
+      status: run.status, createdAt: run.created_at, finishedAt: run.finished_at, count: 0, bytes: 0, types: {} });
+  }
+  for (const row of rows) {
+    const key = row.task_revision === null ? 'legacy' : String(row.task_revision);
+    const facet = byRevision.get(key) || { taskRevision: Number.isInteger(row.task_revision) ? row.task_revision : null, runId: null,
+      status: null, createdAt: null, finishedAt: null, count: 0, bytes: 0, types: {} };
+    const count = Number(row.count), bytes = Number(row.bytes);
+    facet.count += count; facet.bytes += bytes; facet.types[row.artifact_type] = { count, bytes };
+    byRevision.set(key, facet);
+  }
+  return [...byRevision.values()].sort((a, b) => (b.taskRevision ?? -1) - (a.taskRevision ?? -1));
 }
 // A short database lock serializes pilot scheduling and state transitions across API processes.
 export const change = (db, fn) => transaction(db, async client => {
@@ -357,7 +404,8 @@ export async function taskView(db, taskId, userId) {
       SELECT latest.progress,latest.created_at,COALESCE(failures.failures,'[]'::jsonb) AS failures,COALESCE(steps.steps,'[]'::jsonb) AS steps
       FROM latest LEFT JOIN failures USING (iteration) LEFT JOIN steps USING (iteration)
       ORDER BY latest.iteration::int`, [taskId, run?.run_id || ''])).rows;
-    const artifactResult = await artifactPage(client, taskId);
+    const artifactResult = await artifactPage(client, taskId, { revision: Number.isInteger(run?.revision_number) ? { kind: 'number', value: run.revision_number } : null });
+    const artifactRevisionFacets = await artifactFacets(client, taskId, runs);
     const diagnosticArtifacts = {};
     for (const artifact of (await client.query(`SELECT artifact_id,name FROM artifacts
         WHERE task_id=$1 AND job_id=$2 AND verified=true
@@ -378,6 +426,7 @@ export async function taskView(db, taskId, userId) {
       worker: task.worker_id ? { workerId: task.worker_id, status: job?.worker_status || 'OFFLINE', capabilities: job?.capabilities || {}, lastSeenAt: job?.last_seen_at || null,
         leaseUntil: job?.lease_until || null, attempt: job?.attempt || 0, updatedAt: job?.job_updated_at || null } : null,
       runs: runsForUser, iterationSummaries: iterationSummaries(iterationRows, task, runsForUser, diagnosticArtifacts),
+      artifactFacets: artifactRevisionFacets,
       events, eventCursor: events.at(-1)?.event_id || '0',
       allowedActions: terminal.has(task.status) ? ['rerun'] : task.status === 'CANCELING' ? [] : ['cancel'],
       artifacts: artifactResult.artifacts.map(artifactForUser), artifactCount: artifactResult.count, artifactBytes: artifactResult.bytes,
@@ -387,7 +436,8 @@ export async function taskView(db, taskId, userId) {
 export async function artifactView(db, taskId, userId, options = {}) {
   return transaction(db, async client => {
     await ownedTask(client, taskId, userId);
-    const result = await artifactPage(client, taskId, { cursor: parseArtifactCursor(options.cursor), limit: options.limit, runId: options.runId || null });
+    const result = await artifactPage(client, taskId, { cursor: parseArtifactCursor(options.cursor), limit: options.limit, runId: options.runId || null,
+      revision: parseArtifactRevision(options.revision), type: parseArtifactType(options.type) });
     return { artifacts: result.artifacts.map(artifactForUser), count: result.count, bytes: result.bytes, nextCursor: result.nextCursor };
   });
 }
