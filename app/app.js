@@ -123,7 +123,7 @@ function iterationSummaryRow(summary, task, index) {
       const diagnostics = node('ul', undefined, 'iteration-diagnostics');
       for (const failure of failures) {
         const item = node('li');
-        const facts = [failure.category, failure.stage, failure.attempt ? `attempt ${failure.attempt}` : '', Number.isInteger(failure.exitCode) ? `exit ${failure.exitCode}` : '', failure.timedOut ? 'timed out' : ''].filter(Boolean);
+        const facts = [failure.category, failure.stage, failure.attempt ? `attempt ${failure.attempt}` : '', Number.isInteger(failure.exitCode) ? `exit ${failure.exitCode}` : '', failure.timedOut ? 'timed out' : '', failure.variantCount > 1 ? `observed in ${failure.variantCount} telemetry variants` : ''].filter(Boolean);
         item.append(node('strong', facts.join(' · ') || 'Failure diagnostic'), node('p', failure.message || 'No diagnostic message.'));
         if (failure.command) item.append(node('div', `Command: ${failure.command}`, 'iteration-summary-step'));
         if (failure.completedSteps?.length) item.append(node('div', `Completed before failure: ${failure.completedSteps.join(', ')}`, 'iteration-summary-step'));

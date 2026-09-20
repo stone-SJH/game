@@ -118,6 +118,23 @@ function progressSignature(value) {
   const { receivedAt, observedAt, ...stable } = value;
   return JSON.stringify(stable);
 }
+function progressEventSignature(value) {
+  if (!value || typeof value !== 'object') return '';
+  if (!value.error && !value.diagnostic) return progressSignature(value);
+  // Error text is sticky while commands and workspace snapshots change. Keep those updates in
+  // jobs.progress, but avoid turning every telemetry snapshot into another failure event.
+  const source = value.diagnostic && typeof value.diagnostic === 'object' ? value.diagnostic : {};
+  return JSON.stringify({
+    phase: value.phase, status: value.status, goal: value.goal, step: value.step,
+    steps: value.steps, iteration: value.iteration, iterationTotal: value.iterationTotal,
+    error: value.error || source.message || null,
+    diagnostic: {
+      message: source.message || value.error || null, category: source.category || null,
+      exitCode: Number.isInteger(source.exitCode) ? source.exitCode : null,
+      timedOut: source.timedOut === true, noOutput: source.noOutput === true,
+    },
+  });
+}
 const phaseProgress = { preparing: 5, planning: 15, thinking: 30, crafting: 50, building: 70, evaluating: 90, completed: 100, failed: 95, canceled: 95, expired: 95 };
 function progressPercent(value, taskStatus = '') {
   if (!value || typeof value !== 'object') return null;
@@ -156,12 +173,26 @@ function runSummary(item, taskStatus) {
 }
 function iterationFailures(row) {
   const failures = Array.isArray(row.failures) ? row.failures : [];
-  const result = [];
+  const result = [], byKey = new Map();
   for (const item of failures) {
     if (!item || typeof item !== 'object') continue;
     const value = diagnostic(item.diagnostic || item);
-    if (!value || result.some(existing => JSON.stringify(existing) === JSON.stringify(value))) continue;
-    result.push(value);
+    if (!value) continue;
+    // Commands and stages can vary while the worker repeats one sticky failure. Group by the
+    // stable cause and retain the first useful command/output as the representative diagnostic.
+    const key = JSON.stringify({ message: value.message, category: value.category || null, exitCode: value.exitCode ?? null,
+      timedOut: value.timedOut === true, noOutput: value.noOutput === true });
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.variantCount = (existing.variantCount || 1) + 1;
+      if (!existing.command && value.command) existing.command = value.command;
+      if (!existing.stage && value.stage) existing.stage = value.stage;
+      if (!existing.stderr && value.stderr) existing.stderr = value.stderr;
+      if (!existing.stdout && value.stdout) existing.stdout = value.stdout;
+      continue;
+    }
+    const normalized = { ...value };
+    byKey.set(key, normalized); result.push(normalized);
   }
   return result;
 }
@@ -445,7 +476,7 @@ export async function heartbeat(db, worker, input, leaseMs) {
     if (job.run_finished_at) return { ok: true, action: 'STOP', reason: job.status };
     const progress = normalizeProgress(input.progress, job.objective || job.base_objective);
     if (progress) {
-      const changed = progressSignature(job.progress) !== progressSignature(progress);
+      const changed = progressEventSignature(job.progress) !== progressEventSignature(progress);
       await client.query('UPDATE jobs SET progress=$2,updated_at=now() WHERE job_id=$1', [job.job_id, progress]);
       await client.query('UPDATE tasks SET updated_at=now() WHERE task_id=$1', [job.task_id]);
       if (changed) await event(client, job.task_id, 'WORKER_PROGRESS', { workerId: worker.worker_id, jobId: job.job_id, runId: job.run_id, progress });

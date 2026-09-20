@@ -170,6 +170,25 @@ test('iteration diagnostics are scoped to the current task run', async () => {
   assert.deepEqual(view.iterationSummaries[0].failureReasons, []);
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(second), status: 'FAIL', stopConfirmed: true, progress: currentProgress } });
 });
+test('repeated progress snapshots collapse into one diagnostic', async () => {
+  const task = await create(), job = await claim();
+  const message = 'Acceptance report does not prove a passing packaged game.';
+  const progress = (step, command) => ({ phase: 'evaluating', status: 'failed', goal: task.objective, step, command, iteration: 1,
+    error: message, diagnostic: { stage: step, command, message, category: 'worker-step' } });
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: progress('production-orchestrator-1', 'node.exe') } });
+  const eventCount = (await db.query("SELECT count(*)::int AS count FROM task_events WHERE task_id=$1 AND event_type='WORKER_PROGRESS'", [task.taskId])).rows[0].count;
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: progress('production-orchestrator-1', 'powershell.exe') } });
+  assert.equal(Number((await db.query("SELECT count(*)::int AS count FROM task_events WHERE task_id=$1 AND event_type='WORKER_PROGRESS'", [task.taskId])).rows[0].count), eventCount);
+  for (const value of [progress('unreal-project-validation-1', 'UnrealEditor-Cmd.exe'), progress('packaged-game-playtest-1', 'Warden.exe')]) {
+    await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: value } });
+  }
+  const retry = { phase: 'planning', status: 'running', goal: task.objective, step: 'production-orchestrator-2', iteration: 2 };
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(job), progress: retry } });
+  const view = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(view.iterationSummaries[0].failureReasons.length, 1);
+  assert.equal(view.iterationSummaries[0].failureReasons[0].variantCount, 3);
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress: retry } });
+});
 test('iteration diagnostics classify Windows cleanup failures and retain raw output', async () => {
   const task = await create(), job = await claim();
   const failed = { phase: 'thinking', status: 'failed', goal: 'Repair the workspace', step: 'production-orchestrator-8', iteration: 8, iterationTotal: 9,
