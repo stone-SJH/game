@@ -243,19 +243,22 @@ function parseArtifactCursor(value) {
   if (!Array.isArray(decoded) || decoded.length !== 2 || !Number.isFinite(Date.parse(decoded[0])) || typeof decoded[1] !== 'string' || !decoded[1]) throw problem(400, 'Invalid artifact cursor.');
   return decoded;
 }
-async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PAGE_SIZE } = {}) {
+async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PAGE_SIZE, runId = null } = {}) {
   const pageSize = Math.max(1, Math.min(100, Number(limit) || ARTIFACT_PAGE_SIZE));
-  const cacheKey = `${taskId}:${pageSize}`;
+  const cacheKey = `${taskId}:${pageSize}:${runId || '*'}`;
   if (!cursor) {
     const cached = artifactPageCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
   }
-  const rows = (await client.query(`SELECT artifact_id,name,content_type,size_bytes,sha256,created_at
-    FROM artifacts WHERE task_id=$1 AND verified=true
-    AND ($2::timestamptz IS NULL OR (created_at,artifact_id)<($2::timestamptz,$3::text))
-    ORDER BY created_at DESC,artifact_id DESC LIMIT $4`, [taskId, cursor?.[0] || null, cursor?.[1] || null, pageSize + 1])).rows;
+  const rows = (await client.query(`SELECT a.artifact_id,a.name,a.content_type,a.size_bytes,a.sha256,a.created_at,j.run_id
+    FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id
+    WHERE a.task_id=$1 AND a.verified=true AND ($2::text IS NULL OR j.run_id=$2)
+    AND ($3::timestamptz IS NULL OR (a.created_at,a.artifact_id)<($3::timestamptz,$4::text))
+    ORDER BY a.created_at DESC,a.artifact_id DESC LIMIT $5`, [taskId, runId || null, cursor?.[0] || null, cursor?.[1] || null, pageSize + 1])).rows;
   const hasMore = rows.length > pageSize, selected = rows.slice(0, pageSize), next = selected.at(-1);
-  const summary = (await client.query('SELECT count(*)::int AS count,coalesce(sum(size_bytes),0)::bigint AS bytes FROM artifacts WHERE task_id=$1 AND verified=true', [taskId])).rows[0];
+  const summary = (await client.query(`SELECT count(*)::int AS count,coalesce(sum(a.size_bytes),0)::bigint AS bytes
+    FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id
+    WHERE a.task_id=$1 AND a.verified=true AND ($2::text IS NULL OR j.run_id=$2)`, [taskId, runId || null])).rows[0];
   const value = { artifacts: selected, nextCursor: hasMore ? artifactCursor(next) : null, count: summary.count, bytes: summary.bytes };
   if (!cursor) {
     while (artifactPageCache.size >= ARTIFACT_CACHE_MAX) artifactPageCache.delete(artifactPageCache.keys().next().value);
@@ -268,7 +271,8 @@ export function invalidateArtifactCache(taskId) {
 }
 function artifactForUser(value) {
   const image = ['image/png', 'image/jpeg', 'image/webp'].includes(value.content_type);
-  return { ...value, downloadUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}`, ...(image && value.content_type === 'image/png' ? { previewUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}?preview=1` } : {}) };
+  return { ...value, runId: value.run_id || null, createdAt: value.created_at,
+    downloadUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}`, ...(image && value.content_type === 'image/png' ? { previewUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}?preview=1` } : {}) };
 }
 // A short database lock serializes pilot scheduling and state transitions across API processes.
 export const change = (db, fn) => transaction(db, async client => {
@@ -337,7 +341,7 @@ export async function taskView(db, taskId, userId) {
       SELECT latest.progress,latest.created_at,COALESCE(failures.failures,'[]'::jsonb) AS failures,COALESCE(steps.steps,'[]'::jsonb) AS steps
       FROM latest LEFT JOIN failures USING (iteration) LEFT JOIN steps USING (iteration)
       ORDER BY latest.iteration::int`, [taskId, run?.run_id || ''])).rows;
-    const artifactResult = await artifactPage(client, taskId);
+    const artifactResult = await artifactPage(client, taskId, { runId: run?.run_id || null });
     const diagnosticArtifacts = {};
     for (const artifact of (await client.query(`SELECT artifact_id,name FROM artifacts
         WHERE task_id=$1 AND job_id=$2 AND verified=true
@@ -367,7 +371,7 @@ export async function taskView(db, taskId, userId) {
 export async function artifactView(db, taskId, userId, options = {}) {
   return transaction(db, async client => {
     await ownedTask(client, taskId, userId);
-    const result = await artifactPage(client, taskId, { cursor: parseArtifactCursor(options.cursor), limit: options.limit });
+    const result = await artifactPage(client, taskId, { cursor: parseArtifactCursor(options.cursor), limit: options.limit, runId: options.runId || null });
     return { artifacts: result.artifacts.map(artifactForUser), count: result.count, bytes: result.bytes, nextCursor: result.nextCursor };
   });
 }

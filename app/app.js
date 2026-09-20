@@ -18,6 +18,11 @@ async function api(url, options = {}) {
 function node(tag, text, className) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; }
 function status(value) { return node('span', value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
 function date(value) { return new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
+function timestamp(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString([], { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '';
+}
 function dateOrDash(value) { return value ? date(value) : 'No update yet'; }
 function lazyPreview(url, alt) {
   const image = node('img'); image.alt = alt; image.loading = 'lazy'; image.decoding = 'async'; image.fetchPriority = 'low'; image.dataset.src = url;
@@ -183,7 +188,7 @@ function iterationSummaryPanel(task) {
 }
 function artifactPanel(task, taskId) {
   const section = node('section', undefined, 'artifact-panel'), heading = node('div', undefined, 'artifact-heading');
-  heading.append(node('h3', 'Artifacts'));
+  heading.append(node('h3', 'Current run artifacts'));
   const count = Number(task.artifactCount || 0), bytes = Number(task.artifactBytes || 0);
   const summary = node('small', count ? `${task.artifacts.length} of ${count} · ${bytes.toLocaleString()} bytes` : 'No artifacts yet'); heading.append(summary); section.append(heading);
   const grid = node('div', undefined, 'artifacts');
@@ -198,7 +203,9 @@ function artifactPanel(task, taskId) {
     const packageFile = /\.(?:zip|7z|tar(?:\.gz)?|exe)$/i.test(artifact.name);
     if (artifact.content_type?.startsWith('image/')) { link.target = '_blank'; link.rel = 'noopener'; }
     else { link.download = artifact.name; caption.append(node('span', packageFile ? 'Playable package / download' : 'Download', 'artifact-kind')); }
-    caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`), node('small', `SHA-256 ${artifact.sha256}`)); figure.append(caption); grid.append(figure);
+    caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+    if (timestamp(artifact.created_at || artifact.createdAt)) caption.append(node('small', `Created ${timestamp(artifact.created_at || artifact.createdAt)}`));
+    caption.append(node('small', `SHA-256 ${artifact.sha256}`)); figure.append(caption); grid.append(figure);
   };
   if (!task.artifacts.length) grid.append(node('div', 'No artifacts yet', 'empty'));
   else task.artifacts.forEach(append);
@@ -209,7 +216,8 @@ function artifactPanel(task, taskId) {
     more.onclick = async () => {
       more.disabled = true;
       try {
-        const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}`);
+        const runQuery = task.runId ? `&runId=${encodeURIComponent(task.runId)}` : '';
+        const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}${runQuery}`);
         if (selected !== taskId) return;
         page.artifacts.forEach(append); nextCursor = page.nextCursor; more.hidden = !nextCursor;
         summary.textContent = `${grid.querySelectorAll('.artifact').length} of ${Number(page.count).toLocaleString()} · ${Number(page.bytes).toLocaleString()} bytes`;
@@ -233,7 +241,8 @@ function featuredArtifactCard(artifact, packageArtifact = false) {
     } else figure.append(node('div', 'Open image to load', 'artifact-placeholder'));
   }
   const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl; link.download = artifact.name;
-  caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+    caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+    if (timestamp(artifact.created_at || artifact.createdAt)) caption.append(node('small', `Created ${timestamp(artifact.created_at || artifact.createdAt)}`));
   if (packageArtifact) caption.append(node('strong', 'Playable package', 'completed-output-label'));
   figure.append(caption);
   return figure;
@@ -242,10 +251,11 @@ function completedOutputsPanel(task) {
   if (task.status !== 'COMPLETED') return null;
   const section = node('section', undefined, 'completed-outputs');
   const heading = node('div', undefined, 'completed-outputs-heading');
-  heading.append(node('h3', 'Completed outputs'), node('span', 'Ready to download'));
+  heading.append(node('h3', 'Current run outputs'), node('span', 'Latest run · ready to download'));
   section.append(heading);
-  const artifacts = Array.isArray(task.completedArtifacts) ? task.completedArtifacts : task.artifacts || [];
-  const packages = artifacts.filter(isPlayablePackage).sort((a, b) => String(b.name).localeCompare(String(a.name)));
+  const artifacts = (Array.isArray(task.completedArtifacts) ? task.completedArtifacts : task.artifacts || [])
+    .filter(artifact => !task.runId || !artifact.run_id || artifact.run_id === task.runId);
+  const packages = artifacts.filter(isPlayablePackage).sort((a, b) => Date.parse(b.created_at || b.createdAt || 0) - Date.parse(a.created_at || a.createdAt || 0));
   const keyArtifacts = artifacts.filter(item => !isPlayablePackage(item) && isFeaturedArtifact(item)).slice(0, 8);
   const packageGroup = node('div', undefined, 'completed-output-group');
   packageGroup.append(node('h4', 'Playable packages'));
@@ -260,11 +270,13 @@ function completedOutputsPanel(task) {
 }
 async function loadCompletedArtifacts(task, taskId) {
   if (task.status !== 'COMPLETED' || Number(task.artifactCount || 0) <= (task.artifacts?.length || 0)) return task;
-  const cached = completedArtifactCache.get(taskId);
+  const cacheKey = `${taskId}:${task.runId || ''}`;
+  const cached = completedArtifactCache.get(cacheKey);
   if (cached) return { ...task, completedArtifacts: cached };
   try {
-    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100`);
-    completedArtifactCache.set(taskId, page.artifacts || []);
+    const runQuery = task.runId ? `&runId=${encodeURIComponent(task.runId)}` : '';
+    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100${runQuery}`);
+    completedArtifactCache.set(cacheKey, page.artifacts || []);
     return { ...task, completedArtifacts: page.artifacts || [] };
   } catch { return task; }
 }
@@ -299,7 +311,7 @@ async function refreshDetail() {
   const pane = $('detail');
   const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
   const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
-  const completedOutputSignature = `${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
+  const completedOutputSignature = `${task.runId || ''}:${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
   if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
     const progress = pane.querySelector('.worker-progress');
     releaseLazyPreviews(progress); progress?.replaceWith(progressPanel(task));

@@ -239,6 +239,33 @@ test('verified artifacts are owner-scoped and completed work is immutable', asyn
   assert.equal((await request(`/v1/tasks/${task.taskId}/cancel`,{account:alice,data:{}})).value.status,'COMPLETED');
   assert.equal('leaseToken' in (await request(`/v1/tasks/${task.taskId}`,{account:alice})).value.result,false);
 });
+test('task artifacts default to the latest run while the unfiltered page retains history', async () => {
+  const task = await create(), upload = async (job, artifactId, name) => {
+    const bytes = Buffer.from(name);
+    const response = await fetch(`${origin}/v1/worker/artifacts/${task.taskId}/${artifactId}`, { method: 'POST', headers: {
+      ...agentHeaders, 'x-job-id': job.jobId, 'x-boot-id': job.bootId, 'x-lease-token': job.leaseToken,
+      'x-artifact-name': name, 'x-artifact-sha256': digest(bytes), 'content-type': 'text/plain'
+    }, body: bytes });
+    assert.equal(response.status, 201, await response.text());
+  };
+  const first = await claim();
+  await upload(first, 'artifact-first-run', 'first-run.txt');
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true } });
+  await db.query("UPDATE tasks SET deadline_at=now()-interval '1 second' WHERE task_id=$1", [task.taskId]);
+  const queued = await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Continue the task.' } });
+  assert.equal(queued.status, 202);
+  const second = await claim();
+  await upload(second, 'artifact-second-run', 'second-run.txt');
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(second), status: 'FAIL', stopConfirmed: true } });
+  const current = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(current.runId, queued.value.runId);
+  assert.deepEqual(current.artifacts.map(item => item.name), ['second-run.txt']);
+  assert.ok(current.artifacts[0].createdAt);
+  const all = (await request(`/v1/tasks/${task.taskId}/artifacts?limit=100`, { account: alice })).value;
+  assert.deepEqual(all.artifacts.map(item => item.name).sort(), ['first-run.txt', 'second-run.txt']);
+  const prior = (await request(`/v1/tasks/${task.taskId}/artifacts?limit=100&runId=${encodeURIComponent(first.runId)}`, { account: alice })).value;
+  assert.deepEqual(prior.artifacts.map(item => item.name), ['first-run.txt']);
+});
 test('terminal tasks can queue a follow-up run on the same workspace', async () => {
   const task = await create(), first = await claim();
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true } });
