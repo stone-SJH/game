@@ -197,6 +197,7 @@ function iterationFailures(row) {
   return result;
 }
 function iterationSummaries(rows, task, runs, diagnosticArtifacts = {}) {
+  const taskRevision = runs[0]?.taskRevision || null;
   const report = task.result?.report && typeof task.result.report === 'object' ? task.result.report : {};
   const reportDiagnostics = Array.isArray(report.failureDiagnostics) ? iterationFailures({ failures: report.failureDiagnostics.map(item => ({ diagnostic: item })) }) : [];
   const reportHasFailure = task.status === 'FAILED' || reportDiagnostics.length > 0 || Boolean(report.failure);
@@ -205,6 +206,7 @@ function iterationSummaries(rows, task, runs, diagnosticArtifacts = {}) {
     .filter(item => integer(item.progress.iteration, 999999) !== null)
     .sort((a, b) => integer(a.progress.iteration, 999999) - integer(b.progress.iteration, 999999));
   if (!grouped.length) return runs.filter(item => terminal.has(item.status) || terminal.has(item.jobStatus)).map(item => ({
+    taskRevision: item.taskRevision || null,
     iteration: null,
     status: item.status,
     goal: item.objective || task.objective,
@@ -228,7 +230,7 @@ function iterationSummaries(rows, task, runs, diagnosticArtifacts = {}) {
     if (!summary && terminalStatus === 'FAILED') summary = 'The iteration failed validation.';
     if (!summary) summary = `In progress: ${progress.step || progress.phase || 'working'}.`;
     const iterationArtifactId = text(diagnosticArtifacts[iteration], 120) || reportArtifactId;
-    return { iteration, status: terminalStatus, goal: text(progress.goal || task.objective, 4000), summary: summary.slice(0, 1000), step: text(progress.step, 180), failureReasons: failures,
+    return { taskRevision, iteration, status: terminalStatus, goal: text(progress.goal || task.objective, 4000), summary: summary.slice(0, 1000), step: text(progress.step, 180), failureReasons: failures,
       ...(iterationArtifactId && (failures.length || terminalStatus === 'FAILED') ? { diagnosticArtifactId: iterationArtifactId } : {}),
       diagnosticMissing: continued && !failures.length, updatedAt: item.updatedAt, percent: progressPercent(progress) };
   });
@@ -250,8 +252,8 @@ async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PA
     const cached = artifactPageCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
   }
-  const rows = (await client.query(`SELECT a.artifact_id,a.name,a.content_type,a.size_bytes,a.sha256,a.created_at,j.run_id
-    FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id
+  const rows = (await client.query(`SELECT a.artifact_id,a.name,a.content_type,a.size_bytes,a.sha256,a.created_at,j.run_id,rev.revision_number AS task_revision
+    FROM artifacts a LEFT JOIN jobs j ON j.job_id=a.job_id LEFT JOIN task_runs r ON r.run_id=j.run_id LEFT JOIN task_revisions rev ON rev.revision_id=r.revision_id
     WHERE a.task_id=$1 AND a.verified=true AND ($2::text IS NULL OR j.run_id=$2)
     AND ($3::timestamptz IS NULL OR (a.created_at,a.artifact_id)<($3::timestamptz,$4::text))
     ORDER BY a.created_at DESC,a.artifact_id DESC LIMIT $5`, [taskId, runId || null, cursor?.[0] || null, cursor?.[1] || null, pageSize + 1])).rows;
@@ -269,9 +271,23 @@ async function artifactPage(client, taskId, { cursor = null, limit = ARTIFACT_PA
 export function invalidateArtifactCache(taskId) {
   for (const key of artifactPageCache.keys()) if (key.startsWith(`${taskId}:`)) artifactPageCache.delete(key);
 }
+function artifactType(name, contentType) {
+  const value = String(name || '').toLowerCase(), mime = String(contentType || '').toLowerCase();
+  if (/\.(?:zip|7z|tar(?:\.gz)?)$/.test(value) || /playable-package/.test(value)) return 'playable-package';
+  if (/\.exe$/.test(value) || mime === 'application/x-msdownload') return 'executable';
+  if (mime.startsWith('image/') || /\.(?:png|jpe?g|webp|bmp|gif)$/.test(value)) return 'image';
+  if (/\.(?:log|jsonl|txt|out|err)$/.test(value) || /(?:stderr|stdout|session|diagnostic|log)/.test(value)) return 'log';
+  if (mime === 'application/json' || /\.json$/.test(value)) return 'report';
+  return 'other';
+}
+function artifactIteration(name) {
+  const match = String(name || '').match(/^(?:playable-package-iteration|iteration-monitor-)(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
 function artifactForUser(value) {
   const image = ['image/png', 'image/jpeg', 'image/webp'].includes(value.content_type);
-  return { ...value, runId: value.run_id || null, createdAt: value.created_at,
+  return { ...value, runId: value.run_id || null, taskRevision: Number.isInteger(value.task_revision) ? value.task_revision : null,
+    iteration: artifactIteration(value.name), artifactType: artifactType(value.name, value.content_type), createdAt: value.created_at,
     downloadUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}`, ...(image && value.content_type === 'image/png' ? { previewUrl: `/artifacts/${encodeURIComponent(value.artifact_id)}?preview=1` } : {}) };
 }
 // A short database lock serializes pilot scheduling and state transitions across API processes.
@@ -310,7 +326,7 @@ export async function taskView(db, taskId, userId) {
     await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     const task = await ownedTask(client, taskId, userId);
     const workspace = (await client.query('SELECT * FROM workspaces WHERE task_id=$1', [taskId])).rows[0];
-    const runs = (await client.query(`SELECT r.run_id,r.status,r.revision_id,r.created_at,r.finished_at,rev.input,
+    const runs = (await client.query(`SELECT r.run_id,r.status,r.revision_id,r.created_at,r.finished_at,rev.input,rev.revision_number,
         j.job_id,j.status AS job_status,j.objective,j.progress,j.result,j.lease_until,j.attempt,j.updated_at AS job_updated_at,
         w.status AS worker_status,w.capabilities,w.last_seen_at
       FROM task_runs r JOIN task_revisions rev ON rev.revision_id=r.revision_id
@@ -341,7 +357,7 @@ export async function taskView(db, taskId, userId) {
       SELECT latest.progress,latest.created_at,COALESCE(failures.failures,'[]'::jsonb) AS failures,COALESCE(steps.steps,'[]'::jsonb) AS steps
       FROM latest LEFT JOIN failures USING (iteration) LEFT JOIN steps USING (iteration)
       ORDER BY latest.iteration::int`, [taskId, run?.run_id || ''])).rows;
-    const artifactResult = await artifactPage(client, taskId, { runId: run?.run_id || null });
+    const artifactResult = await artifactPage(client, taskId);
     const diagnosticArtifacts = {};
     for (const artifact of (await client.query(`SELECT artifact_id,name FROM artifacts
         WHERE task_id=$1 AND job_id=$2 AND verified=true
@@ -354,10 +370,10 @@ export async function taskView(db, taskId, userId) {
       }
     }
     const progress = job?.progress && Object.keys(job.progress).length ? progressForUser(job.progress, task.status) : null;
-    const runsForUser = runs.map(item => ({ runId: item.run_id, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
+    const runsForUser = runs.map(item => ({ runId: item.run_id, taskRevision: item.revision_number, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
       followUpPrompt: item.input?.followUpPrompt || null, createdAt: item.created_at, finishedAt: item.finished_at, resultSummary: runSummary(item, task.status) }));
     return { taskId, ownerId: userId, objective: task.objective, kind: task.kind, status: task.status, workerId: task.worker_id,
-      workspaceId: workspace?.workspace_id, runId: run?.run_id, deadlineAt: task.deadline_at, createdAt: task.created_at,
+      workspaceId: workspace?.workspace_id, runId: run?.run_id, taskRevision: run?.revision_number || null, deadlineAt: task.deadline_at, createdAt: task.created_at,
       updatedAt: task.updated_at, result: task.result, currentPrompt: run?.input?.followUpPrompt || null, progress,
       worker: task.worker_id ? { workerId: task.worker_id, status: job?.worker_status || 'OFFLINE', capabilities: job?.capabilities || {}, lastSeenAt: job?.last_seen_at || null,
         leaseUntil: job?.lease_until || null, attempt: job?.attempt || 0, updatedAt: job?.job_updated_at || null } : null,

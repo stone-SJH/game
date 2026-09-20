@@ -239,7 +239,7 @@ test('verified artifacts are owner-scoped and completed work is immutable', asyn
   assert.equal((await request(`/v1/tasks/${task.taskId}/cancel`,{account:alice,data:{}})).value.status,'COMPLETED');
   assert.equal('leaseToken' in (await request(`/v1/tasks/${task.taskId}`,{account:alice})).value.result,false);
 });
-test('task artifacts default to the latest run while the unfiltered page retains history', async () => {
+test('task artifacts expose task revisions while run filtering remains available', async () => {
   const task = await create(), upload = async (job, artifactId, name) => {
     const bytes = Buffer.from(name);
     const response = await fetch(`${origin}/v1/worker/artifacts/${task.taskId}/${artifactId}`, { method: 'POST', headers: {
@@ -250,6 +250,8 @@ test('task artifacts default to the latest run while the unfiltered page retains
   };
   const first = await claim();
   await upload(first, 'artifact-first-run', 'first-run.txt');
+  await upload(first, 'artifact-package', 'playable-package-iteration-002.zip');
+  await upload(first, 'artifact-monitor', 'iteration-monitor-2.json');
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true } });
   await db.query("UPDATE tasks SET deadline_at=now()-interval '1 second' WHERE task_id=$1", [task.taskId]);
   const queued = await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Continue the task.' } });
@@ -259,12 +261,17 @@ test('task artifacts default to the latest run while the unfiltered page retains
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(second), status: 'FAIL', stopConfirmed: true } });
   const current = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
   assert.equal(current.runId, queued.value.runId);
-  assert.deepEqual(current.artifacts.map(item => item.name), ['second-run.txt']);
-  assert.ok(current.artifacts[0].createdAt);
+  assert.deepEqual(current.artifacts.map(item => item.name).sort(), ['first-run.txt', 'iteration-monitor-2.json', 'playable-package-iteration-002.zip', 'second-run.txt']);
+  assert.deepEqual(current.artifacts.map(item => item.taskRevision).sort(), [1, 1, 1, 2]);
+  assert.ok(current.artifacts.every(item => item.createdAt));
+  assert.equal(current.artifacts.find(item => item.name === 'playable-package-iteration-002.zip').artifactType, 'playable-package');
+  assert.equal(current.artifacts.find(item => item.name === 'playable-package-iteration-002.zip').iteration, 2);
+  assert.equal(current.artifacts.find(item => item.name === 'iteration-monitor-2.json').artifactType, 'report');
+  assert.equal(current.artifacts.find(item => item.name === 'iteration-monitor-2.json').iteration, 2);
   const all = (await request(`/v1/tasks/${task.taskId}/artifacts?limit=100`, { account: alice })).value;
-  assert.deepEqual(all.artifacts.map(item => item.name).sort(), ['first-run.txt', 'second-run.txt']);
+  assert.deepEqual(all.artifacts.map(item => item.name).sort(), ['first-run.txt', 'iteration-monitor-2.json', 'playable-package-iteration-002.zip', 'second-run.txt']);
   const prior = (await request(`/v1/tasks/${task.taskId}/artifacts?limit=100&runId=${encodeURIComponent(first.runId)}`, { account: alice })).value;
-  assert.deepEqual(prior.artifacts.map(item => item.name), ['first-run.txt']);
+  assert.deepEqual(prior.artifacts.map(item => item.name).sort(), ['first-run.txt', 'iteration-monitor-2.json', 'playable-package-iteration-002.zip']);
 });
 test('terminal tasks can queue a follow-up run on the same workspace', async () => {
   const task = await create(), first = await claim();
