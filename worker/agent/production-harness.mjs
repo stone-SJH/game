@@ -183,9 +183,23 @@ function evidenceHasProof(evidence) {
   if (Array.isArray(evidence.criteria)) return evidence.criteria.length > 0 && evidence.criteria.every(item => item?.status === 'PASS');
   if (evidence.validation?.pass === true) return true;
   const checks = evidence.checks;
+  if (Array.isArray(checks)) return checks.length > 0 && checks.every(item => item?.status === 'PASS');
   if (!checks || typeof checks !== 'object' || !Object.keys(checks).length) return false;
   const required = ['artifactsExist', 'directEvidence'].filter(field => field in checks);
   return required.length ? required.every(field => checks[field] === true) : Object.values(checks).some(value => value === true);
+}
+
+function stageEvidenceFailure(report, evidence, stageId) {
+  const failures = [];
+  if (!['ACCEPTED', 'PASS'].includes(report?.status)) failures.push(`report.status=${report?.status || 'missing'}`);
+  if (report?.stageId && report.stageId !== stageId) failures.push(`report.stageId=${report.stageId}`);
+  if (!evidence || !['PASS', 'ACCEPTED'].includes(evidence.status)) failures.push(`evidence.status=${evidence?.status || 'missing'}`);
+  if (evidence?.stageId && evidence.stageId !== stageId) failures.push(`evidence.stageId=${evidence.stageId}`);
+  if (evidence && !evidenceHasProof(evidence)) {
+    const proof = Array.isArray(evidence.criteria) ? 'criteria' : Array.isArray(evidence.checks) ? 'checks[]' : evidence.validation?.pass === true ? 'validation.pass' : 'checks';
+    failures.push(`passing proof missing from ${proof}`);
+  }
+  return failures.join('; ') || 'unknown evidence contract failure';
 }
 
 async function createCodexTempDirectory() {
@@ -321,7 +335,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
         try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); evidence = JSON.parse(await fs.readFile(evidencePath, 'utf8')); } catch (error) { throw new Error(`Invalid ${stageId} handoff: ${error.message}`); }
         if (!['ACCEPTED', 'PASS'].includes(report.status) || report.stageId && report.stageId !== stageId ||
             !evidenceHasProof(evidence) || evidence.stageId && evidence.stageId !== stageId) {
-          throw new Error(`Stage ${stageId} does not contain passing evidence.`);
+          throw new Error(`Stage ${stageId} does not contain passing evidence: ${stageEvidenceFailure(report, evidence, stageId)}.`);
         }
       }
       await review({ attempt, stage: 'complete' });

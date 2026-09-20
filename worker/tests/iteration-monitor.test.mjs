@@ -66,6 +66,34 @@ test('acceptance failures preserve the failing criteria for bounded repair', asy
   assert.deepEqual(saved.diagnostics.acceptanceFailure.failedCriteria, [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }]);
 });
 
+test('stage evidence accepts legacy passing checks arrays', async t => {
+  const f = await fixture(t);
+  const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
+    'level-blockout-and-traversal', 'gameplay-foundation-and-input', 'camera-combat-ai-and-feel',
+    'world-materials-fx-audio-and-ui', 'integration-build-and-playtest', 'package-and-acceptance'];
+  const packageFile = path.join(f.project, 'package', 'Windows', 'Game.exe');
+  await fs.mkdir(path.dirname(packageFile), { recursive: true });
+  await fs.writeFile(path.join(f.project, 'Game.uproject'), '{}');
+  await fs.writeFile(path.join(f.project, 'scene-preview.png'), 'preview');
+  await fs.writeFile(packageFile, 'game');
+  const required = await inspectProduction(f.project);
+  const seed = async () => {
+    for (const file of Object.values(required.files)) {
+      if (!file.endsWith('.json')) continue;
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      const value = file.endsWith('stage-manifest.json')
+        ? { protocol: 1, taskId: 'task-fixture', runId: 'run-fixture', stages: stages.map(id => ({ id, status: 'ACCEPTED' })) }
+        : file.endsWith('acceptance-report.json')
+          ? { protocol: 1, taskId: 'task-fixture', workspaceId: 'workspace-fixture', runId: 'run-fixture', status: 'PASS', pass: true, packagedGameStatus: 'PASS', gameplayStatus: 'PASS', visualStatus: 'PASS', criteria: [{ status: 'PASS' }] }
+          : file.includes('stage-report.json') ? { status: 'ACCEPTED' } : { protocol: 1, status: 'PASS', passed: true, checks: [{ status: 'PASS', description: 'legacy check' }] };
+      await fs.writeFile(file, JSON.stringify(value));
+    }
+  };
+  const originalStep = f.step;
+  f.step = async (...args) => { if (args[0].startsWith('production-orchestrator')) await seed(); return originalStep(...args); };
+  await assert.doesNotReject(runProductionHarness({ ...f, onIterationReview: f.onReview }));
+});
+
 test('acceptance contract failures identify stale identity and missing proof fields', () => {
   const result = validateAcceptanceReport({ protocol: 1, status: 'ACCEPTED', pass: true, criteria: [{ status: 'PASS' }],
     taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old' },
