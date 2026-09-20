@@ -156,7 +156,9 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
       const session = await user(req, req.method !== 'GET');
-      if (req.method === 'GET' && task[2] === 'artifacts') return json(res, 200, await tasks.artifactView(db, task[1], session.user_id, { cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit') }));
+      if (req.method === 'GET' && task[2] === 'artifacts') return json(res, 200, await tasks.artifactView(db, task[1], session.user_id, {
+        cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit'), runId: url.searchParams.get('runId') || null,
+      }));
       if (req.method === 'GET' && !task[2]) return json(res, 200, await tasks.taskView(db, task[1], session.user_id));
       if (req.method === 'POST' && task[2] === 'cancel') {
         const value = await tasks.cancelTask(db, task[1], session.user_id);

@@ -18,6 +18,11 @@ async function api(url, options = {}) {
 function node(tag, text, className) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; }
 function status(value) { return node('span', value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
 function date(value) { return new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
+function timestamp(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString([], { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) : '';
+}
 function dateOrDash(value) { return value ? date(value) : 'No update yet'; }
 function lazyPreview(url, alt) {
   const image = node('img'); image.alt = alt; image.loading = 'lazy'; image.decoding = 'async'; image.fetchPriority = 'low'; image.dataset.src = url;
@@ -112,7 +117,8 @@ function progressPanel(task) {
 function iterationSummaryRow(summary, task, index) {
     const row = node('li', undefined, `iteration-summary ${String(summary.status || '').toLowerCase()}`);
     const heading = node('div', undefined, 'iteration-summary-heading');
-    heading.append(node('strong', summary.iteration === null ? `Run ${index + 1}` : `Iteration ${summary.iteration}`), status(summary.status || 'RUNNING'));
+    const label = summary.iteration === null ? `Run ${index + 1}` : `Task revision ${summary.taskRevision || '?'} · Iteration ${summary.iteration}`;
+    heading.append(node('strong', label), status(summary.status || 'RUNNING'));
     row.append(heading);
     if (summary.step) row.append(node('div', `Stage: ${summary.step}`, 'iteration-summary-step'));
     const goal = node('div', undefined, 'iteration-summary-goal'); goal.append(node('dt', 'Goal'), node('dd', summary.goal || task.objective));
@@ -181,43 +187,84 @@ function iterationSummaryPanel(task) {
   }
   return section;
 }
+const artifactTypeLabels = { all: 'All', image: 'Images', log: 'Logs', 'playable-package': 'Playable packages', executable: 'Executables', report: 'Reports', other: 'Other' };
+function artifactTypeOf(artifact) {
+  if (artifact.artifactType && artifactTypeLabels[artifact.artifactType]) return artifact.artifactType;
+  const name = String(artifact.name || '').toLowerCase(), contentType = String(artifact.content_type || '').toLowerCase();
+  if (/\.(?:zip|7z|tar(?:\.gz)?)$/.test(name) || /playable-package/.test(name)) return 'playable-package';
+  if (/\.exe$/.test(name)) return 'executable';
+  if (contentType.startsWith('image/') || /\.(?:png|jpe?g|webp|bmp|gif)$/.test(name)) return 'image';
+  if (/\.(?:log|jsonl|txt|out|err)$/.test(name) || /(?:stderr|stdout|session|diagnostic|log)/.test(name)) return 'log';
+  if (contentType === 'application/json' || /\.json$/.test(name)) return 'report';
+  return 'other';
+}
+function artifactCard(artifact) {
+  const figure = node('figure', undefined, 'artifact');
+  if (artifact.content_type?.startsWith('image/')) {
+    if (artifact.previewUrl) {
+      const imageLink = node('a'); imageLink.href = artifact.downloadUrl; imageLink.target = '_blank'; imageLink.rel = 'noopener'; imageLink.append(lazyPreview(artifact.previewUrl, artifact.name)); figure.append(imageLink);
+    } else figure.append(node('div', 'Open image to load', 'artifact-placeholder'));
+  }
+  const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl;
+  const type = artifactTypeOf(artifact);
+  if (artifact.content_type?.startsWith('image/')) { link.target = '_blank'; link.rel = 'noopener'; }
+  else { link.download = artifact.name; caption.append(node('span', `${artifactTypeLabels[type]} / download`, 'artifact-kind')); }
+  caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+  const metadata = [timestamp(artifact.created_at || artifact.createdAt) ? `Created ${timestamp(artifact.created_at || artifact.createdAt)}` : ''];
+  if (Number.isInteger(artifact.taskRevision)) metadata.push(`Task revision ${artifact.taskRevision}`);
+  if (Number.isInteger(artifact.iteration)) metadata.push(`Iteration ${artifact.iteration}`);
+  if (metadata.filter(Boolean).length) caption.append(node('small', metadata.filter(Boolean).join(' · ')));
+  caption.append(node('small', `SHA-256 ${artifact.sha256}`)); figure.append(caption); return figure;
+}
 function artifactPanel(task, taskId) {
   const section = node('section', undefined, 'artifact-panel'), heading = node('div', undefined, 'artifact-heading');
-  heading.append(node('h3', 'Artifacts'));
+  heading.append(node('h3', 'All artifacts'));
   const count = Number(task.artifactCount || 0), bytes = Number(task.artifactBytes || 0);
-  const summary = node('small', count ? `${task.artifacts.length} of ${count} · ${bytes.toLocaleString()} bytes` : 'No artifacts yet'); heading.append(summary); section.append(heading);
-  const grid = node('div', undefined, 'artifacts');
-  const append = artifact => {
-    const figure = node('figure', undefined, 'artifact');
-    if (artifact.content_type?.startsWith('image/')) {
-      if (artifact.previewUrl) {
-        const imageLink = node('a'); imageLink.href = artifact.downloadUrl; imageLink.target = '_blank'; imageLink.rel = 'noopener'; imageLink.append(lazyPreview(artifact.previewUrl, artifact.name)); figure.append(imageLink);
-      } else figure.append(node('div', 'Open image to load', 'artifact-placeholder'));
-    }
-    const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl;
-    const packageFile = /\.(?:zip|7z|tar(?:\.gz)?|exe)$/i.test(artifact.name);
-    if (artifact.content_type?.startsWith('image/')) { link.target = '_blank'; link.rel = 'noopener'; }
-    else { link.download = artifact.name; caption.append(node('span', packageFile ? 'Playable package / download' : 'Download', 'artifact-kind')); }
-    caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`), node('small', `SHA-256 ${artifact.sha256}`)); figure.append(caption); grid.append(figure);
-  };
-  if (!task.artifacts.length) grid.append(node('div', 'No artifacts yet', 'empty'));
-  else task.artifacts.forEach(append);
-  section.append(grid);
-  let nextCursor = task.artifactsNextCursor;
-  if (nextCursor) {
-    const more = node('button', 'Load more artifacts'); more.className = 'artifact-more';
-    more.onclick = async () => {
-      more.disabled = true;
-      try {
-        const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}`);
-        if (selected !== taskId) return;
-        page.artifacts.forEach(append); nextCursor = page.nextCursor; more.hidden = !nextCursor;
-        summary.textContent = `${grid.querySelectorAll('.artifact').length} of ${Number(page.count).toLocaleString()} · ${Number(page.bytes).toLocaleString()} bytes`;
-      } catch (error) { notice(error.message); } finally { more.disabled = false; }
-    };
-    section.append(more);
+  const summary = node('small'); heading.append(summary); section.append(heading);
+  let loadedArtifacts = [...(task.artifacts || [])], activeType = 'all', nextCursor = task.artifactsNextCursor;
+  const filters = node('div', undefined, 'artifact-filters');
+  const groups = node('div', undefined, 'artifact-groups');
+  const more = node('button', 'Load more artifacts'); more.className = 'artifact-more'; more.hidden = !nextCursor;
+  const filterButtons = new Map();
+  for (const [type, label] of Object.entries(artifactTypeLabels)) {
+    const button = node('button', label); button.type = 'button'; button.className = 'artifact-filter'; button.setAttribute('aria-pressed', type === activeType ? 'true' : 'false');
+    button.onclick = () => { activeType = type; render(); }; filters.append(button); filterButtons.set(type, button);
   }
-  return section;
+  function render() {
+    const filtered = loadedArtifacts.filter(item => activeType === 'all' || artifactTypeOf(item) === activeType);
+    summary.textContent = count ? `${filtered.length} shown · ${loadedArtifacts.length} loaded of ${count} · ${bytes.toLocaleString()} bytes` : 'No artifacts yet';
+    for (const [type, button] of filterButtons) {
+      button.setAttribute('aria-pressed', type === activeType ? 'true' : 'false');
+      const amount = type === 'all' ? loadedArtifacts.length : loadedArtifacts.filter(item => artifactTypeOf(item) === type).length;
+      button.textContent = `${artifactTypeLabels[type]} (${amount})`;
+    }
+    groups.replaceChildren();
+    if (!filtered.length) { groups.append(node('div', 'No artifacts in this category', 'empty')); return; }
+    const byRevision = new Map();
+    for (const artifact of filtered) {
+      const key = Number.isInteger(artifact.taskRevision) ? artifact.taskRevision : 0;
+      if (!byRevision.has(key)) byRevision.set(key, []);
+      byRevision.get(key).push(artifact);
+    }
+    for (const [revision, artifacts] of [...byRevision.entries()].sort((a, b) => b[0] - a[0])) {
+      const group = node('section', undefined, 'artifact-group');
+      group.append(node('h4', revision ? `Task revision ${revision}` : 'Unassigned task revision'));
+      const grid = node('div', undefined, 'artifacts');
+      artifacts.sort((a, b) => Date.parse(b.created_at || b.createdAt || 0) - Date.parse(a.created_at || a.createdAt || 0)).forEach(item => grid.append(artifactCard(item)));
+      group.append(grid); groups.append(group);
+    }
+  }
+  more.onclick = async () => {
+    more.disabled = true;
+    try {
+      const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?cursor=${encodeURIComponent(nextCursor)}`);
+      if (selected !== taskId) return;
+      const seen = new Set(loadedArtifacts.map(item => item.artifact_id));
+      loadedArtifacts.push(...page.artifacts.filter(item => !seen.has(item.artifact_id)));
+      nextCursor = page.nextCursor; more.hidden = !nextCursor; render();
+    } catch (error) { notice(error.message); } finally { more.disabled = false; }
+  };
+  section.append(filters, groups, more); render(); return section;
 }
 function isPlayablePackage(artifact) {
   return /(?:^|-)playable-package-.*\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '') || /\.(?:zip|7z|tar\.gz)$/i.test(artifact.name || '');
@@ -234,6 +281,10 @@ function featuredArtifactCard(artifact, packageArtifact = false) {
   }
   const caption = node('figcaption'), link = node('a', artifact.name); link.href = artifact.downloadUrl; link.download = artifact.name;
   caption.append(link, node('small', `${Number(artifact.size_bytes).toLocaleString()} bytes`));
+  const metadata = [timestamp(artifact.created_at || artifact.createdAt) ? `Created ${timestamp(artifact.created_at || artifact.createdAt)}` : ''];
+  if (Number.isInteger(artifact.taskRevision)) metadata.push(`Task revision ${artifact.taskRevision}`);
+  if (Number.isInteger(artifact.iteration)) metadata.push(`Iteration ${artifact.iteration}`);
+  if (metadata.filter(Boolean).length) caption.append(node('small', metadata.filter(Boolean).join(' · ')));
   if (packageArtifact) caption.append(node('strong', 'Playable package', 'completed-output-label'));
   figure.append(caption);
   return figure;
@@ -242,29 +293,40 @@ function completedOutputsPanel(task) {
   if (task.status !== 'COMPLETED') return null;
   const section = node('section', undefined, 'completed-outputs');
   const heading = node('div', undefined, 'completed-outputs-heading');
-  heading.append(node('h3', 'Completed outputs'), node('span', 'Ready to download'));
+  heading.append(node('h3', 'Current run outputs'), node('span', 'Latest run · ready to download'));
   section.append(heading);
-  const artifacts = Array.isArray(task.completedArtifacts) ? task.completedArtifacts : task.artifacts || [];
-  const packages = artifacts.filter(isPlayablePackage).sort((a, b) => String(b.name).localeCompare(String(a.name)));
-  const keyArtifacts = artifacts.filter(item => !isPlayablePackage(item) && isFeaturedArtifact(item)).slice(0, 8);
+  const artifacts = (Array.isArray(task.completedArtifacts) ? task.completedArtifacts : task.artifacts || [])
+    .filter(artifact => !task.runId || !artifact.run_id || artifact.run_id === task.runId);
+  const packages = artifacts.filter(isPlayablePackage);
+  const finalPackage = packages.reduce((latest, item) => {
+    if (!latest) return item;
+    const currentIteration = Number.isInteger(item.iteration) ? item.iteration : -1;
+    const latestIteration = Number.isInteger(latest.iteration) ? latest.iteration : -1;
+    return currentIteration > latestIteration || (currentIteration === latestIteration && Date.parse(item.created_at || item.createdAt || 0) > Date.parse(latest.created_at || latest.createdAt || 0)) ? item : latest;
+  }, null);
+  const intermediate = item => artifactTypeOf(item) === 'log' || /^worker-screenshot-|^iteration-(?:monitor|diagnosis)-/i.test(item.name || '');
+  const finalArtifacts = artifacts.filter(item => !intermediate(item) && (!isPlayablePackage(item) || item === finalPackage));
   const packageGroup = node('div', undefined, 'completed-output-group');
   packageGroup.append(node('h4', 'Playable packages'));
-  if (!packages.length) packageGroup.append(node('p', 'No playable package was uploaded for this task.', 'completed-outputs-empty'));
-  else { const grid = node('div', undefined, 'completed-output-list'); packages.forEach(item => grid.append(featuredArtifactCard(item, true))); packageGroup.append(grid); }
+  if (!finalPackage) packageGroup.append(node('p', 'No playable package was uploaded for this task.', 'completed-outputs-empty'));
+  else { const grid = node('div', undefined, 'completed-output-list'); grid.append(featuredArtifactCard(finalPackage, true)); packageGroup.append(grid); }
   section.append(packageGroup);
+  const keyArtifacts = finalArtifacts.filter(item => !isPlayablePackage(item));
   if (keyArtifacts.length) {
-    const keyGroup = node('div', undefined, 'completed-output-group'); keyGroup.append(node('h4', 'Key artifacts'));
+    const keyGroup = node('div', undefined, 'completed-output-group'); keyGroup.append(node('h4', 'Final passing deliverables'));
     const grid = node('div', undefined, 'completed-output-list'); keyArtifacts.forEach(item => grid.append(featuredArtifactCard(item))); keyGroup.append(grid); section.append(keyGroup);
   }
   return section;
 }
 async function loadCompletedArtifacts(task, taskId) {
   if (task.status !== 'COMPLETED' || Number(task.artifactCount || 0) <= (task.artifacts?.length || 0)) return task;
-  const cached = completedArtifactCache.get(taskId);
+  const cacheKey = `${taskId}:${task.runId || ''}`;
+  const cached = completedArtifactCache.get(cacheKey);
   if (cached) return { ...task, completedArtifacts: cached };
   try {
-    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100`);
-    completedArtifactCache.set(taskId, page.artifacts || []);
+    const runQuery = task.runId ? `&runId=${encodeURIComponent(task.runId)}` : '';
+    const page = await api(`/v1/tasks/${encodeURIComponent(taskId)}/artifacts?limit=100${runQuery}`);
+    completedArtifactCache.set(cacheKey, page.artifacts || []);
     return { ...task, completedArtifacts: page.artifacts || [] };
   } catch { return task; }
 }
@@ -297,9 +359,9 @@ async function refreshDetail() {
   const displayTask = await loadCompletedArtifacts(task, target);
   if (epoch !== generation || target !== selected) return;
   const pane = $('detail');
-  const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
+  const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.taskRevision}:${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
   const artifactSignature = `${task.artifactCount}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
-  const completedOutputSignature = `${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
+  const completedOutputSignature = `${task.runId || ''}:${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
   if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
     const progress = pane.querySelector('.worker-progress');
     releaseLazyPreviews(progress); progress?.replaceWith(progressPanel(task));
@@ -330,7 +392,7 @@ async function refreshDetail() {
   }
   pane.append(top, node('h2', task.objective));
   const details = node('dl', undefined, 'details');
-  for (const [label, value] of [['Worker',task.workerId || 'Waiting for assigned worker'], ['Created',date(task.createdAt)], ['Workspace',task.workspaceId || 'Unassigned'], ['Run request',task.currentPrompt || 'Initial task'], ['Task',task.taskId]]) {
+  for (const [label, value] of [['Worker',task.workerId || 'Waiting for assigned worker'], ['Created',date(task.createdAt)], ['Workspace',task.workspaceId || 'Unassigned'], ['Task revision',task.taskRevision || '1'], ['Run request',task.currentPrompt || 'Initial task'], ['Task',task.taskId]]) {
     const group = node('div'); group.append(node('dt',label),node('dd',value)); details.append(group);
   }
   const completedOutputs = completedOutputsPanel(displayTask);
