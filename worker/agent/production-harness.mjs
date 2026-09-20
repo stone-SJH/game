@@ -117,12 +117,37 @@ export function commandDiagnostic(result, limit = 2000) {
   return parts.join('\n') || 'No diagnostic output.';
 }
 
-export function acceptanceFailureDetails(acceptance, criteria) {
-  const failedCriteria = criteria.filter(item => item?.status !== 'PASS').map(item => ({
+function actualType(value) {
+  if (value === null || value === undefined) return 'missing';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+function addCheck(failedChecks, field, expected, actual) {
+  failedChecks.push({ field, expected, actual: actual === undefined ? 'missing' : actual });
+}
+
+export function acceptanceFailureDetails(acceptance = {}, criteria, expected = {}) {
+  const list = Array.isArray(criteria) ? criteria : [];
+  const failedCriteria = list.filter(item => item?.status !== 'PASS').map(item => ({
     id: item?.id || item?.name || item?.criterion || 'unnamed',
     status: item?.status || 'UNKNOWN',
     pass: item?.pass,
   }));
+  const failedChecks = [];
+  if (acceptance.protocol !== 1) addCheck(failedChecks, 'protocol', 1, acceptance.protocol);
+  if (!['PASS', 'ACCEPTED'].includes(acceptance.status)) addCheck(failedChecks, 'status', 'PASS or ACCEPTED', acceptance.status);
+  if (!(acceptance.passed === true || acceptance.accepted === true || acceptance.pass === true)) {
+    addCheck(failedChecks, 'success flag', 'passed=true, accepted=true, or pass=true', 'none');
+  }
+  for (const field of ['packagedGameStatus', 'gameplayStatus', 'visualStatus']) {
+    if (acceptance[field] !== 'PASS') addCheck(failedChecks, field, 'PASS', acceptance[field]);
+  }
+  if (!Array.isArray(criteria)) addCheck(failedChecks, 'criteria', 'non-empty array', actualType(criteria));
+  else if (!criteria.length) addCheck(failedChecks, 'criteria', 'non-empty array', 'empty array');
+  for (const field of ['taskId', 'workspaceId', 'runId']) {
+    if (expected[field] && acceptance[field] !== expected[field]) addCheck(failedChecks, field, expected[field], acceptance[field]);
+  }
   return {
     status: acceptance.status,
     passed: acceptance.passed === true,
@@ -133,16 +158,34 @@ export function acceptanceFailureDetails(acceptance, criteria) {
     gameplayStatus: acceptance.gameplayStatus,
     packagedGameStatus: acceptance.packagedGameStatus,
     visualStatus: acceptance.visualStatus,
+    failedChecks,
   };
 }
 
 function acceptanceFailureMessage(details) {
   const failures = details.failedCriteria.map(item => `${item.id}:${item.status}`).join(', ') || 'none recorded';
+  const checks = details.failedChecks.map(item => `${item.field} expected ${item.expected}, got ${item.actual}`).join('; ') || 'none recorded';
   const summary = [
-    `Acceptance report does not prove a passing packaged game. Failed criteria: ${failures}.`,
+    `Acceptance report does not prove a passing packaged game. Failed checks: ${checks}. Failed criteria: ${failures}.`,
     `Report status=${details.status || 'missing'}, pass=${details.pass}, packagedGameStatus=${details.packagedGameStatus || 'unknown'}, visualStatus=${details.visualStatus || 'unknown'}.`,
   ];
   return summary.join(' ');
+}
+
+export function validateAcceptanceReport(acceptance, expected = {}) {
+  const criteria = acceptance?.criteria || acceptance?.acceptanceCriteria;
+  const details = acceptanceFailureDetails(acceptance, criteria, expected);
+  return { criteria, details, valid: details.failedChecks.length === 0 && details.failedCriteria.length === 0 };
+}
+
+function evidenceHasProof(evidence) {
+  if (!evidence || !['PASS', 'ACCEPTED'].includes(evidence.status)) return false;
+  if (Array.isArray(evidence.criteria)) return evidence.criteria.length > 0 && evidence.criteria.every(item => item?.status === 'PASS');
+  if (evidence.validation?.pass === true) return true;
+  const checks = evidence.checks;
+  if (!checks || typeof checks !== 'object' || !Object.keys(checks).length) return false;
+  const required = ['artifactsExist', 'directEvidence'].filter(field => field in checks);
+  return required.length ? required.every(field => checks[field] === true) : Object.values(checks).some(value => value === true);
 }
 
 async function createCodexTempDirectory() {
@@ -199,6 +242,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Execute the complete production loop: plan, create a real Unreal project, author assets and gameplay, build/package it, launch the packaged game for a bounded playtest, render a real scene preview, and write machine-readable evidence.',
       'Do not use the Blender factory-startup cube as a final preview. Do not claim success from tool exit codes alone.',
       'Before finishing, ensure these exact deliverables exist: one .uproject, scene-preview.png (or .jpg/.webp), a packaged playable .exe, workspace-manifest.json, provenance/asset-manifest.json, plan/stage-manifest.json, stage-report.json and evidence.json for every planned stage, acceptance/playtest-evidence.json, and acceptance/acceptance-report.json with passing gameplay evidence. Keep all paths relative to the workspace.',
+      `The acceptance report must use protocol 1, identify taskId=${job.taskId}, workspaceId=${job.workspaceId}, and runId=${job.runId}, set status to ACCEPTED or PASS with an explicit true pass/accepted/passed flag, set packagedGameStatus, gameplayStatus, and visualStatus to PASS, and contain a non-empty criteria array whose items all have status PASS. The stage manifest must retain the same taskId and runId and list every planned stage as ACCEPTED.`,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
       ...(feedback ? [
@@ -250,15 +294,23 @@ export async function runProductionHarness({ job, project, output, signal, step,
       stage = 'acceptance-report';
       let acceptance;
       try { acceptance = JSON.parse(await fs.readFile(deliverables.files.acceptanceReport, 'utf8')); } catch (error) { throw new Error(`Invalid acceptance report: ${error.message}`); }
-      const criteria = acceptance.criteria || acceptance.acceptanceCriteria;
-      if (acceptance.protocol !== 1 || !(acceptance.passed === true || acceptance.accepted === true || acceptance.status === 'PASS') || !Array.isArray(criteria) || !criteria.length || criteria.some(item => item.status !== 'PASS')) {
-        const details = acceptanceFailureDetails(acceptance, Array.isArray(criteria) ? criteria : []);
+      const acceptanceResult = validateAcceptanceReport(acceptance, {
+        taskId: job.taskId,
+        workspaceId: job.workspaceId,
+        runId: job.runId,
+      });
+      if (!acceptanceResult.valid) {
+        const details = acceptanceResult.details;
         throw Object.assign(new Error(acceptanceFailureMessage(details)), { acceptanceFailure: details });
       }
       stage = 'stage-manifest';
       let stageManifest;
       try { stageManifest = JSON.parse(await fs.readFile(deliverables.files.stageManifest, 'utf8')); } catch (error) { throw new Error(`Invalid stage manifest: ${error.message}`); }
-      if (!Array.isArray(stageManifest.stages) || stageManifest.stages.length !== STAGES.length || stageManifest.stages.some(stage => stage.status !== 'ACCEPTED')) {
+      if (stageManifest.protocol !== 1 || stageManifest.taskId !== job.taskId || stageManifest.runId !== job.runId) {
+        throw new Error(`Stage manifest identity does not match the current task/run (${job.taskId}/${job.runId}).`);
+      }
+      if (!Array.isArray(stageManifest.stages) || stageManifest.stages.length !== STAGES.length ||
+          stageManifest.stages.some((entry, index) => entry.id !== STAGES[index] || entry.status !== 'ACCEPTED')) {
         throw new Error('Stage manifest does not show every production stage as ACCEPTED.');
       }
       for (const stageId of STAGES) {
@@ -267,7 +319,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
         const evidencePath = deliverables.files[`${stageId}-evidence`];
         let report, evidence;
         try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); evidence = JSON.parse(await fs.readFile(evidencePath, 'utf8')); } catch (error) { throw new Error(`Invalid ${stageId} handoff: ${error.message}`); }
-        if (!['ACCEPTED', 'PASS'].includes(report.status) || (Array.isArray(evidence.criteria) && evidence.criteria.some(item => item.status !== 'PASS'))) {
+        if (!['ACCEPTED', 'PASS'].includes(report.status) || report.stageId && report.stageId !== stageId ||
+            !evidenceHasProof(evidence) || evidence.stageId && evidence.stageId !== stageId) {
           throw new Error(`Stage ${stageId} does not contain passing evidence.`);
         }
       }

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { classifyIterationFailure, createIterationMonitor, monitorSettings, parseMonitorAdvice } from '../agent/iteration-monitor.mjs';
-import { inspectProduction, runProductionHarness } from '../agent/production-harness.mjs';
+import { inspectProduction, runProductionHarness, validateAcceptanceReport } from '../agent/production-harness.mjs';
 
 const success = () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, stopConfirmed: true });
 const failed = (message, result = {}) => Object.assign(new Error(message), { result: { ...success(), exitCode: 1, ...result } });
@@ -64,6 +64,27 @@ test('acceptance failures preserve the failing criteria for bounded repair', asy
   assert.match(record.repairInstructions, /near-aaa-visual-fidelity:FAIL/);
   const saved = JSON.parse(await fs.readFile(path.join(f.output, 'iteration-monitor-1.json'), 'utf8'));
   assert.deepEqual(saved.diagnostics.acceptanceFailure.failedCriteria, [{ id: 'near-aaa-visual-fidelity', status: 'FAIL' }]);
+});
+
+test('acceptance contract failures identify stale identity and missing proof fields', () => {
+  const result = validateAcceptanceReport({ protocol: 1, status: 'ACCEPTED', pass: true, criteria: [{ status: 'PASS' }],
+    taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old' },
+  { taskId: 'task-current', workspaceId: 'workspace-current', runId: 'run-current' });
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.details.failedCriteria, []);
+  assert.ok(result.details.failedChecks.some(item => item.field === 'packagedGameStatus'));
+  assert.ok(result.details.failedChecks.some(item => item.field === 'runId' && item.actual === 'run-old'));
+});
+
+test('report-only acceptance failures receive bounded instructions', async t => {
+  const f = await fixture(t), review = createIterationMonitor(f);
+  const error = Object.assign(failed('Acceptance report contract is invalid.'), {
+    acceptanceFailure: { status: 'ACCEPTED', pass: true, failedCriteria: [], failedChecks: [{ field: 'runId' }] },
+  });
+  const record = await review({ attempt: 1, stage: 'acceptance-report', error });
+  assert.equal(record.action, 'repair-project');
+  assert.match(record.repairInstructions, /only acceptance\/acceptance-report\.json/i);
+  assert.match(record.repairInstructions, /do not rebuild or add game content/i);
 });
 
 test('first failure uses rules; second uses restricted AI; third stops despite unlimited production retries', async t => {
@@ -174,8 +195,12 @@ async function seedDeliverables(project) {
   for (const [role, file] of Object.entries(files)) {
     if (!file.endsWith('.json')) continue;
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const value = role === 'stageManifest' ? { stages: plan.stages.map(stage => ({ ...stage, status: 'ACCEPTED' })) }
-      : { protocol: 1, passed: true, status: 'PASS', criteria: [{ status: 'PASS' }] };
+    const identity = { taskId: 'task-fixture', runId: 'run-fixture', workspaceId: 'workspace-fixture' };
+    const value = role === 'stageManifest' ? { protocol: 1, ...identity, stages: plan.stages.map(stage => ({ ...stage, status: 'ACCEPTED' })) }
+      : role === 'acceptanceReport' ? { protocol: 1, ...identity, status: 'ACCEPTED', pass: true, accepted: true, passed: true,
+        packagedGameStatus: 'PASS', gameplayStatus: 'PASS', visualStatus: 'PASS', criteria: [{ status: 'PASS' }] }
+      : role.endsWith('-evidence') ? { protocol: 1, status: 'PASS', criteria: [{ status: 'PASS' }] }
+      : { protocol: 1, status: 'ACCEPTED' };
     await fs.writeFile(file, JSON.stringify(value));
   }
 }

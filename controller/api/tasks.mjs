@@ -288,6 +288,7 @@ export async function taskView(db, taskId, userId) {
     const iterationRows = (await client.query(`WITH progress AS (
         SELECT event_id,created_at,payload->'progress' AS progress,payload->'progress'->>'iteration' AS iteration
         FROM task_events WHERE task_id=$1 AND event_type='WORKER_PROGRESS'
+          AND payload->>'runId'=$2
           AND (payload->'progress'->>'iteration') ~ '^[0-9]+$'
       ), latest AS (
         SELECT DISTINCT ON (iteration) iteration,progress,created_at
@@ -304,7 +305,7 @@ export async function taskView(db, taskId, userId) {
       )
       SELECT latest.progress,latest.created_at,COALESCE(failures.failures,'[]'::jsonb) AS failures,COALESCE(steps.steps,'[]'::jsonb) AS steps
       FROM latest LEFT JOIN failures USING (iteration) LEFT JOIN steps USING (iteration)
-      ORDER BY latest.iteration::int`, [taskId])).rows;
+      ORDER BY latest.iteration::int`, [taskId, run?.run_id || ''])).rows;
     const artifactResult = await artifactPage(client, taskId);
     const diagnosticArtifacts = {};
     for (const artifact of (await client.query(`SELECT artifact_id,name FROM artifacts
@@ -447,7 +448,7 @@ export async function heartbeat(db, worker, input, leaseMs) {
       const changed = progressSignature(job.progress) !== progressSignature(progress);
       await client.query('UPDATE jobs SET progress=$2,updated_at=now() WHERE job_id=$1', [job.job_id, progress]);
       await client.query('UPDATE tasks SET updated_at=now() WHERE task_id=$1', [job.task_id]);
-      if (changed) await event(client, job.task_id, 'WORKER_PROGRESS', { workerId: worker.worker_id, progress });
+      if (changed) await event(client, job.task_id, 'WORKER_PROGRESS', { workerId: worker.worker_id, jobId: job.job_id, runId: job.run_id, progress });
     }
     if (terminal.has(job.task_status)) return { ok: true, action: 'STOP', reason: job.task_status };
     if (job.task_status !== 'RUNNING') return { ok: true, action: 'STOP', reason: job.cancel_reason || 'LEASE_LOST' };

@@ -183,6 +183,11 @@ the retained workspace can be continued after the underlying issue is addressed.
 
 ## Acceptance
 
+The worker requires the acceptance report and stage manifest to carry the current task/run
+identity. Reports must explicitly prove packaged-game, gameplay, and visual PASS states with a
+non-empty passing criteria array; an older run's report is rejected even when its files remain in
+the persistent workspace.
+
 Create a production task through an invited account, verify its assigned worker, stage reports, `.uproject`, non-placeholder scene preview, packaged `.exe`, acceptance report and playable launch result, then run a long task and cancel it. Confirm ongoing heartbeats, all descendant processes stopped, `CANCELING -> CANCELED`, no next stage, and no state overwrite from late results. Retain workspace data. Repeat deployed GPU-tool tests even though local Node process-tree tests pass.
 
 Stop the agent with Ctrl+C, which requests termination of its active scoped command. A hard process kill/crash may leave recovery work and is not equivalent to a verified cancel. Deploy/rollback controller and worker protocol versions together between jobs.

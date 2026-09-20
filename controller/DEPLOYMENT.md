@@ -69,7 +69,7 @@ npm run test:unit
 npm run migrate
 ```
 
-The runner records checksums in `schema_migrations`. Do not manually run an individual migration or edit an applied migration. The current release applies the worker telemetry and task follow-up migrations after the account migration. Historical pilot tasks remain unassigned to real users; the API excludes them. An explicit audited adoption tool is still pending.
+The runner records checksums in `schema_migrations`. Do not manually run an individual migration or edit an applied migration. The current release applies the worker telemetry, task follow-up, and run-scoped progress migrations after the account migration. Historical pilot tasks remain unassigned to real users; the API excludes them. An explicit audited adoption tool is still pending.
 
 Worker telemetry requires the matching worker update. The controller accepts older protocol-2
 workers during the upgrade, but their tasks have no detailed progress until the agent is updated.

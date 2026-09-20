@@ -109,6 +109,9 @@ export function createIterationMonitor({ job, project, output, signal, step, inv
     if (record.category === 'service') {
       record.repairInstructions = 'Retry the interrupted production work from existing state. This is an upstream service error; do not change game content to repair it.';
     }
+    if (record.acceptanceFailure?.failedChecks?.length && !record.acceptanceFailure?.failedCriteria?.length) {
+      record.repairInstructions = 'Repair only acceptance/acceptance-report.json to satisfy the recorded report contract and current task/run identity. Preserve the packaged game and evidence; do not rebuild or add game content.';
+    }
     if (record.acceptanceFailure?.failedCriteria?.length) {
       record.repairInstructions = `Repair the recorded acceptance criteria: ${record.acceptanceFailure.failedCriteria.map(item => `${item.id}:${item.status}`).join(', ')}. Preserve passing packaged-game and gameplay evidence; do not weaken acceptance rules.`;
     }

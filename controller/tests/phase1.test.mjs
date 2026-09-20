@@ -154,6 +154,22 @@ test('iteration retries retain worker failure diagnostics', async () => {
   assert.equal(view.iterationSummaries[1].status, 'RUNNING');
   await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(job), status: 'FAIL', stopConfirmed: true, progress: retry } });
 });
+test('iteration diagnostics are scoped to the current task run', async () => {
+  const task = await create(), first = await claim();
+  const oldProgress = { phase: 'failed', status: 'failed', goal: task.objective, step: 'acceptance-report', iteration: 1,
+    error: 'old run acceptance failure', diagnostic: { stage: 'acceptance-report', message: 'old run acceptance failure', category: 'worker-step' } };
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(first), progress: oldProgress } });
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(first), status: 'FAIL', stopConfirmed: true, progress: oldProgress } });
+  await db.query("UPDATE tasks SET deadline_at=now()-interval '1 second' WHERE task_id=$1", [task.taskId]);
+  assert.equal((await request(`/v1/tasks/${task.taskId}/rerun`, { account: alice, data: { prompt: 'Continue from the accepted workspace.' } })).status, 202);
+  const second = await claim();
+  const currentProgress = { phase: 'running', status: 'running', goal: task.objective, step: 'production-orchestrator-1', iteration: 1 };
+  await request('/v1/worker/heartbeat', { headers: agentHeaders, data: { ...identity(second), progress: currentProgress } });
+  const view = (await request(`/v1/tasks/${task.taskId}`, { account: alice })).value;
+  assert.equal(view.iterationSummaries.length, 1);
+  assert.deepEqual(view.iterationSummaries[0].failureReasons, []);
+  await request('/v1/worker/step-result', { headers: agentHeaders, data: { ...identity(second), status: 'FAIL', stopConfirmed: true, progress: currentProgress } });
+});
 test('iteration diagnostics classify Windows cleanup failures and retain raw output', async () => {
   const task = await create(), job = await claim();
   const failed = { phase: 'thinking', status: 'failed', goal: 'Repair the workspace', step: 'production-orchestrator-8', iteration: 8, iterationTotal: 9,

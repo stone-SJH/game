@@ -225,7 +225,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const insecureHttp = process.env.ALLOW_INSECURE_HTTP === 'true' && url.protocol === 'http:';
   if (url.origin !== origin || (url.protocol !== 'https:' && !localDev && !insecureHttp)) throw new Error('Set PUBLIC_ORIGIN to trusted HTTPS, or explicitly enable an approved HTTP test origin.');
   const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='006_progress_events.sql'");
+  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='007_progress_run_scope.sql'");
   if (!schema.rowCount) throw new Error('Run npm run migrate before starting the API.');
   const maxUsers = Number(process.env.MAX_USERS || 10);
   if (!Number.isInteger(maxUsers) || maxUsers < 1) throw new Error('MAX_USERS must be a positive integer.');

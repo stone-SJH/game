@@ -64,6 +64,14 @@ The final report must link to:
 - gameplay evidence for every requested acceptance criterion;
 - hashes for the package and all referenced evidence.
 
+The machine-readable `acceptance/acceptance-report.json` must use protocol `1`, carry the
+current `taskId`, `workspaceId`, and `runId`, and report `status` as `ACCEPTED` or `PASS` with
+an explicit true `pass`, `accepted`, or `passed` flag. Its `packagedGameStatus`,
+`gameplayStatus`, and `visualStatus` fields must be `PASS`, and `criteria` must be a non-empty
+array whose entries all have `status: "PASS"`. The stage manifest must carry the same task and
+run identity and list every planned stage as `ACCEPTED`; a report from an earlier run cannot be
+used as current evidence.
+
 No report, screenshot, process exit code, or model statement alone is sufficient.
 
 ## Controller/API additions
