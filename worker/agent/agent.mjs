@@ -116,6 +116,7 @@ async function workspaceSnapshot(project, output) {
 }
 function phaseForStep(name) {
   if (name.startsWith('iteration-diagnosis')) return 'reviewing';
+  if (name.startsWith('quality-review')) return 'reviewing';
   if (name.startsWith('production-orchestrator')) return 'thinking';
   if (name.startsWith('unreal-project-validation')) return 'building';
   if (name.startsWith('packaged-game-playtest')) return 'evaluating';
@@ -200,7 +201,7 @@ export async function executeJob(job, ctx) {
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
     const monitorStep = name.startsWith('iteration-diagnosis');
-    const codexStep = name.startsWith('production-orchestrator') || monitorStep;
+    const codexStep = name.startsWith('production-orchestrator') || name.startsWith('quality-review') || monitorStep;
     await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
@@ -240,8 +241,13 @@ export async function executeJob(job, ctx) {
   try {
     production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
       onIterationReview: async ({ file, record }) => {
-        const review = { iteration: record.iteration, action: record.action, category: record.category, reason: record.reason,
-          aiInvoked: record.aiInvoked, file: path.basename(file) };
+        const review = { iteration: record.iteration, kind: record.kind || 'iteration-monitor', action: record.action,
+          category: record.category, reason: record.reason, aiInvoked: record.aiInvoked, file: path.basename(file) };
+        if (record.kind === 'quality-review') {
+          review.remainingGap = record.remainingGap;
+          review.criteria = Array.isArray(record.criteria) ? record.criteria.map(item => ({ id: item.id, status: item.status, gap: item.gap })) : [];
+          review.dimensions = Object.fromEntries(Object.entries(record.dimensions || {}).map(([name, item]) => [name, item.status]));
+        }
         iterationReviews.push(review);
         try {
           review.artifactId = await uploadFile(path.basename(file), file, 'application/json', { timeoutMs: 10000 });

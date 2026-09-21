@@ -245,7 +245,7 @@ test('known invalid Help validation is replaced once on existing deliverables, r
   };
   await runProductionHarness({ ...f, onIterationReview: f.onReview });
   assert.deepEqual(steps, ['production-orchestrator-1', 'unreal-project-validation-1', 'unreal-project-validation-repair-1', 'packaged-game-playtest-1']);
-  assert.deepEqual(f.reviews.map(value => value.record.action), ['replace-validator', 'complete']);
+  assert.deepEqual(f.reviews.map(value => value.record.action), ['replace-validator', 'complete', 'skip']);
   const failure = { ...f, step: async (...args) => {
     const result = await f.step(...args);
     if (args[0] === 'packaged-game-playtest-1') {

@@ -5,6 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyIterationFailure, createIterationMonitor } from './iteration-monitor.mjs';
+import {
+  extractQualityCriteria, parseQualityAdvice, qualityAdviceSchema, qualityReviewInvocationArgs, qualityReviewPrompt,
+  qualityReviewSettings,
+} from './quality-review.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -32,6 +36,32 @@ async function filesUnder(directory) {
     }
   }
   return files;
+}
+
+async function collectQualityEvidence(project) {
+  const files = await filesUnder(project);
+  const selected = files.filter(file => {
+    const relative = path.relative(project, file).split(path.sep).join('/');
+    return /^(?:acceptance|plan|provenance|stages)\/.*\.json$/i.test(relative) || /^scene-preview\.(?:png|jpe?g|webp)$/i.test(relative);
+  }).sort();
+  const evidence = [];
+  let totalBytes = 0;
+  for (const file of selected.slice(0, 50)) {
+    const relative = path.relative(project, file).split(path.sep).join('/');
+    try {
+      const stat = await fs.stat(file);
+      if (/\.(?:png|jpe?g|webp)$/i.test(relative)) {
+        evidence.push({ path: relative, type: 'image', bytes: stat.size });
+        continue;
+      }
+      const remaining = Math.max(0, 120000 - totalBytes);
+      if (!remaining) break;
+      const content = (await fs.readFile(file, 'utf8')).slice(0, Math.min(12000, remaining));
+      totalBytes += content.length;
+      evidence.push({ path: relative, type: 'json', content });
+    } catch { /* Evidence can be replaced while an iteration is finishing. */ }
+  }
+  return evidence;
 }
 
 export async function inspectProduction(project) {
@@ -232,6 +262,9 @@ async function removeCodexTempDirectory(directory) {
 export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
+  const qualityCriteria = extractQualityCriteria(job);
+  const qualitySettings = qualityReviewSettings();
+  const qualityIterationTotal = qualityCriteria.length ? 1 + qualitySettings.maxIterations : null;
   const context = {
     protocol: 1,
     taskId: job.taskId,
@@ -242,12 +275,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
     workspaceRoot: project,
     stages: STAGES,
     requiredOutputs: ['.uproject', 'scene-preview.png', 'packaged-game.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
+    qualityCriteria,
+    qualityReview: { enabled: qualityCriteria.length > 0, maxAdditionalIterations: qualitySettings.maxIterations },
   };
   await writeJson(path.join(project, 'plan', 'production-context.json'), context);
   await writeJson(path.join(project, 'plan', 'production-plan.json'), {
     protocol: 1, taskId: job.taskId, runId: job.runId, objective: job.objective,
     stages: STAGES.map((id, index) => ({ id, order: index + 1, status: 'PENDING', outputs: [] })),
     acceptance: context.requiredOutputs,
+    qualityAcceptance: qualityCriteria,
   });
   await writeJson(path.join(project, 'plan', 'stage-manifest.json'), {
     protocol: 1, taskId: job.taskId, runId: job.runId,
@@ -264,6 +300,55 @@ export async function runProductionHarness({ job, project, output, signal, step,
   const review = createIterationMonitor({ job, project, output, signal, step, invocation, reportProgress, onReview: onIterationReview });
   let feedback = null;
   let attempt = 0;
+  let qualityRepairs = 0;
+  let qualityRepairBudget = null;
+
+  async function runQualityReview(attemptNumber) {
+    const file = path.join(output, `quality-review-${attemptNumber}.json`);
+    if (!qualityCriteria.length) {
+      const record = {
+        protocol: 1, kind: 'quality-review', taskId: job.taskId, runId: job.runId, workspaceId: job.workspaceId,
+        iteration: attemptNumber, stage: 'quality-review', createdAt: new Date().toISOString(), category: 'quality',
+        action: 'skip', reason: 'No explicit quality acceptance criteria supplied.', criteria: [], dimensions: null,
+        repairInstructions: '', remainingGap: null, recommendedAdditionalIterations: 0,
+      };
+      await writeJson(file, record);
+      await onIterationReview({ file, record });
+      return record;
+    }
+    const schemaFile = path.join(output, 'quality-review-schema.json');
+    const responseFile = path.join(output, `quality-review-response-${attemptNumber}.json`);
+    await writeJson(schemaFile, qualityAdviceSchema);
+    await fs.rm(responseFile, { force: true });
+    const evidence = await collectQualityEvidence(project);
+    const input = qualityReviewPrompt({ job, project, criteria: qualityCriteria, attempt: attemptNumber, evidence,
+      previous: feedback?.kind === 'quality-review' ? feedback : null });
+    await reportProgress({ phase: 'reviewing', status: 'running', goal: job.objective, iteration: attemptNumber,
+      iterationTotal: qualityIterationTotal, tool: 'Quality reviewer', step: `quality review iteration ${attemptNumber}`, prompt: input });
+    const args = qualityReviewInvocationArgs(invocation, project, schemaFile, responseFile);
+    await step(`quality-review-${attemptNumber}`, invocation.command, args, qualitySettings.timeoutMs, project, undefined, { input });
+    let advice;
+    try { advice = parseQualityAdvice(await fs.readFile(responseFile, 'utf8')); }
+    catch (error) { throw Object.assign(new Error(`Quality reviewer failed: ${error.message}`), { hardFailure: true, reviewed: true }); }
+    if (advice.action === 'repair-project' && qualityRepairBudget === null) {
+      qualityRepairBudget = Math.min(qualitySettings.maxIterations, advice.recommendedAdditionalIterations);
+    }
+    const exhausted = advice.action === 'repair-project' &&
+      (qualityRepairs >= (qualityRepairBudget ?? qualitySettings.maxIterations) || (maxAttempts > 0 && attemptNumber >= maxAttempts));
+    const record = {
+      protocol: 1, kind: 'quality-review', taskId: job.taskId, runId: job.runId, workspaceId: job.workspaceId,
+      iteration: attemptNumber, stage: 'quality-review', createdAt: new Date().toISOString(), category: 'quality',
+      ...advice,
+    };
+    if (exhausted) {
+      record.action = 'stop';
+      record.reason = `Quality review budget exhausted with remaining gap ${advice.remainingGap}. ${advice.reason}`;
+    }
+    await writeJson(file, record);
+    await writeJson(path.join(project, 'plan', 'quality-feedback.json'), record);
+    await onIterationReview({ file, record });
+    return record;
+  }
   while (true) {
     attempt++;
     const prompt = [
@@ -277,7 +362,14 @@ export async function runProductionHarness({ job, project, output, signal, step,
       `The acceptance report must use protocol 1, identify taskId=${job.taskId}, workspaceId=${job.workspaceId}, and runId=${job.runId}, set status to ACCEPTED or PASS with an explicit true pass/accepted/passed flag, set packagedGameStatus, gameplayStatus, and visualStatus to PASS, and contain a non-empty criteria array whose items all have status PASS. The stage manifest must retain the same taskId and runId and list every planned stage as ACCEPTED.`,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
-      ...(feedback ? [
+      ...(feedback ? feedback.kind === 'quality-review' ? [
+        'The previous iteration passed all hard production gates, but the independent quality review found a concrete gap. Repair only that gap before doing additional production work; preserve passing functionality and evidence.',
+        `Quality review decision: ${feedback.action}. Remaining gap: ${feedback.remainingGap}.`,
+        `Quality findings: ${JSON.stringify(feedback.criteria)}.`,
+        `Quality dimension findings: ${JSON.stringify(feedback.dimensions)}.`,
+        `Repair instructions: ${feedback.repairInstructions}`,
+        'The full quality decision is in plan/quality-feedback.json. Do not edit it or weaken any acceptance criteria.',
+      ] : [
         'The previous iteration failed. Repair this specific failure before doing any additional production work. Preserve working assets and gameplay; do not add a new feature just because this is another iteration.',
         `Monitor decision: ${feedback.action}. Failure stage: ${feedback.stage}.`,
         `Diagnosis: ${feedback.reason}`,
@@ -286,7 +378,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
         'The full decision is in plan/iteration-feedback.json. Do not edit it or change acceptance rules to hide the failure.',
       ] : []),
     ].join('\n');
-    await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt, iterationTotal: maxAttempts || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
+    await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt,
+      iterationTotal: maxAttempts || qualityIterationTotal || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     let codexTemp;
     let stage = 'production-orchestrator';
@@ -357,12 +450,24 @@ export async function runProductionHarness({ job, project, output, signal, step,
         }
       }
       await review({ attempt, stage: 'complete' });
-      return deliverables;
+      stage = 'quality-review';
+      const quality = await runQualityReview(attempt);
+      if (quality.action === 'skip' || quality.action === 'complete') return deliverables;
+      if (quality.action === 'stop') {
+        throw Object.assign(new Error(quality.reason), { qualityFailure: quality, reviewed: true });
+      }
+      qualityRepairs++;
+      feedback = quality;
+      await writeJson(path.join(project, 'plan', 'iteration-feedback.json'), quality);
+      await reportProgress({ phase: 'retrying', status: 'running', goal: job.objective, iteration: attempt,
+        iterationTotal: maxAttempts || qualityIterationTotal || null,
+        step: `Quality repair after iteration ${attempt}`, error: quality.reason });
+      await delay(retryDelayMs, undefined, { signal });
     } catch (error) {
       await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {
         attempt, failedAt: new Date().toISOString(), error: error.message,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
-        acceptanceFailure: error.acceptanceFailure,
+        acceptanceFailure: error.acceptanceFailure, qualityFailure: error.qualityFailure,
       });
       if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || error.reviewed) throw error;
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });
