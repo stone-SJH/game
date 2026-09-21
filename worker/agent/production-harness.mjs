@@ -38,6 +38,32 @@ async function filesUnder(directory) {
   return files;
 }
 
+const PACKAGE_ROOTS = [
+  ['package', 'Windows'],
+  ['Saved', 'StagedBuilds', 'Windows'],
+  ['package', 'Win64'],
+  ['Saved', 'StagedBuilds', 'Win64'],
+];
+
+async function findPackagedExecutable(project, projectFile) {
+  const projectName = projectFile ? path.basename(projectFile, path.extname(projectFile)).toLowerCase() : '';
+  const candidates = [];
+  for (const [rootIndex, parts] of PACKAGE_ROOTS.entries()) {
+    const root = path.join(project, ...parts);
+    for (const file of await filesUnder(root)) {
+      if (!/\.exe$/i.test(file)) continue;
+      const relative = path.relative(root, file).split(path.sep).join('/');
+      const segments = relative.toLowerCase().split('/');
+      if (segments.some(segment => ['binaries', 'engine', 'worker', 'vendor'].includes(segment))) continue;
+      const name = path.basename(file, path.extname(file)).toLowerCase();
+      if (/^unreal(editor|pak)$/i.test(path.basename(file))) continue;
+      candidates.push({ file, rootIndex, depth: segments.length, sameName: name === projectName });
+    }
+  }
+  candidates.sort((left, right) => Number(right.sameName) - Number(left.sameName) || left.rootIndex - right.rootIndex || left.depth - right.depth || left.file.localeCompare(right.file));
+  return candidates[0]?.file;
+}
+
 async function collectQualityEvidence(project) {
   const files = await filesUnder(project);
   const selected = files.filter(file => {
@@ -68,7 +94,7 @@ export async function inspectProduction(project) {
   const files = await filesUnder(project);
   const projectFile = files.find(file => file.toLowerCase().endsWith('.uproject'));
   const scenePreview = files.find(file => /^scene-preview\.(png|jpe?g|webp)$/i.test(path.basename(file)));
-  const packageFile = files.find(file => /\.exe$/i.test(path.basename(file)) && !/^unreal(editor|pak)/i.test(path.basename(file)) && !/[\\/]binaries[\\/]/i.test(file));
+  const packageFile = await findPackagedExecutable(project, projectFile);
   const required = {
     workspaceManifest: path.join(project, 'workspace-manifest.json'),
     assetManifest: path.join(project, 'provenance', 'asset-manifest.json'),

@@ -94,6 +94,19 @@ test('stage evidence accepts legacy passing checks arrays', async t => {
   await assert.doesNotReject(runProductionHarness({ ...f, onIterationReview: f.onReview }));
 });
 
+test('packaged executable discovery ignores workspace tools', async t => {
+  const f = await fixture(t);
+  const packageFile = path.join(f.project, 'Saved', 'StagedBuilds', 'Windows', 'Game.exe');
+  await fs.writeFile(path.join(f.project, 'Game.uproject'), '{}');
+  await fs.mkdir(path.join(f.project, 'worker', 'vendor', 'bin'), { recursive: true });
+  await fs.writeFile(path.join(f.project, 'worker', 'vendor', 'bin', 'f2py.exe'), 'python shim');
+  await fs.mkdir(path.dirname(packageFile), { recursive: true });
+  await fs.writeFile(packageFile, 'packaged game');
+  const inspected = await inspectProduction(f.project);
+  assert.equal(inspected.files.packageFile, packageFile);
+  assert.equal(inspected.missing.includes('packaged game (.exe)'), false);
+});
+
 test('acceptance contract failures identify stale identity and missing proof fields', () => {
   const result = validateAcceptanceReport({ protocol: 1, status: 'ACCEPTED', pass: true, criteria: [{ status: 'PASS' }],
     taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old' },
