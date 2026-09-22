@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand, maintainLease } from './process-runner.mjs';
 import { artifactContentType, commandDiagnostic, runProductionHarness } from './production-harness.mjs';
+import { materializeReferences } from './references.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -239,6 +240,9 @@ export async function executeJob(job, ctx) {
   let failure;
   let production;
   try {
+    await publish({ phase: 'preparing', step: 'Preparing reference files' });
+    job = { ...job, referenceFiles: await materializeReferences({ references: job.payload?.references, project,
+      downloadReference: ctx.downloadReference, signal }) };
     production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
       onIterationReview: async ({ file, record }) => {
         const review = { iteration: record.iteration, kind: record.kind || 'iteration-monitor', action: record.action,
@@ -324,7 +328,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     }
   }
   const identity = job => ({ jobId: job.jobId, taskId: job.taskId, leaseToken: job.leaseToken });
-  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, productionHarness: 1, telemetry: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
+  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, productionHarness: 1, telemetry: 1, referenceFiles: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
   if (prior) await sendResult(prior.job, prior.result);
   console.log(`worker ${workerId} registered (protocol 2)`);
   while (!signal?.aborted) {
@@ -348,7 +352,11 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     await atomicJson(journal, { phase: 'RUNNING', bootId, job });
     let result;
     try {
-      result = await execute(job, { root, signal: controller.signal, reportProgress, uploadFile: async (name, file, contentType, { timeoutMs = 60 * 60000 } = {}) => {
+      result = await execute(job, { root, signal: controller.signal, reportProgress,
+        downloadReference: reference => fetch(`${control}/v1/worker/references/${encodeURIComponent(job.taskId)}/${encodeURIComponent(reference.referenceId)}`, {
+          headers: { ...headers, 'x-boot-id': bootId, 'x-job-id': job.jobId, 'x-lease-token': job.leaseToken }, redirect: 'error',
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60000)]) }),
+        uploadFile: async (name, file, contentType, { timeoutMs = 60 * 60000 } = {}) => {
         controller.signal.throwIfAborted();
         const hash = crypto.createHash('sha256');
         for await (const chunk of fs.createReadStream(file, { signal: controller.signal })) hash.update(chunk);

@@ -23,11 +23,17 @@
   </main>
   <dialog id="create-dialog"><form id="create-form">
     <h2>New task</h2><label>Objective<textarea id="objective" required maxlength="4000" rows="3"></textarea></label>
+    <label>Reference files<input id="create-files" type="file" multiple aria-describedby="create-file-help"></label>
+    <p id="create-file-help" class="file-help">Images, logs, videos or other files. Up to 5 files, 20 MB each.</p>
+    <ul id="create-file-list" class="reference-files"></ul><p id="create-upload-status" role="status"></p>
     <p id="create-error" role="alert"></p><div class="actions"><button id="close-dialog" type="button">Close</button><button class="primary" id="create-submit" type="submit">Create task</button></div>
   </form></dialog>
   <dialog id="followup-dialog"><form id="followup-form">
     <h2>Continue task</h2>
     <label>Modification prompt<textarea id="followup-prompt" required maxlength="4000" rows="5"></textarea></label>
+    <label>Reference files<input id="followup-files" type="file" multiple aria-describedby="followup-file-help"></label>
+    <p id="followup-file-help" class="file-help">Add up to 5 files, 20 MB each. Previous references remain available.</p>
+    <ul id="followup-file-list" class="reference-files"></ul><p id="followup-upload-status" role="status"></p>
     <p id="followup-error" role="alert"></p><div class="actions"><button id="close-followup" type="button">Close</button><button class="primary" id="followup-submit" type="submit">Queue modification</button></div>
   </form></dialog>
 </body>

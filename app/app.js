@@ -8,6 +8,7 @@ function signedOut() {
   generation++; session = null; stream?.close(); clearInterval(poll); clearTimeout(refreshTimer); refreshTimer = null; refreshInFlight = false; refreshAgain = false; refreshNeedsList = false; previewObserver?.disconnect(); completedArtifactCache.clear(); items = []; selected = null;
   $('auth').hidden = false; $('workspace').hidden = true; $('account').hidden = true;
   $('task-list').replaceChildren(); $('detail').replaceChildren(); $('create-dialog').close(); $('followup-dialog').close();
+  createReferences.clear(false); followupReferences.clear(false);
 }
 async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { 'content-type': 'application/json', ...(session ? { 'x-csrf-token': session.csrfToken } : {}), ...options.headers } });
@@ -16,6 +17,60 @@ async function api(url, options = {}) {
   return value;
 }
 function node(tag, text, className) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; }
+function referencePicker(prefix) {
+  let entries = [];
+  const input = $(`${prefix}-files`), list = $(`${prefix}-file-list`), progress = $(`${prefix}-upload-status`);
+  const discard = entry => { if (entry.referenceId && session) api(`/v1/references/${entry.referenceId}`, { method: 'DELETE' }).catch(() => {}); };
+  const render = () => {
+    list.replaceChildren();
+    entries.forEach(entry => {
+      const row = node('li');
+      row.append(node('span', `${entry.file.name} · ${(entry.file.size / 1024 / 1024).toFixed(2)} MB`));
+      const remove = node('button', 'Remove'); remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${entry.file.name}`);
+      remove.onclick = () => { entries = entries.filter(item => item !== entry); discard(entry); render(); };
+      row.append(remove); list.append(row);
+    });
+  };
+  input.onchange = () => {
+    const added = [...input.files]; input.value = '';
+    const error = entries.length + added.length > 5 ? 'You can attach at most 5 files per request.' :
+      added.some(file => file.size > 20 * 1024 * 1024) ? 'Each file must be at most 20 MB.' : '';
+    $(`${prefix}-error`).textContent = error;
+    if (error) return;
+    entries.push(...added.map(file => ({ file }))); render();
+  };
+  return {
+    clear(discardFiles = true) { if (discardFiles) entries.forEach(discard); entries = []; input.value = ''; progress.textContent = ''; render(); },
+    async upload() {
+      for (const [index, entry] of entries.entries()) {
+        if (entry.referenceId) continue;
+        progress.textContent = `Uploading ${index + 1} / ${entries.length}: ${entry.file.name}`;
+        const result = await api('/v1/references', { method: 'POST', body: entry.file,
+          headers: { 'content-type': entry.file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(entry.file.name) } });
+        entry.referenceId = result.referenceId;
+      }
+      progress.textContent = entries.length ? `${entries.length} file(s) uploaded. Submitting task…` : '';
+      return entries.map(entry => entry.referenceId);
+    },
+    failed() { progress.textContent = ''; },
+  };
+}
+function referencePanel(task) {
+  const panel = node('section', undefined, 'task-references');
+  if (!task.references?.length) return panel;
+  panel.append(node('h3', 'Reference files'));
+  const list = node('ul', undefined, 'reference-files');
+  for (const reference of task.references) {
+    const row = node('li'), link = node('a', reference.name);
+    link.href = `/v1/references/${encodeURIComponent(reference.referenceId)}`;
+    row.append(link, node('small', `Revision ${reference.taskRevision} · ${(reference.sizeBytes / 1024 / 1024).toFixed(2)} MB`)); list.append(row);
+  }
+  panel.append(list); return panel;
+}
+function submitting(prefix, busy) {
+  for (const control of $(`${prefix}-form`).elements) control.disabled = busy;
+  $(`${prefix}-dialog`).oncancel = event => { if (busy) event.preventDefault(); };
+}
 function status(value) { return node('span', value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
 function date(value) { return new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
 function timestamp(value) {
@@ -404,7 +459,7 @@ async function refreshDetail() {
   }
   if (task.allowedActions.includes('rerun')) {
     const rerun = node('button', 'Continue task'); rerun.className = 'primary';
-    rerun.onclick = () => { $('followup-error').textContent = ''; $('followup-prompt').value = ''; $('followup-dialog').showModal(); $('followup-prompt').focus(); };
+    rerun.onclick = () => { followupReferences.clear(); $('followup-error').textContent = ''; $('followup-prompt').value = ''; $('followup-dialog').dataset.taskId = target; $('followup-dialog').showModal(); $('followup-prompt').focus(); };
     top.append(rerun);
   }
   pane.append(top, node('h2', task.objective));
@@ -413,7 +468,7 @@ async function refreshDetail() {
     const group = node('div'); group.append(node('dt',label),node('dd',value)); details.append(group);
   }
   const completedOutputs = completedOutputsPanel(displayTask);
-  pane.append(...(completedOutputs ? [completedOutputs] : []), details, progressPanel(task), iterationSummaryPanel(task), artifactPanel(task, target));
+  pane.append(...(completedOutputs ? [completedOutputs] : []), details, referencePanel(task), progressPanel(task), iterationSummaryPanel(task), artifactPanel(task, target));
   if (task.result) { pane.append(node('h3','Result'),node('pre',JSON.stringify(task.result,null,2),'result')); }
   return task;
 }
@@ -474,16 +529,18 @@ $('new-task').onclick=()=>{$('create-error').textContent='';$('create-dialog').s
 $('close-dialog').onclick=()=>$('create-dialog').close();
 $('close-followup').onclick=()=>$('followup-dialog').close();
 $('more').onclick=()=>loadTasks(true).catch(error=>notice(error.message));
+const createReferences = referencePicker('create'), followupReferences = referencePicker('followup');
 $('create-form').onsubmit=async event=>{
-  event.preventDefault();$('create-submit').disabled=true;$('create-error').textContent='';
+  event.preventDefault(); if ($('create-submit').disabled) return; submitting('create', true); $('create-error').textContent='';
   try{
-    const task=await api('/v1/tasks',{method:'POST',body:JSON.stringify({objective:$('objective').value})});
-    $('create-dialog').close();$('objective').value='';await loadTasks();await selectTask(task.taskId);
-  }catch(error){$('create-error').textContent=error.message;}finally{$('create-submit').disabled=false;}
+    const references = await createReferences.upload();
+    const task=await api('/v1/tasks',{method:'POST',body:JSON.stringify({objective:$('objective').value, references})});
+    createReferences.clear(false); $('create-dialog').close();$('objective').value='';await loadTasks();await selectTask(task.taskId);
+  }catch(error){createReferences.failed(); $('create-error').textContent=error.message;}finally{submitting('create', false);}
 };
 $('followup-form').onsubmit=async event=>{
-  event.preventDefault(); const taskId=selected; $('followup-submit').disabled=true; $('followup-error').textContent='';
-  try { await api(`/v1/tasks/${taskId}/rerun`, { method:'POST', body:JSON.stringify({ prompt:$('followup-prompt').value }) }); $('followup-dialog').close(); $('followup-prompt').value=''; await loadTasks(); await selectTask(taskId); }
-  catch(error) { $('followup-error').textContent=error.message; } finally { $('followup-submit').disabled=false; }
+  event.preventDefault(); if ($('followup-submit').disabled) return; const taskId=$('followup-dialog').dataset.taskId; submitting('followup', true); $('followup-error').textContent='';
+  try { const references = await followupReferences.upload(); await api(`/v1/tasks/${taskId}/rerun`, { method:'POST', body:JSON.stringify({ prompt:$('followup-prompt').value, references }) }); followupReferences.clear(false); $('followup-dialog').close(); $('followup-prompt').value=''; await loadTasks(); await selectTask(taskId); }
+  catch(error) { followupReferences.failed(); $('followup-error').textContent=error.message; } finally { submitting('followup', false); }
 };
 api('/v1/auth/me').then(signedIn).catch(()=>signedOut());
