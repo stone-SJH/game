@@ -34,6 +34,7 @@ function Get-WorkerProcesses {
 
 $gitRoot = [IO.Path]::GetFullPath((Invoke-Git @('rev-parse', '--show-toplevel')))
 if ($gitRoot.TrimEnd('\') -ne $RepoRoot.TrimEnd('\')) { throw 'RepoRoot must be the Git repository root.' }
+& (Join-Path $PSScriptRoot 'protect-modeling-key.ps1') -RepoRoot $RepoRoot
 $branch = Invoke-Git @('symbolic-ref', '--quiet', '--short', 'HEAD')
 $revision = Invoke-Git @('rev-parse', 'HEAD')
 $dirty = @(Invoke-Git @('status', '--porcelain', '--untracked-files=all'))
@@ -64,7 +65,7 @@ if ($running.Count) {
 
 & node -e 'if (parseInt(process.versions.node) < 20) process.exit(1)'
 if ($LASTEXITCODE -ne 0) { throw 'Node.js 20 or newer is required.' }
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'worker\agent') -Filter '*.mjs') {
+foreach ($file in Get-ChildItem -LiteralPath @((Join-Path $RepoRoot 'worker\agent'), (Join-Path $RepoRoot 'worker\tools')) -Filter '*.mjs' -Recurse) {
   & node --check $file.FullName
   if ($LASTEXITCODE -ne 0) { throw "Node syntax check failed: $($file.Name)" }
 }

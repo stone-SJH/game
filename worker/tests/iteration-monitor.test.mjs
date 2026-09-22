@@ -15,7 +15,7 @@ async function fixture(t) {
   const project = path.join(root, 'project'), output = path.join(root, 'run');
   await fs.mkdir(path.join(project, 'plan'), { recursive: true });
   await fs.mkdir(output);
-  const env = { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1',
+  const env = { MODELING_ROUTING_ENABLED: '0', CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1',
     ITERATION_SAME_FAILURE_LIMIT: '3', ITERATION_FAILURE_LIMIT: '8', ITERATION_MONITOR_TIMEOUT_MS: '60000', ITERATION_MONITOR_MAX_CALLS: '2' };
   const prior = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   Object.assign(process.env, env);

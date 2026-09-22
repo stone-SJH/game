@@ -8,6 +8,9 @@ Current target: **Phase 1, internal testing with a limited invited audience**. P
 | [Phase 1 plan](phase1-http-pilot-plan.md) | Internal-pilot scope and acceptance gates; retains the original filename |
 | [User/workspace design](user-workspace-worker-design.md) | Logical model, constraints and phased design; not all planned tables/features are implemented |
 | [Architecture](controller-worker-architecture.md) | Shared boundaries and separately identified production target |
+| [Worker modeling routing design](worker-modeling-routing-design.md) | Proposed modeling evaluator, asset reuse, Blender/Tripo routing, quality gates and failure fallback |
+| [Modeling harness upgrade plan](worker-modeling-harness-upgrade-plan.md) | Verified Tripo China endpoint, selected Blender skills, headless MCP adaptation, asset QA and Unreal handoff rollout |
+| [Modeling harness implementation](worker-modeling-harness-implementation.md) | Local skills and v2 contracts, real Blender/Tripo/Unreal validation evidence, calibration limits and deployment |
 | [ECS bootstrap](ecs-controller-bootstrap.md) | Historical environment record and phase-specific infrastructure checks |
 | [Phase 2 prerequisites](phase2-prerequisites.md) | Future production scope, not the current delivery checklist |
 

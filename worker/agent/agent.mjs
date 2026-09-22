@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand, maintainLease } from './process-runner.mjs';
 import { artifactContentType, commandDiagnostic, runProductionHarness } from './production-harness.mjs';
+import { tripoAvailability } from './providers/tripo.mjs';
+import { agentEnvironment } from './modeling-io.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -201,7 +203,8 @@ export async function executeJob(job, ctx) {
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
     const monitorStep = name.startsWith('iteration-diagnosis');
-    const codexStep = name.startsWith('production-orchestrator') || name.startsWith('quality-review') || monitorStep;
+    const modelingStep = /^modeling-(plan|evaluation|author|visual-review)/.test(name);
+    const codexStep = name.startsWith('production-orchestrator') || name.startsWith('quality-review') || monitorStep || modelingStep;
     await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
@@ -214,6 +217,11 @@ export async function executeJob(job, ctx) {
       while ((newline = pendingOutput.indexOf('\n')) !== -1) {
         const line = pendingOutput.slice(0, newline); pendingOutput = pendingOutput.slice(newline + 1);
         let event; try { event = JSON.parse(line); } catch { continue; }
+        if (event.item?.type === 'mcp_tool_call' && event.item.server === 'yahaha_blender') {
+          const done = event.type === 'item.completed';
+          publish({ tool: done ? 'AI / Codex' : 'Blender MCP', phase: done ? 'thinking' : 'crafting', command: String(event.item.tool || 'Blender MCP').slice(0, 180) }).catch(() => {});
+          continue;
+        }
         if (event.item?.type !== 'command_execution') continue;
         const done = event.type === 'item.completed';
         const tool = done ? 'AI / Codex' : toolFromOutput(event.item.command) || 'Shell';
@@ -222,7 +230,7 @@ export async function executeJob(job, ctx) {
       }
       if (pendingOutput.length > 2 * 1024 * 1024) pendingOutput = '';
     };
-    const result = await runCommand(command, args, { ...options, cwd, timeoutMs, signal,
+    const result = await runCommand(command, args, { ...options, env: agentEnvironment(options.env || process.env), cwd, timeoutMs, signal,
       onStdout,
       stdoutFile: path.join(output, `${name}.stdout.jsonl`), stderrFile: path.join(output, `${name}.stderr.log`) });
     invalidateSnapshot();
@@ -240,6 +248,17 @@ export async function executeJob(job, ctx) {
   let production;
   try {
     production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
+      onModelingReport: async ({ file, record }) => {
+        if (typeof uploadFile !== 'function') return;
+        try {
+          const name = `modeling-${crypto.createHash('sha256').update(file).digest('hex').slice(0, 16)}-${path.basename(file)}`;
+          const artifactId = await uploadFile(name, file, artifactContentType(file), { timeoutMs: 30000 });
+          artifactIds.push(artifactId);
+        } catch (error) {
+          if (signal.aborted || error.stopConfirmed === false) throw error;
+          await publish({ phase: 'publishing', status: 'running', step: 'Modeling evidence upload failed', error: error.message });
+        }
+      },
       onIterationReview: async ({ file, record }) => {
         const review = { iteration: record.iteration, kind: record.kind || 'iteration-monitor', action: record.action,
           category: record.category, reason: record.reason, aiInvoked: record.aiInvoked, file: path.basename(file) };
@@ -295,6 +314,8 @@ export async function executeJob(job, ctx) {
 }
 
 export async function runAgent({ control, workerId, token, root, signal, once = false, intervalMs = 2000, execute = executeJob }) {
+  const modelingProvider = await tripoAvailability();
+  console.log(`modeling provider: ${modelingProvider.enabled ? 'Tripo configured' : `Blender only (${modelingProvider.reasonCode})`}`);
   if (!token) throw new Error('A per-worker credential is required.');
   await fsp.mkdir(path.join(root, 'journal'), { recursive: true });
   const journal = path.join(root, 'journal', 'execution.json');

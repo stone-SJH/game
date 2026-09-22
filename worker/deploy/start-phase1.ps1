@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'protect-modeling-key.ps1') -RepoRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 $config = Join-Path $WorkerRoot 'config\worker.env.ps1'
 if (Test-Path -LiteralPath $config) {
@@ -22,6 +23,8 @@ $env:WORKER_ID = $WorkerId
 $env:WORKER_TOKEN = $WorkerToken
 $env:YAHAHAGAME_WORKER_ROOT = $WorkerRoot
 $env:YAHAHA_PRODUCTION_SKILL = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'skills\yahahagame-production\SKILL.md'
+if (-not $env:MODELING_HARNESS_V2_ENABLED) { $env:MODELING_HARNESS_V2_ENABLED = '0' }
+if (-not $env:TRIPO_API_KEY_FILE) { $env:TRIPO_API_KEY_FILE = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'tripo.txt' }
 if (-not $env:BLENDER_EXE) { $env:BLENDER_EXE = 'D:\Tools\Blender\blender-5.2.1-windows-x64\blender.exe' }
 if (-not $env:UNREAL_CMD) { $env:UNREAL_CMD = 'D:\UE\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' }
 $env:SESSION_ID = [string](Get-Process -Id $PID).SessionId

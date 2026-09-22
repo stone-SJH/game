@@ -62,6 +62,13 @@ Use these default stages and remove stages that the objective does not require:
 9. `integration-build-and-playtest`
 10. `package-and-acceptance`
 
+For a task that requests or implies 3D modeling, the worker harness runs a bounded modeling
+sub-pipeline inside `asset-production-and-import` before the main production call. Read
+[references/modeling-routing.md](references/modeling-routing.md) when that sub-pipeline is active.
+The host evaluates existing licensed assets first, then chooses bounded Blender MCP authoring or
+the optional Tripo-to-Blender path. A missing or failed Tripo provider is a recorded fallback to
+Blender and never a reason to lower the asset acceptance gates.
+
 Each stage report must contain: `stageId`, `revisionId`, `attempt`, `status`, `startedAt`,
 `finishedAt`, `inputs`, `outputs`, `commands`, `toolVersions`, `evidence`, `warnings`, and
 `nextStage`. A stage is `ACCEPTED` only when its report and evidence manifest are written and

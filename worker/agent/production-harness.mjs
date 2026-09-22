@@ -9,6 +9,9 @@ import {
   extractQualityCriteria, parseQualityAdvice, qualityAdviceSchema, qualityReviewInvocationArgs, qualityReviewPrompt,
   qualityReviewSettings,
 } from './quality-review.mjs';
+import { createModelingPipeline } from './modeling-pipeline.mjs';
+import { agentEnvironment } from './modeling-io.mjs';
+import { validateUnrealModels } from './modeling-unreal.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -285,7 +288,7 @@ async function removeCodexTempDirectory(directory) {
   await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
 }
 
-export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {} }) {
+export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {}, onModelingReport = async () => {} }) {
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
   const qualityCriteria = extractQualityCriteria(job);
@@ -317,13 +320,17 @@ export async function runProductionHarness({ job, project, output, signal, step,
   });
 
   const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
-  const skillCandidates = [process.env.YAHAHA_PRODUCTION_SKILL, path.join(process.env.USERPROFILE || '', '.codex', 'skills', 'yahahagame-production', 'SKILL.md'), path.resolve(moduleRoot, '..', '..', 'skills', 'yahahagame-production', 'SKILL.md')].filter(Boolean);
+  const skillCandidates = [process.env.YAHAHA_PRODUCTION_SKILL, path.resolve(moduleRoot, '..', '..', 'skills', 'yahahagame-production', 'SKILL.md'), path.join(process.env.USERPROFILE || '', '.codex', 'skills', 'yahahagame-production', 'SKILL.md')].filter(Boolean);
   const skillPath = skillCandidates.find(candidate => candidate && requireFile(candidate));
   if (!skillPath) throw new Error('The yahahagame-production skill is not installed on the worker.');
   const maxAttempts = Number(process.env.CODEX_MAX_ATTEMPTS || 0);
   const retryDelayMs = Number(process.env.CODEX_RETRY_DELAY_MS || 10000);
   const invocation = codexInvocation([]);
   const review = createIterationMonitor({ job, project, output, signal, step, invocation, reportProgress, onReview: onIterationReview });
+  const modelingEnabled = process.env.MODELING_ROUTING_ENABLED !== '0';
+  const modelingPipeline = modelingEnabled ? createModelingPipeline({ job, project, output, signal, step, invocation,
+    reportProgress, onReport: onModelingReport }) : null;
+  let modelingResults = null;
   let feedback = null;
   let attempt = 0;
   let qualityRepairs = 0;
@@ -377,7 +384,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
   }
   while (true) {
     attempt++;
-    const prompt = [
+    const basePrompt = [
       `You are the YahahaGame production worker. Read and follow this skill file and its production-contract reference before editing: ${skillPath}`,
       `This is production iteration ${attempt}; inspect all existing workspace files and repair the current attempt instead of starting over.`,
       `Task objective: ${job.objective}`,
@@ -405,25 +412,50 @@ export async function runProductionHarness({ job, project, output, signal, step,
       ] : []),
     ].join('\n');
     await reportProgress({ phase: 'planning', status: 'running', goal: job.objective, iteration: attempt,
-      iterationTotal: maxAttempts || qualityIterationTotal || null, tool: 'AI / Codex', prompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
+      iterationTotal: maxAttempts || qualityIterationTotal || null, tool: 'AI / Codex', prompt: basePrompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     let codexTemp;
     let stage = 'production-orchestrator';
     try {
+      if (modelingPipeline) {
+        stage = 'modeling-assets';
+        modelingResults = await modelingPipeline.prepare();
+        await modelingPipeline.verify();
+      }
+      const prompt = modelingResults ? [basePrompt,
+        'The host has now completed the modeling assessment for this iteration. Treat these results as the authoritative asset handoff.',
+        `Modeling results: ${JSON.stringify(modelingResults)}`,
+        ...(modelingResults.assets.some(asset => asset.contract?.runtime.engine === 'unreal') ? [
+          'V2 DCC_READY assets require independent Unreal verification. Import the accepted model.glb/model.fbx unchanged and place each asset at unit scale in a saved test map. Write plan/modeling-engine-imports.json as {"protocol":2,"assets":[{"assetId":"id","packagePath":"/Game/Models/SM_Name.SM_Name","mapPath":"/Game/Maps/AssetTest"}]}. Map all Unreal-target assets exactly once. The host verifies actual imported source identity and captures the map. Enable PythonScriptPlugin for host validation.',
+          'For UE 5.8 FBX/Interchange custom collision, FbxImportUI.auto_generate_collision=false disables collision entirely in its converter. Keep that flag true, one_convex_hull_per_ucx=true, verify each authored UCX proxy becomes a convex hull, and import explicit LOD files with StaticMeshEditorSubsystem.import_lod. The host checks the exact hull count and LOD budgets. Use the saved test map for real material/orientation evidence.',
+        ] : []),
+        'Do not author new models or change accepted model source/export files. Integrate them into the game and record existing evidence. For a new/changed model, write a full replacement plan/modeling-request.json using the exact modeling-specs.json schema and exit this call before authoring or validation. The host resumes at that boundary.',
+      ].join('\n') : basePrompt;
       codexTemp = await createCodexTempDirectory();
+      stage = 'production-orchestrator';
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
       const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, {
         input: prompt,
-        env: { ...process.env, TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
+        env: { ...agentEnvironment(), TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
       });
       if (hasHardFailureMarker(`${orchestration.stdout}\n${orchestration.stderr}`)) {
         throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
       }
       if (await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) throw Object.assign(new Error('Production marked as impossible by the worker.'), { hardFailure: true });
+      if (modelingPipeline) {
+        stage = 'modeling-assets-post-production';
+        await modelingPipeline.verify();
+        if (await modelingPipeline.hasRequest()) {
+          await reportProgress({ phase: 'planning', step: 'Evaluating requested model revision' });
+          continue;
+        }
+      }
 
       stage = 'deliverables';
       const deliverables = await inspectProduction(project);
       if (deliverables.missing.length) throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}.`);
+      stage = 'modeling-unreal-validation';
+      await validateUnrealModels({ summary: modelingResults, project, output, unreal, projectFile: deliverables.files.projectFile, step, signal, invocation, attempt });
       stage = 'unreal-project-validation';
       try {
         await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,

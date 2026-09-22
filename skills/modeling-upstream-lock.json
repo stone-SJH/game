@@ -1,0 +1,149 @@
+{
+  "protocol": 1,
+  "files": [
+    {
+      "localPath": "yahaha-blender-lowpoly/scripts/lpm_upstream.py",
+      "repository": "ozanzeng/blender-LPM-skill",
+      "revision": "687d0a46f1280bc7d11dbf83539840100ec909dc",
+      "upstreamPath": "skills/blender-lpm-skill/scripts/lpm.py",
+      "sha256": "fa2785b64377ee885af8e993241e6e2fe3a7a272abd9fb810d13026953c72a10",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-lowpoly/upstream/lowpoly.source.txt",
+      "repository": "ozanzeng/blender-LPM-skill",
+      "revision": "687d0a46f1280bc7d11dbf83539840100ec909dc",
+      "upstreamPath": "skills/blender-lpm-skill/SKILL.md",
+      "sha256": "57d42da4404c796d7a23cc5aa2d9562eab0821ee32a15be025ef084b66eb72e1",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-lowpoly/upstream/lpm-LICENSE",
+      "repository": "ozanzeng/blender-LPM-skill",
+      "revision": "687d0a46f1280bc7d11dbf83539840100ec909dc",
+      "upstreamPath": "LICENSE",
+      "sha256": "a7dc3f2de87b8aba423e8235159d3b8d96b749e5e192de5573cfd0dfd2719b56",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-modeling/upstream/arjun-LICENSE",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": "LICENSE",
+      "sha256": "693a17a74eacc8ad849d248356fba7fab357b0bef5c94f783029033ab2d950d7",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-modeling/upstream/blender-modeling.source.txt",
+      "repository": "RobLe3/cc-blender-skill",
+      "revision": "11016c9a5847897491dde935c346571bd7548e3d",
+      "upstreamPath": "plugin/skills/blender-modeling/SKILL.md",
+      "sha256": "787b50ca5ce131eb6cefec7e92985ddee522ea19e9f194e14b756322c902d232",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-modeling/upstream/cc-LICENSE",
+      "repository": "RobLe3/cc-blender-skill",
+      "revision": "11016c9a5847897491dde935c346571bd7548e3d",
+      "upstreamPath": "LICENSE",
+      "sha256": "53551803e298669de282d339c7e85ae64e6fbf370d07ca08105d8e0a2d2fbf3d",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-modeling/upstream/hard-surface.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/hard-surface/SKILL.md",
+      "sha256": "353ea5be095fd3cc9d3b4651a23087e3b20b43eb8a0759f99c227031ae96cb37",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-modeling/upstream/uv-workflow.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/uv-workflow/SKILL.md",
+      "sha256": "1e55a08843199640cc9d6a957ff40f96d077c00d74d6e1d95b81da8adceaba8b",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-reference-fit/upstream/cc-LICENSE",
+      "repository": "RobLe3/cc-blender-skill",
+      "revision": "11016c9a5847897491dde935c346571bd7548e3d",
+      "upstreamPath": "LICENSE",
+      "sha256": "53551803e298669de282d339c7e85ae64e6fbf370d07ca08105d8e0a2d2fbf3d",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-reference-fit/upstream/closed-surface-uv-coverage.source.txt",
+      "repository": "RobLe3/cc-blender-skill",
+      "revision": "11016c9a5847897491dde935c346571bd7548e3d",
+      "upstreamPath": "plugin/skills/closed-surface-uv-coverage/SKILL.md",
+      "sha256": "f452f25f1a6feeb84988a94c77fdac5ec5ca48c379927811ee8f10e06a8f3fe1",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-reference-fit/upstream/reference-analysis-validator.source.txt",
+      "repository": "RobLe3/cc-blender-skill",
+      "revision": "11016c9a5847897491dde935c346571bd7548e3d",
+      "upstreamPath": "plugin/skills/reference-analysis-validator/SKILL.md",
+      "sha256": "53850bf7af945eb0615f5042974a769d49d1101cc7e9759f7ab3b386b6b5aee8",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-unreal-handoff/upstream/arjun-LICENSE",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": "LICENSE",
+      "sha256": "693a17a74eacc8ad849d248356fba7fab357b0bef5c94f783029033ab2d950d7",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-unreal-handoff/upstream/collision-proxy.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/collision-proxy/SKILL.md",
+      "sha256": "35c3b05ea2b31591cfe9c480730e2963887d7dcc88c80eb891d0c4abdc820af6",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-unreal-handoff/upstream/lod-pipeline.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/lod-pipeline/SKILL.md",
+      "sha256": "8025238b3ef5238e9d5304d8014645df2889e0fc09aa5d86de5fea57eafd5b0e",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-unreal-handoff/upstream/qa-review.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/qa-review/SKILL.md",
+      "sha256": "14bd366e4c7831973d67e74580ebfeafb1749ce1530ef64ba900d097ac38fce0",
+      "license": "MIT",
+      "modified": false
+    },
+    {
+      "localPath": "yahaha-blender-unreal-handoff/upstream/unreal-export.source.txt",
+      "repository": "arjun988/blender-skills",
+      "revision": "8f778d2405a214b508d4c7d80742be8e43acdd52",
+      "upstreamPath": ".claude/skills/unreal-export/SKILL.md",
+      "sha256": "9109f7964bb14d3bbad2a5f97fc7a0612317f5790dff638642801d1ea81f5a01",
+      "license": "MIT",
+      "modified": false
+    }
+  ]
+}

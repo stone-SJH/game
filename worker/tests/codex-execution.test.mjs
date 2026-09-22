@@ -112,6 +112,7 @@ async function fixture(t) {
 }
 
 function environment(t, values) {
+  values = { MODELING_ROUTING_ENABLED: '0', ...values }; // These fixtures test the pre-existing outer execution contract.
   const prior = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
   for (const [key, value] of Object.entries(values)) process.env[key] = value;
   t.after(() => {

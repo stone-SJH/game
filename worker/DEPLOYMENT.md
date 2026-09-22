@@ -140,6 +140,113 @@ stdout/stderr and a result JSON under its run directory. Codex CLI usage errors
 (exit code 2) and process launch errors fail immediately instead of retrying.
 Run `npm run test:worker` for the stdin, argument, launch and cancellation tests.
 
+### Modeling assessment and routes
+
+Modeling routing is enabled by default. Before the main production call, a restricted intake
+agent splits 3D requirements into asset specifications; an independent evaluator assesses each
+asset's complexity, precision, quality, tool coverage and reusable sources. The host prefers
+registered source edits, then selects direct Blender authoring or Tripo followed by limited
+Blender cleanup. The evaluator receives actual reference/preview images. Invalid assessments
+fall back to direct Blender after two calls.
+
+`worker/tools/blender-mcp-server.mjs` provides a per-attempt stdio MCP server with health and bpy
+tools. Each tool call starts headless Blender and must explicitly reopen saved files to continue.
+Successful authoring requires an MCP receipt. Host checks reopen both the source `.blend` and
+the exported GLB, check geometry/materials, render four views and request an independent visual
+review against every original requirement. Accepted models are registered in
+`provenance/modeling-catalog.json` with hashes and previews for later reuse. Existing licensed
+`.blend`, `.glb` and `.fbx` entries in that catalog or `provenance/asset-manifest.json` are eligible;
+missing previews are rendered before assessment. This first version ranks at most three local
+workspace candidates, without a cross-workspace asset search service.
+
+The optional API key defaults to `tripo.txt` at the Git checkout root, independent of the current
+working directory. `TRIPO_API_KEY_FILE` can point to protected configuration outside Git. Startup
+checks availability without a paid request. Missing, empty or unreadable files skip third-party
+assessment and network calls. Launch/deploy scripts add the exact root file to local
+`.git/info/exclude` and reject a staged/tracked key. No key is passed to agents or artifacts;
+provider credentials and signed download URLs are omitted from persisted reports.
+
+Tripo requests use the China-region v3 API (`https://openapi.tripo3d.com/v3`) with a
+China-region API key. This worker does not fail over to the international `.ai` endpoint.
+Submission intent and task ID are persisted before proceeding.
+Generated bases are imported and reviewed before cleanup, and their previews are compared with
+the final result. A full rebuild cannot be accepted as limited cleanup.
+Credits, authentication, service, timeout, download, import and generated-model quality failures
+switch to direct Blender. A lost submission response never triggers another paid POST; a known
+task ID can resume polling. The default budget is one new submission per run. User cancellation,
+expired leases, local storage failures and uncertain process shutdown still stop execution.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `MODELING_ROUTING_ENABLED` | `1` | Set to `0` for the previous production workflow. |
+| `MODELING_HARNESS_V2_ENABLED` | `0` | Opt in new tasks to pinned skills, blockout feedback and DCC/Unreal gates. Explicit v2 specs also opt in. |
+| `MODELING_AGENT_MODEL` | inherited | Optional model for evaluation, authoring and visual review. |
+| `MODELING_EVALUATION_TIMEOUT_MS` | `120000` | Budget per restricted agent call. |
+| `MODELING_BUILD_TIMEOUT_MS` | `1800000` | Budget per direct/reuse authoring attempt. |
+| `MODELING_CLEANUP_TIMEOUT_MS` | `300000` | Budget per generated-model cleanup attempt. |
+| `TRIPO_MODEL` | `v3.1-20260211` | Pinned generation model. |
+| `TRIPO_MAX_GENERATIONS_PER_RUN` | `1` | New submissions across all assets; `0` prevents submission. |
+| `TRIPO_MAX_WAIT_MS` | `480000` | Generation, polling and download budget. |
+| `TRIPO_REQUEST_TIMEOUT_MS` | `20000` | Timeout for one API request. |
+| `TRIPO_POLL_MS` | `3000` | Poll interval. |
+
+Reuse and cleanup allow two attempts each; direct authoring allows three. Cleanup that requires
+a full rebuild falls back immediately. Exhausting direct quality checks fails with retained
+evidence rather than weakening acceptance. There are at most four explicit model-plan revisions.
+The production agent consumes `plan/modeling-results.json`, integrates accepted assets, and
+requests revisions using `plan/modeling-request.json`; accepted source/export hashes are checked
+again afterward. Existing Unreal import, playtest and packaging gates still apply. Static model
+checks do not replace engine validation or a rig/animation deformation test.
+
+Reports are saved under `plan/modeling/` and `stages/asset-production-and-import/models/`, with
+host resumable state in the workspace's sibling `modeling-state/` directory and run reports in
+`runs/<runId>/`. Preserve these directories when continuing a task.
+
+Run `npm run test:worker` and `powershell.exe -NoProfile -ExecutionPolicy Bypass -File worker/tests/deployment.tests.ps1`.
+The isolated real-tool probe is:
+
+```powershell
+node worker/tools/modeling-pipeline-probe.mjs --live-evaluation --live-author --live-review --reuse --generated --cancel --balance
+```
+
+It creates a temporary workspace with Chinese characters/spaces, tests missing-key authoring and
+a simulated credits failure, runs real Blender checks, and optionally performs a read-only real
+balance query. `--reuse` verifies registered-source previewing and edits without changing the
+original; `--generated` exercises download/import/cleanup using a local provider response fixture.
+It never submits a paid generation. The live flags exercise actual Codex agents;
+without them the corresponding agent responses/build are fixtures. `--cancel` verifies shutdown
+of an actual Blender child. Paid provider generation and complex organic/rigged asset benchmarks
+require separate validation on a worker with provider connectivity.
+
+V2 uses four repository-owned skills and a pinned MIT upstream resource lock. Task copies are
+hashed before execution and acceptance. The host persists the plan and per-asset toolchain in
+`modeling-state/`; toggling the flag does not downgrade an existing task. A changed toolchain
+stops that task with evidence, rather than creating a fresh attempt budget. Restore its release
+to resume. Do not delete task state or provider ledgers as a migration procedure.
+
+The v2 real-author benchmark (no paid generation unless `--tripo` is supplied) is:
+
+```powershell
+node worker/tools/modeling-v2-probe.mjs --case hard-surface --out D:\ModelingAudit\hard-surface
+node worker/tools/modeling-v2-probe.mjs --case lowpoly --reference D:\ModelingAudit\axe.png --out D:\ModelingAudit\lowpoly
+node worker/tools/modeling-v2-probe.mjs --case hard-surface --reuse-source D:\ModelingAudit\source.blend --out D:\ModelingAudit\reuse
+node worker/tools/modeling-v2-probe.mjs --case modular --out D:\ModelingAudit\modular
+node worker/tools/modeling-v2-probe.mjs --case organic --out D:\ModelingAudit\organic
+node worker/tools/modeling-v2-probe.mjs --case rig --out D:\ModelingAudit\rig
+node worker/tools/modeling-unreal-probe.mjs D:\ModelingAudit\unreal
+node worker/tools/modeling-unreal-probe.mjs D:\ModelingAudit\unreal-door door
+node worker/tools/modeling-unreal-asset-probe.mjs D:\ModelingAudit\modular\modular-1\project D:\ModelingAudit\unreal-authored-door
+```
+
+Use a fresh output directory for an independent run; `--repeat 3` measures variability.
+`--variant legacy` exercises the former authoring flow; compare exported assets against the
+same full technical target before interpreting pass-rate differences. The UE probe creates an
+isolated project, imports FBX/UCX/LOD, validates the saved package and map, then invokes the
+production host boundary and an independent image reviewer. Startup health is not engine readiness.
+Lightmap packing, complex skeletal Unreal handoff and custom pivot mapping fail closed until
+their importer validators are calibrated. Keep global v2 intake disabled until the release
+benchmark matrix meets the [upgrade plan](../knowledgebase/worker-modeling-harness-upgrade-plan.md).
+
 ### Iteration monitor
 
 Every completed iteration receives a small rule-based review. Known service failures use bounded

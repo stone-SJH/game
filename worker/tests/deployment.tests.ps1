@@ -66,6 +66,13 @@ try {
 
   & $deploy -RepoRoot $checkout -CheckOnly
   Assert ($deploymentTestState.Started -eq 0) 'CheckOnly started a process.'
+  Write-Fixture 'tripo.txt' 'fixture-only-modeling-key'
+  Git $checkout @('check-ignore', '--quiet', 'tripo.txt') | Out-Null
+  & $deploy -RepoRoot $checkout -CheckOnly
+  Git $checkout @('add', '--force', 'tripo.txt') | Out-Null
+  Expect-Failure { & $deploy -RepoRoot $checkout } 'tripo.txt is tracked or staged'
+  Git $checkout @('reset', '--', 'tripo.txt') | Out-Null
+  Remove-Item -LiteralPath (Join-Path $checkout 'tripo.txt')
   Write-Fixture 'worker/ignored.log' 'ignored source payload'
   Expect-Failure { & $deploy -RepoRoot $checkout } 'Ignored files exist'
   Remove-Item -LiteralPath (Join-Path $checkout 'worker/ignored.log')

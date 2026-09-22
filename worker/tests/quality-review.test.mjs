@@ -11,6 +11,7 @@ const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-a
   'world-materials-fx-audio-and-ui', 'integration-build-and-playtest', 'package-and-acceptance'];
 
 function environment(t, values) {
+  values = { MODELING_ROUTING_ENABLED: '0', ...values }; // Modeling has dedicated route/contract tests.
   const prior = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
   Object.assign(process.env, values);
   t.after(() => {

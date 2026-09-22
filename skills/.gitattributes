@@ -1,0 +1,3 @@
+# Byte-pinned modeling resources must retain upstream line endings on Windows checkouts.
+yahaha-blender-*/** text eol=lf
+modeling-upstream-lock.json text eol=lf
