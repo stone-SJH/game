@@ -25,7 +25,7 @@ The current controller deliberately holds a task when no sandbox executor is con
 
 ## Local preflight package
 
-The current reference analysis and production planning notes are [zhongkui-preflight.md](analysis/zhongkui-preflight.md), [zhongkui-reference-manifest.json](analysis/zhongkui-reference-manifest.json), and [zhongkui-skill-derived-plan.md](analysis/zhongkui-skill-derived-plan.md). A preflight JSON is supplied separately when running the local sandbox smoke test and is intentionally not part of this repository.
+A preflight JSON is supplied separately when running the local sandbox smoke test and is intentionally not part of this repository.
 
 ## Production architecture baseline
 
