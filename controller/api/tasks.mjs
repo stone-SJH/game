@@ -1,4 +1,5 @@
 import { digest, id, problem, transaction } from './database.mjs';
+import { selectedReferences, bindReferences } from './references.mjs';
 
 export const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED']);
 const ARTIFACT_PAGE_SIZE = 5;
@@ -359,17 +360,19 @@ export async function createTask(db, userId, input) {
   const objective = String(input.objective || '').trim();
   if (!objective || objective.length > 4000) throw problem(400, 'Objective must contain 1-4000 characters.');
   const kind = 'production';
-  const payload = { workspacePolicy: 'new-per-task', projectFiles: 'worker-managed' };
   return change(db, async client => {
     const taskId = id('task'), jobId = id('job'), workspaceId = id('workspace'), revisionId = id('revision'), runId = id('run');
+    const references = await selectedReferences(client, userId, input.references, 1);
+    const payload = { workspacePolicy: 'new-per-task', projectFiles: 'worker-managed', references };
     await client.query("INSERT INTO tasks(task_id,user_id,owner_id,kind,objective,payload,status,deadline_at) VALUES($1,$2,$2,$3,$4,$5,'QUEUED',now()+interval '24 hours')", [taskId, userId, kind, objective, payload]);
     await client.query('INSERT INTO workspaces(workspace_id,task_id,relative_root) VALUES($1,$2,$1)', [workspaceId, taskId]);
-    const frozen = { kind, objective, payload };
+    const frozen = { kind, objective, payload, references };
     await client.query('INSERT INTO task_revisions(revision_id,task_id,revision_number,input,input_hash) VALUES($1,$2,1,$3,$4)', [revisionId, taskId, frozen, digest(JSON.stringify(frozen))]);
     await client.query("INSERT INTO task_runs(run_id,task_id,revision_id,status) VALUES($1,$2,$3,'QUEUED')", [runId, taskId, revisionId]);
     await client.query('INSERT INTO jobs(job_id,task_id,run_id,payload,objective) VALUES($1,$2,$3,$4,$5)', [jobId, taskId, runId, payload, objective]);
+    await bindReferences(client, references, taskId, revisionId);
     await event(client, taskId, 'TASK_CREATED', { taskId, runId, workspaceId });
-    return { taskId, workspaceId, runId, jobId, status: 'QUEUED' };
+    return { taskId, workspaceId, runId, jobId, status: 'QUEUED', references };
   });
 }
 export async function taskView(db, taskId, userId) {
@@ -423,10 +426,12 @@ export async function taskView(db, taskId, userId) {
     }
     const progress = job?.progress && Object.keys(job.progress).length ? progressForUser(job.progress, task.status) : null;
     const runsForUser = runs.map(item => ({ runId: item.run_id, taskRevision: item.revision_number, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
-      followUpPrompt: item.input?.followUpPrompt || null, createdAt: item.created_at, finishedAt: item.finished_at, resultSummary: runSummary(item, task.status) }));
+      followUpPrompt: item.input?.followUpPrompt || null, references: item.input?.references || [],
+      createdAt: item.created_at, finishedAt: item.finished_at, resultSummary: runSummary(item, task.status) }));
     return { taskId, ownerId: userId, objective: task.objective, kind: task.kind, status: task.status, workerId: task.worker_id,
       workspaceId: workspace?.workspace_id, runId: run?.run_id, taskRevision: run?.revision_number || null, deadlineAt: task.deadline_at, createdAt: task.created_at,
       updatedAt: task.updated_at, result: task.result, currentPrompt: run?.input?.followUpPrompt || null, progress,
+      references: run?.input?.payload?.references || [],
       worker: task.worker_id ? { workerId: task.worker_id, status: job?.worker_status || 'OFFLINE', capabilities: job?.capabilities || {}, lastSeenAt: job?.last_seen_at || null,
         leaseUntil: job?.lease_until || null, attempt: job?.attempt || 0, updatedAt: job?.job_updated_at || null } : null,
       runs: runsForUser, iterationSummaries: iterationSummaries(iterationRows, task, runsForUser, diagnosticArtifacts),
@@ -466,11 +471,14 @@ export async function rerunTask(db, taskId, userId, input) {
     if ((await client.query("SELECT 1 FROM worker_allocations wa JOIN jobs j ON j.job_id=wa.job_id WHERE j.task_id=$1 AND wa.released_at IS NULL", [taskId])).rowCount) {
       throw problem(409, 'The previous worker execution is still shutting down.');
     }
-    const priorRun = (await client.query('SELECT run_id FROM task_runs WHERE task_id=$1 ORDER BY created_at DESC LIMIT 1', [taskId])).rows[0];
+    const priorRun = (await client.query(`SELECT r.run_id,rev.input FROM task_runs r JOIN task_revisions rev USING(revision_id)
+      WHERE r.task_id=$1 ORDER BY rev.revision_number DESC LIMIT 1`, [taskId])).rows[0];
     const revisionNumber = Number((await client.query('SELECT COALESCE(MAX(revision_number),0)+1 AS next FROM task_revisions WHERE task_id=$1', [taskId])).rows[0].next);
     const runId = id('run'), jobId = id('job'), revisionId = id('revision');
-    const payload = { ...(task.payload || {}), followUpPrompt: prompt, parentRunId: priorRun?.run_id || null, workspacePolicy: 'continue-existing' };
-    const revisionInput = { kind: task.kind, objective: task.objective, followUpPrompt: prompt, payload };
+    const references = await selectedReferences(client, userId, input.references, revisionNumber);
+    const payload = { ...(task.payload || {}), followUpPrompt: prompt, parentRunId: priorRun?.run_id || null, workspacePolicy: 'continue-existing',
+      references: [...(priorRun?.input?.payload?.references || []), ...references] };
+    const revisionInput = { kind: task.kind, objective: task.objective, followUpPrompt: prompt, payload, references };
     const previous = (await client.query('SELECT input FROM task_revisions WHERE task_id=$1 ORDER BY revision_number', [taskId])).rows
       .map(row => row.input.followUpPrompt).filter(Boolean);
     const objective = [task.objective, ...previous.map((value, index) => `Previous modification ${index + 1}:\n${value}`),
@@ -480,9 +488,10 @@ export async function rerunTask(db, taskId, userId, input) {
     await client.query('INSERT INTO task_revisions(revision_id,task_id,revision_number,input,input_hash) VALUES($1,$2,$3,$4,$5)', [revisionId, taskId, revisionNumber, revisionInput, digest(JSON.stringify(revisionInput))]);
     await client.query("INSERT INTO task_runs(run_id,task_id,revision_id,status) VALUES($1,$2,$3,'QUEUED')", [runId, taskId, revisionId]);
     await client.query('INSERT INTO jobs(job_id,task_id,run_id,payload,objective) VALUES($1,$2,$3,$4,$5)', [jobId, taskId, runId, payload, objective]);
+    await bindReferences(client, references, taskId, revisionId);
     await client.query("UPDATE tasks SET status='QUEUED',cancel_reason=NULL,result=NULL,deadline_at=now()+interval '24 hours',updated_at=now() WHERE task_id=$1", [taskId]);
     await event(client, taskId, 'TASK_FOLLOWUP_REQUESTED', { taskId, runId, jobId, prompt });
-    return { taskId, runId, jobId, workspaceId: (await client.query('SELECT workspace_id FROM workspaces WHERE task_id=$1', [taskId])).rows[0]?.workspace_id, status: 'QUEUED' };
+    return { taskId, runId, jobId, workspaceId: (await client.query('SELECT workspace_id FROM workspaces WHERE task_id=$1', [taskId])).rows[0]?.workspace_id, status: 'QUEUED', references };
   });
 }
 export async function registerWorker(db, worker, input) {
@@ -503,7 +512,9 @@ export async function pollWorker(db, worker, input, leaseMs) {
       JOIN tasks t ON t.task_id=j.task_id JOIN workspaces w ON w.task_id=t.task_id
       JOIN user_worker_bindings b ON b.user_id=t.user_id JOIN users u ON u.user_id=t.user_id
       WHERE b.worker_id=$1 AND u.status='ACTIVE' AND j.status='QUEUED' AND t.status='QUEUED'
-      AND t.deadline_at>now() AND (w.worker_id IS NULL OR w.worker_id=$1) ORDER BY j.created_at,j.job_id LIMIT 1`, [worker.worker_id])).rows[0];
+      AND t.deadline_at>now() AND (w.worker_id IS NULL OR w.worker_id=$1)
+      AND (COALESCE(jsonb_array_length(j.payload->'references'),0)=0 OR $2::boolean)
+      ORDER BY j.created_at,j.job_id LIMIT 1`, [worker.worker_id, current.capabilities?.referenceFiles === 1])).rows[0];
     if (!job) return { job: null };
     const leaseToken = id('lease'), allocationId = id('allocation');
     const leaseUntil = new Date(Date.now() + leaseMs);

@@ -11,9 +11,11 @@ import { authenticate, sessionFor, sessionCookie, rateLimit } from './accounts.m
 import { digest, problem } from './database.mjs';
 import * as tasks from './tasks.mjs';
 import { getPngPreview } from './image-preview.mjs';
+import { receiveReference, removePendingReference, expirePendingReferences } from './references.mjs';
 
 export function createServer({ db, artifactRoot, origin, secureCookies = true, maxUsers = 10, leaseMs = 120000,
-  appRoot = fileURLToPath(new URL('../../app/', import.meta.url)), maxArtifactBytes = 2 * 1024 ** 3 }) {
+  appRoot = fileURLToPath(new URL('../../app/', import.meta.url)), maxArtifactBytes = 2 * 1024 ** 3,
+  referenceRoot = path.join(artifactRoot, 'references') }) {
   function json(res, status, value) {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     res.end(JSON.stringify(value));
@@ -152,6 +154,40 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         return json(res, 200, { tasks: items.map(({ cursor_time, ...item }) => item), nextCursor: rows.length > 50 ? Buffer.from(JSON.stringify([last.cursor_time, last.task_id])).toString('base64url') : null });
       }
     }
+    if (req.method === 'POST' && url.pathname === '/v1/references') {
+      const session = await user(req, true);
+      await rateLimit(db, `references:${session.user_id}`, 120);
+      const value = await receiveReference(db, req, session.user_id, referenceRoot);
+      return json(res, 201, value);
+    }
+    const reference = url.pathname.match(/^\/v1\/references\/(reference-[a-f0-9-]{36})$/);
+    const workerReference = url.pathname.match(/^\/v1\/worker\/references\/([a-zA-Z0-9-]+)\/(reference-[a-f0-9-]{36})$/);
+    if (reference && req.method === 'DELETE') {
+      const session = await user(req, true);
+      await removePendingReference(db, session.user_id, reference[1]);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && (reference || workerReference)) {
+      let row;
+      if (workerReference) {
+        const agent = await worker(req);
+        const job = await tasks.matchingJob(db, agent, { taskId: workerReference[1], jobId: req.headers['x-job-id'],
+          bootId: req.headers['x-boot-id'], leaseToken: req.headers['x-lease-token'] });
+        if (job.run_finished_at || job.task_status !== 'RUNNING' || new Date(job.lease_until) <= new Date() || new Date(job.deadline_at) <= new Date()) throw problem(409, 'Reference download requires an active execution lease.');
+        if (!(job.payload?.references || []).some(item => item.referenceId === workerReference[2])) throw problem(404, 'Reference not found.');
+        row = (await db.query('SELECT * FROM task_references WHERE reference_id=$1 AND task_id=$2', [workerReference[2], job.task_id])).rows[0];
+      } else {
+        const session = await user(req);
+        row = (await db.query('SELECT * FROM task_references WHERE reference_id=$1 AND user_id=$2', [reference[1], session.user_id])).rows[0];
+      }
+      if (!row) throw problem(404, 'Reference not found.');
+      const stat = await fsp.stat(row.storage_path).catch(() => null);
+      if (!stat?.isFile() || stat.size !== Number(row.size_bytes)) throw problem(404, 'Reference file missing or incomplete.');
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': stat.size,
+        'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "sandbox; default-src 'none'",
+        'content-disposition': `attachment; filename="reference"; filename*=UTF-8''${encodeURIComponent(row.name).replaceAll("'", '%27')}` });
+      return pipeline(fs.createReadStream(row.storage_path), res);
+    }
     const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|artifacts))?$/);
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
@@ -208,14 +244,18 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
   }
   const server = http.createServer((req, res) => route(req, res).catch(error => {
     if (!error.status) console.error(error);
+    if (!req.complete && !req.destroyed) req.resume();
     if (!res.headersSent && !res.destroyed) json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error.' });
     else res.destroy();
   }));
-  let busy = false;
+  let busy = false, nextReferenceCleanup = 0;
   const timer = setInterval(async () => {
     if (busy) return;
     busy = true;
-    try { await tasks.reconcile(db); } catch (error) { console.error('reconcile:', error.message); } finally { busy = false; }
+    try {
+      await tasks.reconcile(db);
+      if (Date.now() >= nextReferenceCleanup) { await expirePendingReferences(db); nextReferenceCleanup = Date.now() + 3600000; }
+    } catch (error) { console.error('reconcile:', error.message); } finally { busy = false; }
   }, 2000);
   timer.unref(); server.on('close', () => clearInterval(timer));
   return server;
@@ -228,7 +268,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const insecureHttp = process.env.ALLOW_INSECURE_HTTP === 'true' && url.protocol === 'http:';
   if (url.origin !== origin || (url.protocol !== 'https:' && !localDev && !insecureHttp)) throw new Error('Set PUBLIC_ORIGIN to trusted HTTPS, or explicitly enable an approved HTTP test origin.');
   const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='007_progress_run_scope.sql'");
+  const schema = await db.query("SELECT 1 FROM schema_migrations WHERE name='008_task_references.sql'");
   if (!schema.rowCount) throw new Error('Run npm run migrate before starting the API.');
   const maxUsers = Number(process.env.MAX_USERS || 10);
   if (!Number.isInteger(maxUsers) || maxUsers < 1) throw new Error('MAX_USERS must be a positive integer.');
