@@ -78,6 +78,11 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
         evidenceSource:asset.evidenceSource||'accepted-manifest',attempt:asset.attempt||null,originalFailure:result.kind||result.error||null};
       let fatal;
       try {
+        if(spec.contract?.runtime.profile.startsWith('fbx')) {
+          const required=path.relative(project,path.join(directory,'model.fbx')).replaceAll('\\','/');
+          if(!asset.files.some(file=>file.path===required))throw Object.assign(new Error(`Required runtime export is absent from retained evidence: ${required}`),
+            {kind:'ARTIFACT_GAP',gaps:[{id:'runtimeExport',status:'GAP',file:required}]});
+        }
         const geometry=await execution.run({key:'technical',stage:'TECHNICAL',input:{spec},evidence:frozen,maxCalls:2,timeoutMs:300000,retry:()=>true},async({callId,timeoutMs})=>{
           const report=path.join(target,callId,'geometry-report.json');await fs.mkdir(path.dirname(report));
           await step(callId,blenderExecutable(),['--background','--factory-startup','--disable-autoexec','--python-exit-code','1','--python',checker,'--',
@@ -88,7 +93,13 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
           return value;
         });
         row.technicalPassed=geometry.passed;
-        if(!geometry.passed) { row.status='TECHNICAL_GAP';row.gaps=['source','export'].flatMap(k=>geometry[k]?.gates?.filter(g=>g.status==='GAP')||[]); }
+        if(!geometry.passed) {
+          row.status='TECHNICAL_GAP';
+          row.gaps=[...['source','export'].flatMap(component=>(geometry[component]?.gates||[])
+            .filter(g=>g.status==='GAP').map(g=>({...g,component}))),
+            ...(geometry.referenceMatches||[]).filter(match=>match.status==='GAP').map(match=>({...match,id:'referenceMatch'})),
+            ...(geometry.missingRuntimeDependencies||[]).map(name=>({id:'runtimeDependency',status:'GAP',name}))];
+        }
         else {
           const references=await Promise.all(spec.referenceImages.map(file=>localPath(project,file,{existing:true})));
           const targets=[...geometry.views,...geometry.motionViews||[]].map(v=>v.file);
@@ -99,7 +110,8 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
           row.status=reviewPasses(review,spec,evidence)?'PASS':'VISUAL_GAP';row.review=review;
         }
       } catch(error) {
-        row.status='INFRASTRUCTURE_ERROR';row.failure={kind:error.kind||'UNCATEGORIZED',message:error.message};
+        row.status=error.kind==='ARTIFACT_GAP'?'ARTIFACT_GAP':'INFRASTRUCTURE_ERROR';row.failure={kind:error.kind||'UNCATEGORIZED',message:error.message};
+        if(error.kind==='ARTIFACT_GAP') {row.technicalPassed=false;row.gaps=error.gaps;}
         if(signal?.aborted||error.stopConfirmed===false||error.result?.stopConfirmed===false)fatal=error;
       }
       await verifyEvidence(frozen);row.inputFilesUnchanged=true;rows.push(row);
