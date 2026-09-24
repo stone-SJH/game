@@ -30,11 +30,14 @@ test('audit preserves registered denominator and separates quality gaps from ser
   await fs.writeFile(log,JSON.stringify({type:'error',message:'unexpected status 503'})+'\n'+JSON.stringify({type:'turn.completed',usage:{input_tokens:100,output_tokens:20}}));
   await fs.appendFile(log,'\n'+JSON.stringify({type:'item.completed',item:{id:'mcp-1',type:'mcp_tool_call',tool:'blender_run_python',status:'failed',
     result:{content:[{type:'text',text:JSON.stringify({exitCode:1,stderr:'TypeError: enum BLENDER_EEVEE_NEXT not found'})}]}}}));
+  await fs.appendFile(log,'\n'+JSON.stringify({type:'item.completed',item:{id:'mcp-2',type:'mcp_tool_call',tool:'blender_render_views',status:'completed',
+    result:{content:[{type:'text',text:JSON.stringify({isError:true,content:[{type:'text',text:'Unknown view: three-quarter'}]})}]}}}));
   let report=await f.audit();assert.equal(report.registered,3);assert.equal(report.finished,0);
   const row=report.rows[1];assert.equal(row.status,'IN_PROGRESS');assert.equal(row.authorAttempts,2);
   assert.equal(row.qualityGaps.length,1);assert.equal(row.calls.total,2);assert.equal(row.calls.inProgress.length,1);
   assert.deepEqual(row.serviceEvidence.httpStatusCounts,{'503':1});assert.equal(row.completedCallUsage.length,1);
-  assert.deepEqual(row.toolEvidence.failureCounts,{BLENDER_API_ENUM:1});assert.equal(row.toolEvidence.failures[0].tool,'blender_run_python');
+  assert.deepEqual(row.toolEvidence.failureCounts,{BLENDER_API_ENUM:1,MCP_INPUT_VALIDATION:1});assert.equal(row.toolEvidence.failures[0].tool,'blender_run_python');
+  assert.equal(row.toolEvidence.failures[1].exitCode,null);
   await atomicJson(path.join(f.root,'organic-1/benchmark-report.json'),{results:[{passed:false,kind:'REVIEW_PROCESS_ERROR',durationMs:50,error:'service failed'}]});
   report=await f.audit();assert.equal(report.finished,1);assert.equal(report.categories.organic.registered,2);
   assert.equal(report.categories.organic.failed,1);assert.equal(report.rows[1].terminalFailure.kind,'REVIEW_PROCESS_ERROR');

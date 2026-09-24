@@ -158,3 +158,20 @@ Windows 六项 runner 测试通过。当前排队的比较已采用独立 finish
 固定 36 槽并冻结检查器源码哈希，不调用建模作者。低模中断槽凭保留的 interruption 文件哈希记录，
 其余槽必须有唯一终态报告；任何未确认的复验错误停止后续检查，不自动重放。
 两项 Windows 批处理测试通过，覆盖固定分母、留存 PASS 不提升原失败、等待与停止围栏。
+
+16:25 CST，候选 10/12 槽结束。绑定第 1 槽失败，用时 2,190,413 ms：首次作者 FINAL_PENDING 超时，
+第二、三次记录 `Modeling JSON exceeds size limit`，execution.json 为 2,254,994 字节；
+这是与复用第 2 槽相同的旧版内联图片存储缺陷，不是新的视觉 GAP。绑定第 2 槽运行，第 3 槽未启动。
+候选快照 `r6-candidate-audit-07.json` 输入/规格/已验收文件完整性通过。
+审计补充解析 MCP 嵌套 content/isError，记录内部失败为工具错误；三项 Windows 审计测试通过。
+
+共同复验清单 `r6-prepared/common-recheck-registration-v1.json` 已冻结 36 槽与 26 份检查器/依赖文件哈希，
+等待 `comparison-run-v1/report.json` 完成，输出至 `r6-common-recheck-v1`。
+模块的 13 份留存文件登记于 `modular-retained-input-v1.json`，通行请求从原冻结清单原样复制，
+等待共同复验完成后对同一份产物运行隔离 UE 复验，预定输出 `D:\StoneWorker\ue-r6-modular-v1`。
+UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始，因此尚未提交该修改或宣称 UE gate 通过。
+
+16:21 CST 的独立 worker monitor 快照确认 controller ONLINE、queuedJobs=0、active=null，
+本地 IDLE/journal 空，部署仍为 `de4cf60`。证据 `worker-allocation-snapshot-1620.json`；
+这是当前状态核验，不能回填为 14:05 部署前的控制端核验。后续部署仍需重新检查当时状态。
+已验证后续修复已推送到远端 `fix/modeling-r6-audit`；冻结候选与对照源码未替换。

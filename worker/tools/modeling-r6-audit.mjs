@@ -19,15 +19,24 @@ async function filesBelow(root, predicate) {
 function tally(values) { const counts={};for(const value of values)counts[value]=(counts[value]||0)+1;return counts; }
 function toolFailure(item) {
   if(item?.type!=='mcp_tool_call')return null;
-  const texts=(item.result?.content||[]).filter(c=>c.type==='text').map(c=>c.text);
-  let result;
-  for(const text of texts)try { const parsed=JSON.parse(text);if(Object.hasOwn(parsed,'exitCode'))result=parsed; } catch { /* Non-JSON tool diagnostics. */ }
-  if(item.status!=='failed'&&!item.error&&!item.result?.isError&&!(result&&(result.exitCode!==0||result.error||result.timedOut||result.canceled)))return null;
+  const texts=[];let result,nestedError=false;
+  function inspect(value,depth=0) {
+    if(!value||typeof value!=='object'||depth>8)return;
+    nestedError ||= value.isError===true;
+    if(Object.hasOwn(value,'exitCode'))result=value;
+    for(const block of value.content||[])if(block.type==='text'&&typeof block.text==='string') {
+      texts.push(block.text);
+      try { inspect(JSON.parse(block.text),depth+1); } catch { /* Plain tool diagnostics. */ }
+    }
+  }
+  inspect(item.result);
+  if(item.status!=='failed'&&!item.error&&!nestedError&&!(result&&(result.exitCode!==0||result.error||result.timedOut||result.canceled)))return null;
   const message=[item.error?.message||item.error||'',result?.stderr||'',result?.error||'',...texts].join('\n');
   const kind=/enum.*not found|enum.*not.*(?:valid|found)|invalid.*enum/is.test(message)?'BLENDER_API_ENUM':
     /FileNotFoundError|No such file or directory/.test(message)?'FILESYSTEM_PATH':
     /TypeError:/.test(message)?'BLENDER_API_TYPE_ERROR':/KeyError:/.test(message)?'SCENE_LOOKUP':
-    /AttributeError:/.test(message)?'BLENDER_API_ATTRIBUTE_ERROR':'MCP_TOOL_ERROR';
+    /AttributeError:/.test(message)?'BLENDER_API_ATTRIBUTE_ERROR':
+    /Unknown (?:view|tool)|Invalid (?:view|manifest|modeling workspace path)/i.test(message)?'MCP_INPUT_VALIDATION':'MCP_TOOL_ERROR';
   return {tool:item.tool,kind,exitCode:result?.exitCode??null};
 }
 async function matchesFile(file,sha256) {
