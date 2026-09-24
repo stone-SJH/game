@@ -243,9 +243,16 @@ UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始�
 快照 `r6-baseline-audit-02.json`、`r6-single-stage-audit-02.json` 完整性通过。
 这些耗时受服务可用性和阶段差异共同影响，且存在前述目录长度偏差，不据此给出流程因果收益结论。
 
-18:28 CST，共同复验仍未启动，再次停止仅等待的进程后补正失败分类：完整留存 GLB 缺少合同要求的 FBX
+18:22 CST，共同复验仍未启动，再次停止仅等待的进程后补正失败分类：完整留存 GLB 缺少合同要求的 FBX
 时直接报告 ARTIFACT_GAP，不把必然的导入失败计为基础设施故障或重复调用 Blender；技术 GAP 明细补全
 参考图匹配及运行时贴图依赖。七项 Windows 针对性测试与语法检查通过，覆盖无调用、无补跑及不提升原失败。
 检查器重新冻结为 `common-recheck-registration-v3.json`，36 槽、27 份检查器、原 runtime/config 锁均保留；
 只有 `modeling-common-recheck.mjs` 哈希改变。v1/v2 登记保留，输出位置及后续 UE/复用队列不变。
 这次调整没有改变建模代码、质量阈值、作者预算或已登记样本。
+
+18:34 CST，worker monitor 再次确认本地 IDLE、journal 空，controller ONLINE、active=null、queuedJobs=0，
+无状态告警，部署保持 `de4cf60`；快照 `worker-allocation-snapshot-1834.json`。
+对照仍完成 8/24 槽，低模基线已进入第三次作者尝试。前两次 final 调用的尾部均为 CLI 503/turn.failed，
+尚无正式模型质量结论，不将其归为参考图匹配失败。
+最终只读审计已排队，预定输出 `r6-baseline-final-audit.json`、`r6-single-stage-final-audit.json` 和
+`r6-online-comparison-v1.json`；仅在 24 个对照槽全部终止且输入完整性通过后生成，尚未生成不代表通过。
