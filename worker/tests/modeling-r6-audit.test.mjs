@@ -81,3 +81,18 @@ test('legacy logs establish minimum invocations without inventing a durable zero
   assert.equal(row.calls.durableIndexAvailable,false);assert.equal(row.calls.total,null);
   assert.equal(row.observedLogCalls.minimum,2);assert.deepEqual(row.observedLogCalls.byStage,{AUTHOR:1,REVIEW:1});
 });
+
+test('stream disconnects and transport failures remain error events within one host call',async t=>{
+  const f=await fixture(t),task=f.manifest.tasks[1];await f.start(task);
+  const run=path.join(f.caseRoot(task),'run');await fs.mkdir(run);
+  const events=[{type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)'},
+    {type:'error',message:'unexpected status 503 Service Unavailable'},
+    {type:'error',message:'error sending request for url (redacted)'},
+    {type:'error',message:'request timed out'},
+    {type:'turn.failed',error:{message:'Unexpected response shape'}}];
+  await fs.writeFile(path.join(run,'modeling-author-fixture-1-final.stdout.log'),events.map(e=>JSON.stringify(e)).join('\n'));
+  const row=(await f.audit()).rows[1];assert.equal(row.observedLogCalls.minimum,1);assert.equal(row.calls.total,null);
+  assert.equal(row.serviceEvidence.errorEvents,5);assert.deepEqual(row.serviceEvidence.httpStatusCounts,{'503':1});
+  assert.deepEqual(row.serviceEvidence.kindCounts,{STREAM_DISCONNECTED:1,HTTP_503:1,TRANSPORT_CONNECTION_ERROR:1,TRANSPORT_TIMEOUT:1,OTHER_CLI_ERROR:1});
+  assert.equal(row.qualityGaps.length,0);assert.equal(row.status,'IN_PROGRESS');
+});

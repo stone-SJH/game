@@ -93,14 +93,18 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
         let event;try{event=JSON.parse(line);}catch{continue;}
         if(event.type==='error'||event.type==='turn.failed') {
           const message=event.message||event.error?.message||'';
-          rawErrors.push({file,type:event.type,httpStatus:message.match(/(?:status|HTTP)\s+(\d{3})/)?.[1]||null});
+          const httpStatus=message.match(/(?:status|HTTP)\s+(\d{3})/)?.[1]||null;
+          const kind=httpStatus?`HTTP_${httpStatus}`:/stream disconnected|stream closed before response\.completed/i.test(message)?'STREAM_DISCONNECTED':
+            /timed?\s*out|timeout|deadline exceeded/i.test(message)?'TRANSPORT_TIMEOUT':
+            /connection reset|connection refused|ECONNRESET|ECONNREFUSED|error sending request/i.test(message)?'TRANSPORT_CONNECTION_ERROR':'OTHER_CLI_ERROR';
+          rawErrors.push({file,type:event.type,httpStatus,kind});
         }
         if(event.type==='turn.completed'&&event.usage)usage.push({file,usage:event.usage});
         if(event.type==='item.completed') { const failure=toolFailure(event.item);if(failure)toolErrors.push({file,itemId:event.item.id,...failure}); }
       }
     }
     row.serviceEvidence={errorEvents:rawErrors.length,httpStatusCounts:tally(rawErrors.filter(e=>e.httpStatus).map(e=>e.httpStatus)),
-      files:[...new Set(rawErrors.map(e=>e.file))]};row.completedCallUsage=usage;
+      kindCounts:tally(rawErrors.map(e=>e.kind)),files:[...new Set(rawErrors.map(e=>e.file))]};row.completedCallUsage=usage;
     row.observedLogCalls={minimum:logCalls.length,byStage:tally(logCalls.map(c=>c.stage)),files:logCalls,
       note:'Distinct retained host log filenames establish a lower bound. Legacy retries may reuse filenames; missing durable state is not zero calls.'};
     row.toolEvidence={failureCounts:tally(toolErrors.map(e=>e.kind)),failures:toolErrors};

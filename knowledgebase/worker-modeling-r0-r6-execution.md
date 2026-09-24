@@ -279,3 +279,11 @@ UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始�
 第一次技术验收在源文件及实际 GLB 均发现 `texturedUV` GAP，作者定位 112 个底面三角形 UV 退化为点；
 修复后两端 UV gate 和全部三条视觉要求均 PASS。此为真实质量修复成功，保留首次有效 GAP，
 不与服务错误重试混计，也不将作者自检替代宿主验收。共同复验尚未开始。
+
+20:37 CST，基线有机第 2 槽 final 仍在原预算内。blockout 日志出现一次无 HTTP 状态码的
+`stream disconnected before completion` 后继续执行。只读审计新增流断开、传输超时、连接错误分类，
+CLI 重连事件仍不增加宿主调用数；五项 Windows 审计测试及真实日志快照 `r6-baseline-audit-04.json` 通过。
+共同检查器与冻结建模代码未改变。最终审计等待进程在尚未生成输出时重新加载，改为三组统一使用新版审计，
+输出 `r6-{candidate,baseline,single-stage}-final-audit-v2.json` 和 `r6-online-comparison-v2.json`；旧快照保留。
+20:30 worker/控制端快照仍为 IDLE、active=null、queuedJobs=0、journal 空，无告警，证据
+`worker-allocation-snapshot-2030.json`。P4 完整验收未通过，尚未部署后续修复。
