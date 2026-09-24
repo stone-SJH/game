@@ -153,3 +153,8 @@ Codex 首次启动任务目录时向全局配置追加项目 trust 表，使原�
 补充修正 runner 的 `--wait`：增量 report.json 出现不等于候选批次完成，必须等待 finishedAt，
 再确认固定槽数、每个宿主 FINISHED/stopConfirmed 以及嵌套调用都已结束；遇到围栏立即停止等待。
 Windows 六项 runner 测试通过。当前排队的比较已采用独立 finishedAt 等待条件；该修复统一了工具内置行为。
+
+共同复验批处理 `modeling-common-recheck-batch.mjs` 在建模比较全部结束且进程状态确认后启动，
+固定 36 槽并冻结检查器源码哈希，不调用建模作者。低模中断槽凭保留的 interruption 文件哈希记录，
+其余槽必须有唯一终态报告；任何未确认的复验错误停止后续检查，不自动重放。
+两项 Windows 批处理测试通过，覆盖固定分母、留存 PASS 不提升原失败、等待与停止围栏。
