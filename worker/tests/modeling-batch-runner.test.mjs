@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { runRegisteredBatch, verifyBatch } from '../tools/modeling-batch-runner.mjs';
+import { runRegisteredBatch, verifyBatch, verifyPrerequisite } from '../tools/modeling-batch-runner.mjs';
 import { atomicJson, hashFile, hashValue, readJson } from '../agent/modeling-io.mjs';
 const execute=promisify(execFile);
 
@@ -72,4 +72,14 @@ test('host exit does not clear an unfinished nested author',async t=>{
   }}),/FENCED/);assert.equal(launches,1);
   const report=await readJson(path.join(f.logDirectory,'report.json'));
   assert.equal(report.tasks[0].unfinishedCalls[0].callId,'author-1');assert.equal(report.finished,0);
+});
+
+test('comparison waits for every candidate result and rejects nested work left running',async t=>{
+  const f=await fixture(t),completionReport=path.join(f.root,'candidate-complete.json'),out=path.join(f.root,'candidate/fixture-1');
+  const prerequisite={completionReport,candidateRegistered:1,candidateOutput:path.join(f.root,'candidate')};
+  await assert.rejects(verifyPrerequisite(prerequisite),/not complete/);
+  await atomicJson(completionReport,{tasks:[{out}]});await assert.rejects(verifyPrerequisite(prerequisite),/no terminal/);
+  await atomicJson(path.join(out,'benchmark-report.json'),{results:[{passed:false}]});await verifyPrerequisite(prerequisite);
+  await atomicJson(path.join(out,'fixture-1/modeling-state/key/execution.json'),{groups:{review:{calls:[{status:'STARTED',callId:'review-1'}]}}});
+  await assert.rejects(verifyPrerequisite(prerequisite),/unconfirmed nested/);
 });

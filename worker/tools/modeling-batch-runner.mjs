@@ -72,6 +72,7 @@ async function unfinishedCalls(root) {
 
 export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCommand,verify=verifyFrozenInputs}) {
   await verifyBatch(plan);
+  if(plan.execution.prerequisite)await verifyPrerequisite(plan.execution.prerequisite);
   await fs.mkdir(logDirectory); // Logs live outside task outputs; the probe creates its own --out directory.
   const reportFile=path.join(logDirectory,'report.json');
   const report={protocol:1,planHash:hashValue(plan),startedAt:new Date().toISOString(),mode:plan.execution.mode,
@@ -107,13 +108,32 @@ export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCom
   report.finishedAt=new Date().toISOString();await atomicJson(reportFile,report);return report;
 }
 
+export async function verifyPrerequisite(prerequisite) {
+  const report=await readJson(prerequisite.completionReport);
+  if(report?.tasks?.length!==prerequisite.candidateRegistered)throw new Error('Candidate batch is not complete');
+  for(const row of report.tasks) {
+    const relative=path.relative(prerequisite.candidateOutput,row.out);
+    if(!relative||relative.startsWith('..')||path.isAbsolute(relative))throw new Error('Candidate output is outside its registered root');
+    const result=await readJson(path.join(row.out,'benchmark-report.json'));
+    if(result?.results?.length!==1)throw new Error('Candidate task has no terminal model result');
+    if((await unfinishedCalls(row.out)).length||result.results[0].kind==='STOP_UNCONFIRMED')throw new Error('Candidate contains an unconfirmed nested process');
+  }
+}
+
 if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href) {
   const [file,logDirectory,mode]=process.argv.slice(2);
-  if(!file||!logDirectory||mode&&!['--check'].includes(mode))throw new Error('Usage: <execution-plan.json> <new-log-directory> [--check]');
+  if(!file||!logDirectory||mode&&!['--check','--wait'].includes(mode))throw new Error('Usage: <execution-plan.json> <new-log-directory> [--check|--wait]');
   const plan=await readJson(file);await verifyBatch(plan);
   if(mode==='--check')console.log(JSON.stringify({valid:true,tasks:plan.tasks.length,mode:plan.execution.mode}));
   else {
     const abort=new AbortController();process.on('SIGINT',()=>abort.abort(new Error('Batch canceled')));
+    if(mode==='--wait') {
+      if(!plan.execution.prerequisite)throw new Error('Waiting requires an explicit candidate prerequisite');
+      console.log(JSON.stringify({state:'WAITING_FOR_CANDIDATE',file:plan.execution.prerequisite.completionReport}));
+      while(!await readJson(plan.execution.prerequisite.completionReport)) {
+        abort.signal.throwIfAborted();await new Promise(resolve=>setTimeout(resolve,30000));
+      }
+    }
     await runRegisteredBatch({plan,logDirectory,signal:abort.signal});
   }
 }
