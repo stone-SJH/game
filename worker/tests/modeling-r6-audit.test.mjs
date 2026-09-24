@@ -71,3 +71,13 @@ test('empty accepted summary cannot satisfy reuse and duplicate registrations ar
   const report=await f.audit();assert.equal(report.integrityPassed,false);assert.equal(report.categories.reuse.reusedAndPassed,0);
   f.manifest.tasks.push(task);await assert.rejects(f.audit(),/Duplicate registered task/);
 });
+
+test('legacy logs establish minimum invocations without inventing a durable zero-call count',async t=>{
+  const f=await fixture(t),task=f.manifest.tasks[1];await f.start(task);
+  const run=path.join(f.caseRoot(task),'run');await fs.mkdir(run);
+  await fs.writeFile(path.join(run,'modeling-author-fixture-1-blockout.stdout.log'),'');
+  await fs.writeFile(path.join(run,'modeling-evaluation-1.stdout.log'),JSON.stringify({type:'error',message:'unexpected status 503'}));
+  const row=(await f.audit()).rows[1];
+  assert.equal(row.calls.durableIndexAvailable,false);assert.equal(row.calls.total,null);
+  assert.equal(row.observedLogCalls.minimum,2);assert.deepEqual(row.observedLogCalls.byStage,{AUTHOR:1,REVIEW:1});
+});

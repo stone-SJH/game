@@ -71,17 +71,24 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
     row.qualityGaps=states.flatMap(s=>s.failures||[]).filter(f=>['TECHNICAL_GAP','VISUAL_GAP'].includes(f.kind))
       .map(f=>({kind:f.kind,phase:f.phase,attemptId:f.attemptId,message:f.message}));
     row.recordedFailures=states.flatMap(s=>(s.failures||[]).map(f=>({kind:f.kind||f.reason||'UNKNOWN',phase:f.phase,attemptId:f.attemptId})));
-    const calls=[];
+    const calls=[];let executionIndexCount=0;
     for(const file of await filesBelow(path.join(root,caseId,'modeling-state'),f=>path.basename(f)==='execution.json')) {
+      executionIndexCount++;
       const state=await readJson(file,null,64*1024*1024);
       for(const group of Object.values(state.groups||{})) for(const call of group.calls||[])calls.push({stage:group.stage,callId:call.callId,
         status:call.status,kind:call.error?.kind||null,stopConfirmed:call.error?.stopConfirmed??call.stopConfirmed??null});
     }
-    row.calls={total:calls.length,byStage:tally(calls.map(c=>c.stage)),failures:tally(calls.filter(c=>c.kind).map(c=>c.kind)),
+    row.calls={durableIndexAvailable:executionIndexCount>0,total:executionIndexCount?calls.length:null,
+      byStage:executionIndexCount?tally(calls.map(c=>c.stage)):null,failures:tally(calls.filter(c=>c.kind).map(c=>c.kind)),
       inProgress:calls.filter(c=>c.status==='STARTED'),unconfirmedStops:calls.filter(c=>c.stopConfirmed===false)};
     if(row.terminalFailure?.kind==='UNCLASSIFIED'&&row.calls.unconfirmedStops.length)row.terminalFailure.kind='STOP_UNCONFIRMED';
-    const rawErrors=[];const usage=[];const toolErrors=[];
+    const rawErrors=[];const usage=[];const toolErrors=[];const logCalls=[];
     for(const file of await filesBelow(run,f=>f.endsWith('.stdout.log'))) {
+      const name=path.basename(file);
+      const stage=/^(?:modeling-author-|single-stage-)/.test(name)?'AUTHOR':
+        /^modeling-(?:evaluation|visual-review|plan)-/.test(name)?'REVIEW':
+        /^modeling-source-preview-/.test(name)?'SOURCE_PREVIEW':/^modeling-geometry-/.test(name)?'TECHNICAL':null;
+      if(stage)logCalls.push({stage,file});
       for(const line of (await fs.readFile(file,'utf8')).split(/\r?\n/)) {
         let event;try{event=JSON.parse(line);}catch{continue;}
         if(event.type==='error'||event.type==='turn.failed') {
@@ -94,6 +101,8 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
     }
     row.serviceEvidence={errorEvents:rawErrors.length,httpStatusCounts:tally(rawErrors.filter(e=>e.httpStatus).map(e=>e.httpStatus)),
       files:[...new Set(rawErrors.map(e=>e.file))]};row.completedCallUsage=usage;
+    row.observedLogCalls={minimum:logCalls.length,byStage:tally(logCalls.map(c=>c.stage)),files:logCalls,
+      note:'Distinct retained host log filenames establish a lower bound. Legacy retries may reuse filenames; missing durable state is not zero calls.'};
     row.toolEvidence={failureCounts:tally(toolErrors.map(e=>e.kind)),failures:toolErrors};
     row.assets=[];
     for(const asset of result?.summary?.assets||[]) {
