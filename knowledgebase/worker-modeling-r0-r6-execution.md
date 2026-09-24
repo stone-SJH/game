@@ -287,3 +287,9 @@ CLI 重连事件仍不增加宿主调用数；五项 Windows 审计测试及真�
 输出 `r6-{candidate,baseline,single-stage}-final-audit-v2.json` 和 `r6-online-comparison-v2.json`；旧快照保留。
 20:30 worker/控制端快照仍为 IDLE、active=null、queuedJobs=0、journal 空，无告警，证据
 `worker-allocation-snapshot-2030.json`。P4 完整验收未通过，尚未部署后续修复。
+
+20:48 CST，对照完成 15/24 槽，在线 12 PASS / 3 FAIL；单阶段有机第 2 槽进行中。
+基线有机第 2 槽首次作者尝试通过，耗时 1,559,231 ms。final 内一次顶部修改脚本触发顶点索引越界，
+作者在同一调用内恢复，最终技术与视觉通过；这是工具错误恢复，不是宿主 quality GAP 后重建。
+审计快照 `r6-baseline-audit-05.json`、`r6-single-stage-audit-05.json` 输入/规格/已接受文件完整性通过；
+分别已有 8 / 7 个终态槽，绑定对照尚未开始，36 槽共同复验与 UE/复用补充检查仍等待前置队列。
