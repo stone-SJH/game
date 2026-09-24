@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runCommand } from '../agent/process-runner.mjs';
 import { atomicJson, hashFile, hashValue, readJson } from '../agent/modeling-io.mjs';
+import { verifyConfigWithTaskTrust } from './modeling-config-audit.mjs';
 const execute=promisify(execFile);
 
 async function absent(file) {
@@ -34,7 +35,12 @@ export async function verifyBatch(plan) {
 }
 
 async function verifyFrozenInputs(plan) {
-  for(const file of [...plan.inputs,...plan.settings.runtime.files])if(await hashFile(file.file)!==file.sha256)throw new Error(`Frozen input changed: ${file.file}`);
+  const configChecks=[];
+  for(const file of [...plan.inputs,...plan.settings.runtime.files]) {
+    if(plan.execution.taskTrustAdditions&&path.resolve(file.file)===path.resolve(plan.execution.taskTrustAdditions.file))
+      configChecks.push(await verifyConfigWithTaskTrust(file,plan.execution.taskTrustAdditions.projects));
+    else if(await hashFile(file.file)!==file.sha256)throw new Error(`Frozen input changed: ${file.file}`);
+  }
   for(const repository of plan.execution.repositories) {
     const options={cwd:repository.path,windowsHide:true};
     const {stdout:head}=await execute('git',['rev-parse','HEAD'],options);
@@ -42,6 +48,7 @@ async function verifyFrozenInputs(plan) {
     const {stdout:changes}=await execute('git',['status','--porcelain','--untracked-files=all','--','worker','skills'],options);
     if(changes.trim())throw new Error('Benchmark code has uncommitted changes');
   }
+  return configChecks;
 }
 
 async function unfinishedCalls(root) {
@@ -74,11 +81,11 @@ export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCom
   const env={...process.env,MODELING_HARNESS_V2_ENABLED:'1',MODELING_BUILD_TIMEOUT_MS:String(policy.buildMs),
     MODELING_CLEANUP_TIMEOUT_MS:String(policy.cleanupMs),MODELING_EVALUATION_TIMEOUT_MS:String(policy.reviewMs)};
   for(const task of plan.tasks) {
-    signal?.throwIfAborted();await verify(plan);
+    signal?.throwIfAborted();const configurationBefore=await verify(plan);
     const out=task.args[task.args.indexOf('--out')+1];await absent(out);
     await fs.mkdir(path.dirname(out),{recursive:true});
     const label=task.id.replaceAll('/','--');
-    const row={id:task.id,state:'STARTED',startedAt:new Date().toISOString(),output:out,
+    const row={id:task.id,state:'STARTED',startedAt:new Date().toISOString(),output:out,configurationBefore,
       stdout:path.join(logDirectory,label+'.stdout.log'),stderr:path.join(logDirectory,label+'.stderr.log')};
     report.tasks.push(row);await atomicJson(reportFile,report);
     console.log(JSON.stringify({id:task.id,state:row.state}));
@@ -95,7 +102,7 @@ export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCom
     if(row.state==='FINISHED')report.finished++;
     await atomicJson(reportFile,report);console.log(JSON.stringify(row));
     if(row.state!=='FINISHED')throw new Error(`Batch stopped without replay: ${row.state}`);
-    await verify(plan);
+    row.configurationAfter=await verify(plan);await atomicJson(reportFile,report);
   }
   report.finishedAt=new Date().toISOString();await atomicJson(reportFile,report);return report;
 }
