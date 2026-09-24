@@ -4,6 +4,9 @@ import { atomicJson, readJson, localPath, hashFile, hashValue, repositoryRoot, a
 import { visualSchemaFor, reviewPasses } from './modeling-evaluation.mjs';
 import { createExecutionStore, executionPolicy, fileEvidence, verifyEvidence, modelingFailure } from './modeling-execution.mjs';
 import { createModelingReviewer } from './modeling-review.mjs';
+import { visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
+import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
+import { pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
 
 export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, job = {}, evaluate }) {
   const assets = summary?.assets?.filter(a => a.contract?.runtime.engine === 'unreal') || [];
@@ -27,6 +30,9 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
     { signal, deadlineAt: job.deadlineAt });
   await execution.assertSettled();
   const policy = executionPolicy(invocation);
+  await pinToolchain(path.join(path.dirname(project), 'modeling-state', 'engine-policy'), hashValue({ taskId: job.taskId || null, project }), {
+    policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(), unrealHash: await hashFile(unreal),
+  });
   // All project content dependencies are immutable during host inspection. This includes materials
   // and textures referenced by the imported mesh, not merely the top-level uasset and umap.
   const engineFiles = [projectFile];
@@ -71,11 +77,12 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
       if (await hashFile(file)!==view.sha256 || (await fs.stat(file)).size>10*1024*1024) throw new Error('Invalid UE screenshot evidence.');
       images.push(file);
     }
-    const prompt=`Independently inspect actual Unreal map captures. Return exactly one criterion per original requirement. Assess silhouette, orientation, material fidelity, scale readability and missing parts. A black/empty capture is GAP. Geometry alone is not visual PASS. Specification: ${JSON.stringify(asset.spec)}\nEngine metrics: ${JSON.stringify(row)}\nCompare original requirements verbatim. smallEditsOnly means local repair is sufficient.`;
-    const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec), prompt, images,
-      key: `engine-visual:${evidenceKey}:${asset.assetId}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec) });
+    const visual = visualEvidence(images);
+    const prompt = visualReviewPrompt({ spec: asset.spec, evidence: visual, metrics: row, phase: 'unreal-capture' });
+    const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
+      key: `engine-visual:${evidenceKey}:${asset.assetId}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) });
     await atomicJson(path.join(directory,`${asset.assetId}-visual.json`), result);
-    if (!reviewPasses(result,asset.spec)) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
+    if (!reviewPasses(result,asset.spec,visual)) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
   }
   const result={protocol:2,status:'ENGINE_READY',reportFile,assets:assets.map(a=>({assetId:a.assetId,requirementsHash:a.requirementsHash,status:'ENGINE_READY'}))};
   await verifyEvidence(evidence);

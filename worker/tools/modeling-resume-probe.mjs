@@ -29,7 +29,7 @@ function options() {
     evaluate: async ({ name }) => {
       if (name === 'modeling-evaluation') throw new Error('Probe exercises conservative route');
       if (++reviews < 3) return { verdict: 'PASS' };
-      return { criteria: [{ criterion: 'One red cube', status: 'PASS', evidence: 'Deterministic fixture only, not live visual review' }], smallEditsOnly: true, repairInstructions: '' };
+      return { criteria: [{ criterion: 'One red cube', status: 'PASS', views: ['image-1'], evidence: 'Deterministic fixture only, not live visual review' }], smallEditsOnly: true, repairInstructions: '' };
     },
     step: async (name, command, commandArgs, timeoutMs, cwd, accepts, options = {}) => {
       if (name.startsWith('modeling-author-')) {

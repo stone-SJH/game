@@ -133,7 +133,7 @@ def main():
         source = check_scene(spec, manifest)
         load_scene(directory / 'model.glb')
         exported = check_scene(spec, manifest, exported=True)
-        view_names = ['front','side','back','top','perspective'] + (['other-side','bottom'] if spec['contract']['asymmetric'] else [])
+        view_names = ['front','side','back','top','perspective'] + (['lower-oblique'] if spec['contract']['assetClass'] == 'organic-static' else []) + (['other-side','bottom'] if spec['contract']['asymmetric'] else [])
         views = fixed_views(Path(options.report).parent, view_names)
         motion_views = []
         if spec['contract']['runtime']['animations'] and exported['passed']:

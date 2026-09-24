@@ -8,7 +8,7 @@ import bmesh
 from mathutils import Vector
 
 VIEWS = {'front': (0, -1, 0), 'side': (1, 0, 0), 'back': (0, 1, 0),
-         'top': (0, 0, 1), 'perspective': (1, -1, .65), 'other-side': (-1, 0, 0), 'bottom': (0, 0, -1)}
+         'top': (0, 0, 1), 'perspective': (1, -1, .65), 'lower-oblique': (-1, -1, .18), 'other-side': (-1, 0, 0), 'bottom': (0, 0, -1)}
 
 
 def sha256(file):
@@ -127,6 +127,7 @@ def render_views(directory, names, manifest=None, silhouette=False, size=512):
     scene.render.image_settings.file_format = 'PNG'
     scene.render.film_transparent = silhouette
     scene.view_settings.view_transform = 'Standard' if silhouette else 'AgX'
+    scene.view_settings.look = 'None' if silhouette else 'AgX - Medium High Contrast'
     scene.view_settings.exposure = 0
     scene.view_settings.gamma = 1
     scene.world = bpy.data.worlds.new('QA-world')

@@ -119,8 +119,8 @@ test('Unreal visual retries and resumed acceptance reuse the original capture an
   const asset = { assetId: 'fixture', requirementsHash: 'requirements', spec: assetSpec, contract: assetSpec.contract,
     files: [{ path: 'model/model.glb', sha256: await hashFile(path.join(project, 'model/model.glb')) }, { path: 'model/geometry-report.json' }] };
   let technical = 0, reviews = 0;
-  const options = { project, output, signal, invocation, projectFile, unreal: 'fixture', attempt: 1, summary: { assets: [asset] },
-    evaluate: async () => ++reviews < 3 ? { wrong: 'PASS' } : validReview('PASS'),
+  const options = { project, output, signal, invocation, projectFile, unreal: process.execPath, attempt: 1, summary: { assets: [asset] },
+    evaluate: async () => ++reviews < 3 ? { wrong: 'PASS' } : { ...validReview('PASS'), criteria: validReview('PASS').criteria.map(c => ({ ...c, views: ['image-1'] })) },
     step: async (name, command, args) => {
       technical++;
       const wrapper = args.find(a => a.startsWith('-script=')).slice(8), directory = path.dirname(wrapper);

@@ -38,12 +38,13 @@ export const visualReviewSchema = object({
   smallEditsOnly: { type: 'boolean' }, repairInstructions: { type: 'string', maxLength: 4000 },
 });
 
-export function visualSchemaFor(spec) {
+export function visualSchemaFor(spec, evidence) {
+  const views = evidence ? { views: { type: 'array', maxItems: evidence.length, items: { type: 'string', enum: evidence.map(row => row.id) } } } : {};
   return { ...visualReviewSchema, properties: { ...visualReviewSchema.properties,
     criteria: { ...visualReviewSchema.properties.criteria, minItems: spec.requirements.length, maxItems: spec.requirements.length,
       items: { ...visualReviewSchema.properties.criteria.items, properties: {
-        ...visualReviewSchema.properties.criteria.items.properties, criterion: { type: 'string', enum: spec.requirements },
-      } } },
+        ...visualReviewSchema.properties.criteria.items.properties, ...views, criterion: { type: 'string', enum: spec.requirements },
+      }, required: [...visualReviewSchema.properties.criteria.items.required, ...Object.keys(views)] } },
   } };
 }
 
@@ -120,9 +121,11 @@ export function selectModelingRoute(advice, { spec, candidates, providerEnabled,
   return { route: 'blender_direct', editPlan: advice.direct.plan, reason: advice.rationale };
 }
 
-export function reviewPasses(review, spec) {
-  validateSchema(review, visualReviewSchema);
+export function reviewPasses(review, spec, evidence) {
+  validateSchema(review, evidence ? visualSchemaFor(spec, evidence) : visualReviewSchema);
   if (review.criteria.length !== spec.requirements.length || new Set(review.criteria.map(item => item.criterion)).size !== spec.requirements.length || review.criteria.some(item => !spec.requirements.includes(item.criterion))) throw new Error('Visual review must cover every original requirement.');
+  if (evidence && review.criteria.some(item => new Set(item.views).size !== item.views.length ||
+      (item.status === 'PASS' && !item.views.some(id => evidence.some(row => row.id === id && row.role === 'target'))))) throw new Error('Each PASS must cite visible target evidence; duplicate or unknown image IDs are invalid.');
   return review.criteria.every(item => item.status === 'PASS');
 }
 

@@ -79,7 +79,7 @@ export function preservesContract(original, revised) {
 }
 
 export function modelViews(spec) {
-  return spec.contract ? ['front', 'side', 'back', 'top', 'perspective', ...(spec.contract.asymmetric ? ['other-side', 'bottom'] : [])] : ['front', 'side', 'back', 'perspective'];
+  return spec.contract ? ['front', 'side', 'back', 'top', 'perspective', ...(spec.contract.assetClass === 'organic-static' ? ['lower-oblique'] : []), ...(spec.contract.asymmetric ? ['other-side', 'bottom'] : [])] : ['front', 'side', 'back', 'perspective'];
 }
 
 export function referenceFiles(spec) {
