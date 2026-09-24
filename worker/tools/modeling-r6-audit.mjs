@@ -17,6 +17,19 @@ async function filesBelow(root, predicate) {
 }
 
 function tally(values) { const counts={};for(const value of values)counts[value]=(counts[value]||0)+1;return counts; }
+function toolFailure(item) {
+  if(item?.type!=='mcp_tool_call')return null;
+  const texts=(item.result?.content||[]).filter(c=>c.type==='text').map(c=>c.text);
+  let result;
+  for(const text of texts)try { const parsed=JSON.parse(text);if(Object.hasOwn(parsed,'exitCode'))result=parsed; } catch { /* Non-JSON tool diagnostics. */ }
+  if(item.status!=='failed'&&!item.error&&!item.result?.isError&&!(result&&(result.exitCode!==0||result.error||result.timedOut||result.canceled)))return null;
+  const message=[item.error?.message||item.error||'',result?.stderr||'',result?.error||'',...texts].join('\n');
+  const kind=/enum.*not found|enum.*not.*(?:valid|found)|invalid.*enum/is.test(message)?'BLENDER_API_ENUM':
+    /FileNotFoundError|No such file or directory/.test(message)?'FILESYSTEM_PATH':
+    /TypeError:/.test(message)?'BLENDER_API_TYPE_ERROR':/KeyError:/.test(message)?'SCENE_LOOKUP':
+    /AttributeError:/.test(message)?'BLENDER_API_ATTRIBUTE_ERROR':'MCP_TOOL_ERROR';
+  return {tool:item.tool,kind,exitCode:result?.exitCode??null};
+}
 async function matchesFile(file,sha256) {
   try { return await hashFile(file)===sha256; }
   catch(error) { if(error.code==='ENOENT')return false;throw error; }
@@ -58,7 +71,7 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
     row.calls={total:calls.length,byStage:tally(calls.map(c=>c.stage)),failures:tally(calls.filter(c=>c.kind).map(c=>c.kind)),
       inProgress:calls.filter(c=>c.status==='STARTED'),unconfirmedStops:calls.filter(c=>c.stopConfirmed===false)};
     if(row.terminalFailure?.kind==='UNCLASSIFIED'&&row.calls.unconfirmedStops.length)row.terminalFailure.kind='STOP_UNCONFIRMED';
-    const rawErrors=[];const usage=[];
+    const rawErrors=[];const usage=[];const toolErrors=[];
     for(const file of await filesBelow(run,f=>f.endsWith('.stdout.log'))) {
       for(const line of (await fs.readFile(file,'utf8')).split(/\r?\n/)) {
         let event;try{event=JSON.parse(line);}catch{continue;}
@@ -67,10 +80,12 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
           rawErrors.push({file,type:event.type,httpStatus:message.match(/(?:status|HTTP)\s+(\d{3})/)?.[1]||null});
         }
         if(event.type==='turn.completed'&&event.usage)usage.push({file,usage:event.usage});
+        if(event.type==='item.completed') { const failure=toolFailure(event.item);if(failure)toolErrors.push({file,itemId:event.item.id,...failure}); }
       }
     }
     row.serviceEvidence={errorEvents:rawErrors.length,httpStatusCounts:tally(rawErrors.filter(e=>e.httpStatus).map(e=>e.httpStatus)),
       files:[...new Set(rawErrors.map(e=>e.file))]};row.completedCallUsage=usage;
+    row.toolEvidence={failureCounts:tally(toolErrors.map(e=>e.kind)),failures:toolErrors};
     row.assets=[];
     for(const asset of result?.summary?.assets||[]) {
       const fileChecks=[];
