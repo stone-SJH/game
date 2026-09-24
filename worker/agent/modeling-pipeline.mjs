@@ -6,7 +6,8 @@ import { blenderExecutable, blenderMcpArgs, discoverModelingCapabilities, callBl
 import { modelingPlanSchema, modelingPlanV2Schema, decisionSchemaFor, visualSchemaFor, validateSpecs, modelingInvocationArgs, modelingPrompt, selectModelingRoute, reviewPasses } from './modeling-evaluation.mjs';
 import { createTripoProvider } from './providers/tripo.mjs';
 import { preservesContract, modelViews, referenceFiles } from './modeling-contract.mjs';
-import { createSkillPlan, validateSkillPlan, pinToolchain } from './modeling-skill-routing.mjs';
+import { createSkillPlan, validateSkillPlan, pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
+import { createExecutionStore, executionPolicy, failureRecord, modelingFailure } from './modeling-execution.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
   provider = createTripoProvider(), probe = discoverModelingCapabilities, build, check, checkBase, evaluate,
@@ -15,6 +16,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   const planFile = path.join(output, 'modeling-plan.json');
   const taskState = path.join(stateRoot, 'tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }));
   const taskPlanFile = path.join(taskState, 'plan.json');
+  const execution = createExecutionStore(taskState, { signal, deadlineAt: job.deadlineAt });
+  const policy = executionPolicy(invocation);
   let capabilities, sequence = 0, expectedPlanHash, accepted = [], providerDisabledReason = null;
   const v2Enabled = process.env.MODELING_HARNESS_V2_ENABLED === '1';
   const skillPlans = new Map();
@@ -129,7 +132,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (build) return build(context);
     if (context.spec.contract && !context.phase) {
       const budget = context.cleanup ? setting('MODELING_CLEANUP_TIMEOUT_MS', 300000) : setting('MODELING_BUILD_TIMEOUT_MS', 1800000);
-      const until = Math.min(Date.now() + budget, job.deadlineAt ? Date.parse(job.deadlineAt) : Infinity);
+      const until = context.deadlineAt || Math.min(Date.now() + budget, job.deadlineAt ? Date.parse(job.deadlineAt) : Infinity);
       const remaining = () => { const ms = until - Date.now(); if (ms <= 0) throw new Error('Shared modeling attempt deadline exhausted.'); return ms; };
       const blockoutDirectory = `${context.directory}/blockout`;
       await fs.mkdir(await localPath(project, blockoutDirectory), { recursive: true });
@@ -190,8 +193,14 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       ...(context.phase === 'blockout' ? [] : ['Write build-report.json as {"smallEditsOnly":true,"editsApplied":["specific changes"],"limitations":[]}. Report actual work; this report does not authorize acceptance.']),
       'The host handles provider credentials and generation. Do not call third-party generation APIs, start child agents, change decisions, edit existing source resources, integrate into UE, or package a game in this attempt.',
     ].join('\n');
-    await step(`modeling-author-${tag}`, invocation.command, args,
-      context.timeoutMs || (cleanup ? setting('MODELING_CLEANUP_TIMEOUT_MS', 300000) : setting('MODELING_BUILD_TIMEOUT_MS', 1800000)), project, undefined, { input: prompt, env: agentEnvironment() });
+    const timeoutMs = Math.max(1, Math.min(context.timeoutMs || (cleanup ? policy.cleanupMs : policy.buildMs),
+      context.deadlineAt ? context.deadlineAt - Date.now() : Infinity));
+    await execution.run({ key: `author:${tag}`, stage: 'AUTHOR', identity: { assetId: spec.assetId, attemptId, phase: context.phase || 'author', route: decision.route },
+      input: { prompt, policy }, timeoutMs, totalMs: timeoutMs }, async ({ callId, timeoutMs: boundedMs }) => {
+      const result = await step(`modeling-author-${tag}-${callId}`, invocation.command, args,
+        boundedMs, project, undefined, { input: prompt, env: agentEnvironment() });
+      return { exitCode: result?.exitCode ?? 0, stopConfirmed: result?.stopConfirmed ?? true, response, receiptFile };
+    });
     const receipt = await readJson(receiptFile);
     if (receipt?.calls?.some(call => call.stopConfirmed === false)) throw Object.assign(new Error('Blender process stop unconfirmed.'), { stopConfirmed: false });
     if (!receipt?.calls?.some(call => call.tool === 'blender_run_python' && call.exitCode === 0 && !call.canceled && !call.timedOut && call.stopConfirmed)) throw new Error('No successful Blender MCP authoring evidence.');
@@ -287,15 +296,15 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (skillPlan) skillPlans.set(spec.assetId, skillPlan);
     const validatorHashes = spec.contract ? await Promise.all(['modeling-asset-check.py','modeling_scene.py','modeling_quality.py','modeling_reference.py','modeling-unreal-check.py'].map(f => hashFile(path.join(repositoryRoot,'worker/tools',f)))) : [];
     if (spec.contract) await pinToolchain(taskState, spec.assetId, {
-      version: 2, skillLockHash: skillPlan.lockHash, validatorHashes, blenderVersion: capabilities.blenderVersion,
-      harnessHashes: await Promise.all(['agent/modeling-pipeline.mjs','agent/modeling-contract.mjs','agent/modeling-evaluation.mjs',
-        'agent/modeling-skill-routing.mjs','tools/blender-mcp-server.mjs'].map(f => hashFile(path.join(repositoryRoot,'worker',f)))),
+      version: 3, skillLockHash: skillPlan.lockHash, validatorHashes, blenderVersion: capabilities.blenderVersion,
+      policy, harnessHashes: await modelingToolHashes(),
     });
     const requirementsHash = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, spec, referenceHashes,
       ...(spec.contract ? { skillLockHash: skillPlan.lockHash, validatorHashes, blenderVersion: capabilities.blenderVersion } : {}) });
     const short = requirementsHash.slice(0, 20);
     const stateFile = path.join(stateRoot, short, 'state.json');
     let state = await readJson(stateFile);
+    if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
     if (state?.accepted && state.requirementsHash === requirementsHash) {
       try {
         let valid = true;
@@ -308,7 +317,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     const candidates = await candidatesFor(spec);
     if (!state) {
       const decision = await assess(spec, candidates, { ...availability, enabled: availability.enabled && !providerDisabledReason });
-      state = { protocol: 1, requirementsHash, spec, decision, originalRoute: decision.route, route: decision.route, attempts: {}, failures: [], providerAttempted: false,
+      state = { protocol: 2, requirementsHash, spec, decision, originalRoute: decision.route, route: decision.route, attempts: {}, failures: [], providerAttempted: false,
         capabilityHash: hashValue(capabilities), candidateHashes: candidates.map(source => source.sha256), rejectedSources: [] };
       await atomicJson(stateFile, state);
     }
@@ -381,6 +390,11 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         skillPlan,
         sourcePreviews: route === 'tripo_then_blender' ? state.sourcePreviews : [], feedback: state.feedback,
         previousAttemptDirectory: state.previousAttemptDirectory, cleanup: route === 'tripo_then_blender', attemptId };
+      state.attemptBudgets ||= {};
+      state.attemptBudgets[attemptId] ||= { startedAt: Date.now(), deadlineAt: Math.min(Date.now() + (context.cleanup ? policy.cleanupMs : policy.buildMs),
+        job.deadlineAt ? Date.parse(job.deadlineAt) : Infinity) };
+      context.deadlineAt = state.attemptBudgets[attemptId].deadlineAt;
+      await atomicJson(stateFile, state);
       await reportProgress({ phase: 'crafting', tool: 'Blender MCP', step: `${spec.assetId}: ${route} (${attempt}/${limit})` });
       try {
         await author(context);
@@ -418,7 +432,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         return state.accepted;
       } catch (error) {
         throwIfStopped(error, signal);
+        if (error.hardFailure) throw error;
         if (['ENOSPC', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+        state.failures.push({ attemptId, route, at: new Date().toISOString(), ...failureRecord(error, 'AUTHOR', signal) });
         state.feedback = String(error.message).slice(0, 2000);
         state.previousAttemptDirectory = directory;
         await atomicJson(stateFile, state);

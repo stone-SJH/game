@@ -66,3 +66,14 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
     throw Object.assign(new Error('Active modeling task toolchain changed. Restore its pinned release or stop with evidence; budgets cannot restart under another toolchain.'), { hardFailure: true });
   }
 }
+
+export async function modelingToolHashes() {
+  const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
+    'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs'];
+  for (const directory of ['agent', 'tools']) {
+    for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {
+      if (/^modeling[-_].*\.(mjs|py)$/.test(entry)) files.push(`${directory}/${entry}`);
+    }
+  }
+  return Promise.all(files.sort().map(async file => ({ file, sha256: await hashFile(path.join(repositoryRoot, 'worker', file)) })));
+}
