@@ -3,7 +3,7 @@ import math
 import bpy
 from modeling_scene import bounds_of, dimensions, mesh_metrics, mesh_objects
 
-VERSION = '2.0.1'
+VERSION = '2.0.2'
 
 
 def animation_samples(names, objects, render=None):

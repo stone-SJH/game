@@ -30,7 +30,8 @@ def load_scene(file):
     if file.suffix.lower() == '.blend':
         bpy.ops.wm.open_mainfile(filepath=str(file), load_ui=False, use_scripts=False)
     elif file.suffix.lower() == '.glb':
-        bpy.ops.import_scene.gltf(filepath=str(file))
+        # Bone custom-shape meshes are editor UI, not geometry in the interchange file.
+        bpy.ops.import_scene.gltf(filepath=str(file), disable_bone_shape=True)
     elif file.suffix.lower() == '.fbx':
         bpy.ops.import_scene.fbx(filepath=str(file))
     else:
