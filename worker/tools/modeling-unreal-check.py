@@ -3,7 +3,11 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 import unreal as u
+from modeling_unreal_traversal import check_traversal
 
 
 def file_hash(file):
@@ -144,6 +148,9 @@ def validate(request_file, report_file):
                     directory=Path(report_file).parent/spec['assetId']
                     directory.mkdir(parents=True,exist_ok=True)
                     world=u.get_editor_subsystem(u.UnrealEditorSubsystem).get_editor_world()
+                    traversal=check_traversal(world,mesh,components,c.get('traversal'),item.get('dccTraversal'))
+                    if c.get('traversal'):
+                        gate('traversal',traversal['status']=='PASS',c['traversal'],traversal)
                     views=capture(world,[a for a,_ in components],directory)
                 package_file=(Path(u.Paths.project_content_dir())/(entry['packagePath'].split('.')[0][len('/Game/'):]+'.uasset')).resolve()
                 gate('savedPackage',package_file.is_file(),str(package_file),file_hash(package_file) if package_file.is_file() else None)

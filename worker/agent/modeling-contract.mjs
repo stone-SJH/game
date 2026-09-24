@@ -8,6 +8,15 @@ const list = (items, maxItems = 32) => ({ type: 'array', items, maxItems });
 const name = { type: 'string', minLength: 1, maxLength: 160 };
 const vector = { ...list({ type: 'number', minimum: -1000000, maximum: 1000000 }, 3), minItems: 3 };
 
+export const traversalSchema = obj({
+  version: { type: 'integer', enum: [1] }, space: en(['asset-local-meters']),
+  capsule: obj({ radiusMeters: { type: 'number', exclusiveMinimum: 0, minimum: 0.000001, maximum: 1000 },
+    halfHeightMeters: { type: 'number', minimum: 0.000001, maximum: 1000 }, axis: en(['Z']) }),
+  marginMeters: { type: 'number', minimum: 0, maximum: 1 },
+  paths: { ...list(obj({ id: name, startMeters: vector, endMeters: vector }), 32), minItems: 1 },
+  ueQuery: obj({ channel: en(['Visibility']), traceComplex: { type: 'boolean', enum: [false] } }),
+});
+
 export const contractSchema = obj({
   version: { type: 'integer', enum: [2] },
   assetClass: en(['static-prop', 'modular-kit', 'organic-static', 'skeletal-character']),
@@ -24,6 +33,9 @@ export const contractSchema = obj({
     minIoU: { type: 'number', minimum: 0.1, maximum: 1 }, maxAspectError: { type: 'number', minimum: 0, maximum: 1 } }), 4),
   asymmetric: { type: 'boolean' },
 });
+// Existing frozen v2 contracts omit traversal; generation always emits the nullable key.
+contractSchema.properties.traversal = maybe(traversalSchema);
+export const generatedContractSchema = { ...contractSchema, required: [...contractSchema.required, 'traversal'] };
 
 export function defaultContract(overrides = {}) {
   return { version: 2, assetClass: 'static-prop', styleProfile: 'general',
@@ -36,6 +48,16 @@ export function defaultContract(overrides = {}) {
 export function validateContractSemantics(spec) {
   const c = spec.contract;
   if (!c) return;
+  const traversal = c.traversal;
+  if (Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\btraversal\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
+    throw Object.assign(new Error('CONTRACT_INCOMPLETE: traversability requires explicit capsule dimensions and paths; do not invent defaults.'), { kind: 'CONTRACT_INCOMPLETE', hardFailure: true });
+  }
+  if (traversal) {
+    if (c.runtime.collision !== 'convex' || c.runtime.profile !== 'fbx-static') throw new Error('Traversal requires the calibrated static FBX convex-collision profile.');
+    if (traversal.capsule.halfHeightMeters < traversal.capsule.radiusMeters) throw new Error('Capsule half-height includes its hemispheres and cannot be smaller than the radius.');
+    if (new Set(traversal.paths.map(p => p.id)).size !== traversal.paths.length) throw new Error('Duplicate traversal path id.');
+    if (traversal.paths.some(p => p.startMeters.every((v,i) => v === p.endMeters[i]))) throw new Error('Traversal requires a nonzero sweep path.');
+  }
   if (c.dimensions.meters?.some(n => n <= 0)) throw new Error('Measured dimensions must be positive.');
   if (c.pivot.mode === 'custom' && !c.pivot.meters) throw new Error('Custom pivot requires a position.');
   if (c.runtime.profile === 'fbx-skeletal' && !spec.requireRig) throw new Error('Skeletal export requires a rig.');

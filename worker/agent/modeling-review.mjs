@@ -10,7 +10,7 @@ export function createModelingReviewer({ execution, project, output, signal, ste
     const evidence = await fileEvidence(images);
     const input = { schema, prompt, images, policy };
     return execution.run({ key: key || `${name}:${hashValue({ input, evidence })}`, stage: 'REVIEW', identity: { name, ...identity }, input,
-      evidence, maxCalls, timeoutMs: policy.reviewMs, totalMs: maxCalls * policy.reviewMs, retry: () => true },
+      evidence, maxCalls, timeoutMs: policy.reviewMs, totalMs: maxCalls * policy.reviewMs, retry: error => error.kind !== 'CONTRACT_INCOMPLETE' },
     async ({ callId, timeoutMs, previousError }) => {
       const tag = `${name}-${callId}`;
       const schemaFile = path.join(output, `${tag}-schema.json`), responseFile = path.join(output, `${tag}-response.json`);

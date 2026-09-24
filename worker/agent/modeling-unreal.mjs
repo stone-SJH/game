@@ -20,7 +20,8 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
     if (!geometryFile) throw new Error('Missing accepted geometry report.');
     const geometry = await readJson(await localPath(project, geometryFile.path, {existing:true}));
     request.assets.push({ spec: asset.spec, import: found[0], sourceHash: source.sha256, requirementsHash: asset.requirementsHash,
-      dccDimensions: geometry.export.dimensions, dccCollisionCount: geometry.source.gates.find(g=>g.id==='collision')?.actual?.length || 0 });
+      dccDimensions: geometry.export.dimensions, dccCollisionCount: geometry.source.gates.find(g=>g.id==='collision')?.actual?.length || 0,
+      dccTraversal: geometry.source.gates.find(g=>g.id==='traversal')?.actual || null });
   }
   const execution = createExecutionStore(path.join(path.dirname(project), 'modeling-state', 'engine', hashValue({ taskId: job.taskId || null, project })),
     { signal, deadlineAt: job.deadlineAt });

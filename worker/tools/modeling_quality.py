@@ -2,8 +2,9 @@
 import math
 import bpy
 from modeling_scene import bounds_of, dimensions, mesh_metrics, mesh_objects
+from modeling_traversal import check_traversal
 
-VERSION = '2.0.2'
+VERSION = '2.1.0'
 
 
 def animation_samples(names, objects, render=None):
@@ -164,6 +165,23 @@ def check_scene(spec, manifest, exported=False):
         collision_ok = bool(collision) and all(o and o.type == 'MESH' and any(o.name.startswith('UCX_'+mesh.name+'_') for mesh in objects)
                                              and mesh_metrics(o, compute_convex=True)['convex'] for o in collision)
         gate('collision', collision_ok, 'Closed convex UCX proxies', [o.name for o in collision if o], applicable=c['runtime']['collision'] == 'convex')
+        traversal = {'status': 'NOT_REQUESTED', 'paths': []}
+        if c.get('traversal'):
+            root_supported = bool(root) and all(abs(v-1) < 1e-6 for v in root.matrix_world.to_scale()) and root.matrix_world.determinant() > 0
+            root_supported = root_supported and abs(root.matrix_world.to_3x3().col[2].z-1) < 1e-6
+            if collision_ok and root_supported:
+                # Contracts are expressed relative to the declared asset root, in meters.
+                inverse = root.matrix_world.inverted()
+                colliders = [(o.name,[tuple(inverse @ p) for p in bounds_of([o])]) for o in collision]
+                try:
+                    traversal = check_traversal(c['traversal'],colliders)
+                    traversal['colliders'] = [{'name': name, 'verticesMeters': vertices} for name,vertices in colliders]
+                except (ValueError, ArithmeticError) as exc:
+                    traversal = {'status': 'GAP', 'reason': str(exc), 'paths': []}
+            else:
+                traversal = {'status': 'GAP', 'reason': 'Valid convex collision and upright unit-scale asset root required', 'paths': []}
+        gates.append({'id': 'traversal', 'status': traversal['status'], 'expected': c.get('traversal'),
+                      'actual': traversal, 'validatorVersion': VERSION})
         for i, budget in enumerate(c['runtime']['lodTriangles'], 1):
             lods = mesh_objects(manifest, 'lod', i)
             lod_stats = [mesh_metrics(o) for o in lods]

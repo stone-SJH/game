@@ -1,5 +1,5 @@
 import { monitorInvocationArgs } from './iteration-monitor.mjs';
-import { contractSchema, validateContractSemantics } from './modeling-contract.mjs';
+import { contractSchema, generatedContractSchema, validateContractSemantics } from './modeling-contract.mjs';
 
 const string = { type: 'string', minLength: 1, maxLength: 3000 };
 const strings = { type: 'array', maxItems: 30, items: string };
@@ -18,7 +18,7 @@ export const modelingPlanSchema = object({
   reason: string, assets: { type: 'array', maxItems: 30, items: assetSpecSchema },
 });
 export const modelingPlanV2Schema = object({ reason: string, assets: { type: 'array', maxItems: 30,
-  items: object({ ...assetSpecSchema.properties, contract: contractSchema }) } });
+  items: object({ ...assetSpecSchema.properties, contract: generatedContractSchema }) } });
 const prediction = object({ criterion: string, achievable: { type: 'boolean' }, evidence: string });
 const predictions = { type: 'array', minItems: 1, maxItems: 30, items: prediction };
 export const modelingDecisionSchema = object({
