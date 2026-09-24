@@ -149,3 +149,7 @@ Codex 首次启动任务目录时向全局配置追加项目 trust 表，使原�
 没有完整产物的任务保留 NO_COMPLETE_OUTPUT；有效视觉 GAP 不重抽评审。
 两项 Windows 针对性测试通过，包括有效 GAP 只评审一次、完整失败尝试发现及纹理依赖。
 在线共同复验将在串行建模对照结束后执行，避免 GPU 争用和新增 Codex trust 表干扰冻结的比较配置。
+
+补充修正 runner 的 `--wait`：增量 report.json 出现不等于候选批次完成，必须等待 finishedAt，
+再确认固定槽数、每个宿主 FINISHED/stopConfirmed 以及嵌套调用都已结束；遇到围栏立即停止等待。
+Windows 六项 runner 测试通过。当前排队的比较已采用独立 finishedAt 等待条件；该修复统一了工具内置行为。

@@ -110,14 +110,27 @@ export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCom
 
 export async function verifyPrerequisite(prerequisite) {
   const report=await readJson(prerequisite.completionReport);
-  if(report?.tasks?.length!==prerequisite.candidateRegistered)throw new Error('Candidate batch is not complete');
+  if(!report?.finishedAt||report.finished!==prerequisite.candidateRegistered||report.tasks?.length!==prerequisite.candidateRegistered)
+    throw new Error('Candidate batch is not complete');
   for(const row of report.tasks) {
+    if(row.state!=='FINISHED'||row.stopConfirmed!==true)throw new Error('Candidate host has not confirmed process settlement');
     const output=row.out||row.output;
     const relative=path.relative(prerequisite.candidateOutput,output);
     if(!relative||relative.startsWith('..')||path.isAbsolute(relative))throw new Error('Candidate output is outside its registered root');
     const result=await readJson(path.join(output,'benchmark-report.json'));
     if(result?.results?.length!==1)throw new Error('Candidate task has no terminal model result');
     if((await unfinishedCalls(output)).length||result.results[0].kind==='STOP_UNCONFIRMED')throw new Error('Candidate contains an unconfirmed nested process');
+  }
+}
+
+export async function waitForPrerequisite(prerequisite,{signal,pause=()=>new Promise(resolve=>setTimeout(resolve,30000))}={}) {
+  for(;;) {
+    signal?.throwIfAborted();
+    const report=await readJson(prerequisite.completionReport);
+    if(report?.tasks?.some(row=>['FENCED','CANCELED','HOST_TIMEOUT','LAUNCH_FAILED'].includes(row.state)))
+      throw new Error('Candidate batch stopped; no automatic comparison launch');
+    if(report?.finishedAt) { await verifyPrerequisite(prerequisite);return; }
+    await pause();
   }
 }
 
@@ -131,9 +144,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1]
     if(mode==='--wait') {
       if(!plan.execution.prerequisite)throw new Error('Waiting requires an explicit candidate prerequisite');
       console.log(JSON.stringify({state:'WAITING_FOR_CANDIDATE',file:plan.execution.prerequisite.completionReport}));
-      while(!await readJson(plan.execution.prerequisite.completionReport)) {
-        abort.signal.throwIfAborted();await new Promise(resolve=>setTimeout(resolve,30000));
-      }
+      await waitForPrerequisite(plan.execution.prerequisite,{signal:abort.signal});
     }
     await runRegisteredBatch({plan,logDirectory,signal:abort.signal});
   }

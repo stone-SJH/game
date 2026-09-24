@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { runRegisteredBatch, verifyBatch, verifyPrerequisite } from '../tools/modeling-batch-runner.mjs';
+import { runRegisteredBatch, verifyBatch, verifyPrerequisite, waitForPrerequisite } from '../tools/modeling-batch-runner.mjs';
 import { atomicJson, hashFile, hashValue, readJson } from '../agent/modeling-io.mjs';
 const execute=promisify(execFile);
 
@@ -78,8 +78,25 @@ test('comparison waits for every candidate result and rejects nested work left r
   const f=await fixture(t),completionReport=path.join(f.root,'candidate-complete.json'),out=path.join(f.root,'candidate/fixture-1');
   const prerequisite={completionReport,candidateRegistered:1,candidateOutput:path.join(f.root,'candidate')};
   await assert.rejects(verifyPrerequisite(prerequisite),/not complete/);
-  await atomicJson(completionReport,{tasks:[{out}]});await assert.rejects(verifyPrerequisite(prerequisite),/no terminal/);
+  const completion={finishedAt:new Date().toISOString(),finished:1,tasks:[{out,state:'FINISHED',stopConfirmed:true}]};
+  await atomicJson(completionReport,completion);await assert.rejects(verifyPrerequisite(prerequisite),/no terminal/);
   await atomicJson(path.join(out,'benchmark-report.json'),{results:[{passed:false}]});await verifyPrerequisite(prerequisite);
   await atomicJson(path.join(out,'fixture-1/modeling-state/key/execution.json'),{groups:{review:{calls:[{status:'STARTED',callId:'review-1'}]}}});
   await assert.rejects(verifyPrerequisite(prerequisite),/unconfirmed nested/);
+});
+
+test('incremental report existence does not launch comparisons before confirmed host exit',async t=>{
+  const f=await fixture(t),completionReport=path.join(f.root,'candidate-progress.json'),out=path.join(f.root,'candidate/fixture-1');
+  const prerequisite={completionReport,candidateRegistered:1,candidateOutput:path.join(f.root,'candidate')};
+  const progress={finished:0,tasks:[{out,state:'STARTED'}]};
+  await atomicJson(completionReport,progress);
+  await atomicJson(path.join(out,'benchmark-report.json'),{results:[{passed:false}]});
+  await assert.rejects(verifyPrerequisite(prerequisite),/not complete/);
+  let polls=0;
+  await waitForPrerequisite(prerequisite,{pause:async()=>{
+    polls++;await atomicJson(completionReport,{finished:1,finishedAt:new Date().toISOString(),tasks:[{out,state:'FINISHED',stopConfirmed:true}]});
+  }});
+  assert.equal(polls,1);
+  await atomicJson(completionReport,{tasks:[{out,state:'FENCED'}]});
+  await assert.rejects(waitForPrerequisite(prerequisite,{pause:()=>assert.fail('A fenced report must not keep waiting')}),/stopped/);
 });
