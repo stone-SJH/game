@@ -59,7 +59,7 @@ async function unfinishedCalls(root) {
       if(entry.isSymbolicLink())throw new Error('Benchmark state contains a link');
       if(entry.isDirectory())await walk(file);
       else if(entry.name==='execution.json') {
-        const state=await readJson(file);
+        const state=await readJson(file,null,64*1024*1024);
         for(const group of Object.values(state.groups||{}))for(const call of group.calls||[])
           if(call.status==='STARTED'||call.error?.stopConfirmed===false)pending.push({file,callId:call.callId});
       }
@@ -112,11 +112,12 @@ export async function verifyPrerequisite(prerequisite) {
   const report=await readJson(prerequisite.completionReport);
   if(report?.tasks?.length!==prerequisite.candidateRegistered)throw new Error('Candidate batch is not complete');
   for(const row of report.tasks) {
-    const relative=path.relative(prerequisite.candidateOutput,row.out);
+    const output=row.out||row.output;
+    const relative=path.relative(prerequisite.candidateOutput,output);
     if(!relative||relative.startsWith('..')||path.isAbsolute(relative))throw new Error('Candidate output is outside its registered root');
-    const result=await readJson(path.join(row.out,'benchmark-report.json'));
+    const result=await readJson(path.join(output,'benchmark-report.json'));
     if(result?.results?.length!==1)throw new Error('Candidate task has no terminal model result');
-    if((await unfinishedCalls(row.out)).length||result.results[0].kind==='STOP_UNCONFIRMED')throw new Error('Candidate contains an unconfirmed nested process');
+    if((await unfinishedCalls(output)).length||result.results[0].kind==='STOP_UNCONFIRMED')throw new Error('Candidate contains an unconfirmed nested process');
   }
 }
 

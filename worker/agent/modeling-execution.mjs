@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { atomicJson, hashFile, hashValue, readJson, setting, throwIfStopped } from './modeling-io.mjs';
+import { atomicJson, hashFile, hashValue, readJson, localPath, setting, throwIfStopped } from './modeling-io.mjs';
 
 export const EXECUTION_POLICY_VERSION = 2;
 export function modelingFailure(kind, message, extra = {}) {
@@ -46,9 +46,29 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
   const taskDeadline = deadlineAt ? Date.parse(deadlineAt) : Infinity;
   if (Number.isNaN(taskDeadline)) throw modelingFailure('INVALID_DEADLINE', 'Invalid modeling task deadline.');
   async function load() {
-    const state = await readJson(file) || { protocol: 2, nextCall: 1, groups: {} };
-    if (state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original modeling execution release.');
+    // Legacy v2 could inline multiple image-bearing MCP results and exceed the generic 2 MiB cap.
+    const state = await readJson(file, null, 64 * 1024 * 1024) || { protocol: 3, nextCall: 1, groups: {} };
+    if (![2,3].includes(state.protocol)) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original modeling execution release.');
     return state;
+  }
+  async function save(state) {
+    for(const group of Object.values(state.groups)) {
+      if(!Object.hasOwn(group,'result')||Buffer.byteLength(JSON.stringify(group.result))<=64*1024)continue;
+      const relative=`results/${hashValue(group.key)}.json`;
+      const resultFile=await localPath(root,relative);
+      const bytes=Buffer.byteLength(JSON.stringify(group.result,null,2)+'\n');
+      if(bytes>32*1024*1024)throw modelingFailure('EXECUTION_RESULT_TOO_LARGE','Modeling result exceeds its separate 32 MiB evidence limit.');
+      await atomicJson(resultFile,group.result);
+      group.resultEvidence={path:relative,sha256:await hashFile(resultFile)};delete group.result;
+    }
+    // Old workers reject protocol 3 instead of silently replaying a result they cannot decode.
+    state.protocol=3;await atomicJson(file,state);
+  }
+  async function completedResult(group) {
+    if(!group.resultEvidence)return group.result;
+    const resultFile=await localPath(root,group.resultEvidence.path,{existing:true});
+    await verifyEvidence([{file:resultFile,sha256:group.resultEvidence.sha256}]);
+    return readJson(resultFile,null,32*1024*1024);
   }
   async function run({ key, stage, identity = {}, input = {}, evidence = [], maxCalls = 1, timeoutMs, totalMs = maxCalls * timeoutMs,
     retry = () => false, onReserved, exhaustedKind = 'VALIDATION_INFRASTRUCTURE_EXHAUSTED' }, invoke) {
@@ -65,12 +85,12 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
       if (!group) {
         group = state.groups[id] = { key, stage, identity, inputHash, evidence, limits,
           startedAt: now(), deadlineAt: Math.min(now() + totalMs, taskDeadline), calls: [] };
-        await atomicJson(file, state);
+        await save(state);
       }
       const uncertain = group.calls.find(call => call.status === 'STARTED' || call.error?.stopConfirmed === false);
       if (uncertain) throw modelingFailure('STOP_UNCONFIRMED', `Unfinished modeling call ${uncertain.callId}; verify its process tree before recovery.`, { stopConfirmed: false });
       await verifyEvidence(evidence);
-      if (group.completed) return group.result;
+      if (group.completed) return completedResult(group);
       // A fresh, non-aborted signal denotes host resumption. A confirmed canceled author call
       // consumed its attempt: report interruption without replaying it, so the pipeline can use
       // the next original author allowance. Validation may use only its remaining call/time budget.
@@ -83,7 +103,7 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
             group.cancellationResumes ||= [];
             group.cancellationResumes.push({ at: now(), consumedCalls: group.calls.length, deadlineAt: group.deadlineAt });
             delete group.terminalError;
-            await atomicJson(file, state);
+            await save(state);
           } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
         } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
       }
@@ -93,7 +113,7 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
         const callId = `${stage.toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${state.nextCall++}`;
         const call = { callId, status: 'STARTED', startedAt: now(), timeoutMs: Math.min(timeoutMs, group.deadlineAt - now(), taskDeadline - now()) };
         group.calls.push(call);
-        await atomicJson(file, state);
+        await save(state);
         // Fault-injection/observation runs after the durable reservation, before any tool is launched.
         if (onReserved) await onReserved(call);
         try {
@@ -102,14 +122,15 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
           await verifyEvidence(evidence);
           call.status = 'COMPLETED'; call.finishedAt = now(); call.stopConfirmed = true;
           group.completed = true; group.result = value ?? null;
-          await atomicJson(file, state);
-          return group.result;
+          await save(state);
+          return completedResult(group);
         } catch (error) {
+          delete group.completed;delete group.result;delete group.resultEvidence;
           call.status = 'FAILED'; call.finishedAt = now(); call.error = failureRecord(error, stage, signal);
           const canRetry = !signal?.aborted && !call.error.canceled && call.error.stopConfirmed !== false &&
             !['INTEGRITY_ERROR', 'ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO'].includes(error.kind || error.code) && retry(error);
           if (!canRetry) group.terminalError = call.error;
-          await atomicJson(file, state);
+          await save(state);
           throwIfStopped(error, signal);
           if (!canRetry) throw error;
         }

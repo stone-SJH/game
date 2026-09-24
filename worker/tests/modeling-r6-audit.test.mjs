@@ -36,6 +36,9 @@ test('audit preserves registered denominator and separates quality gaps from ser
   report=await f.audit();assert.equal(report.finished,1);assert.equal(report.categories.organic.registered,2);
   assert.equal(report.categories.organic.failed,1);assert.equal(report.rows[1].terminalFailure.kind,'REVIEW_PROCESS_ERROR');
   assert.equal(report.rows[2].status,'NOT_STARTED');assert.equal(report.integrityPassed,true);
+  await atomicJson(path.join(f.root,'organic-2/runner-interruption.json'),{kind:'BATCH_INTERRUPTED',reason:'Stopped by host fencing'});
+  report=await f.audit();assert.equal(report.finished,2);assert.equal(report.categories.organic.failed,2);
+  assert.equal(report.rows[2].status,'INTERRUPTED');assert.equal(report.rows[2].terminalFailure.kind,'BATCH_INTERRUPTED');
 });
 
 test('reuse requires actual route and immutable source, spec and accepted files',async t=>{

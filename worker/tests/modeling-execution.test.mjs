@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createExecutionStore, fileEvidence, modelingFailure } from '../agent/modeling-execution.mjs';
+import { atomicJson, hashValue } from '../agent/modeling-io.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'modeling-execution-'));
@@ -89,4 +90,29 @@ test('resumed validation retains the old deadline and counts the canceled call',
   const resumed=Object.values((await createExecutionStore(root).snapshot()).groups)[0];
   assert.equal(result,'valid');assert.equal(calls,2);assert.equal(resumed.calls.length,2);assert.equal(resumed.deadlineAt,first.deadlineAt);
   assert.equal(resumed.cancellationResumes[0].consumedCalls,1);
+});
+
+test('multiple image-bearing results stay resumable without growing the execution index past 2 MiB',async t=>{
+  const root=await fixture(t),value={image:'a'.repeat(1200000)};let calls=0;
+  for(let i=1;i<=3;i++)assert.deepEqual(await createExecutionStore(root).run({key:`preview-${i}`,stage:'PREVIEW',timeoutMs:10000},()=>{calls++;return value;}),value);
+  assert.ok((await fs.stat(path.join(root,'execution.json'))).size<10000);
+  assert.deepEqual(await createExecutionStore(root).run({key:'preview-1',stage:'PREVIEW',timeoutMs:10000},()=>calls++),value);
+  assert.equal(calls,3);const state=await createExecutionStore(root).snapshot();assert.equal(state.protocol,3);assert.equal(state.nextCall,4);
+  const group=Object.values(state.groups)[0];await fs.appendFile(path.join(root,group.resultEvidence.path),' ');
+  await assert.rejects(createExecutionStore(root).run({key:'preview-1',stage:'PREVIEW',timeoutMs:10000},()=>calls++),error=>error.kind==='INTEGRITY_ERROR');
+  assert.equal(calls,3);
+});
+
+test('oversized legacy v2 index migrates results without resetting calls, deadlines or failure fencing',async t=>{
+  const root=await fixture(t),key='legacy-preview',inputHash=hashValue({input:{},evidence:[]});
+  const legacy={protocol:2,nextCall:8,groups:{[hashValue(key)]:{key,stage:'PREVIEW',identity:{},inputHash,evidence:[],
+    limits:{maxCalls:1,timeoutMs:10000,totalMs:10000},startedAt:0,deadlineAt:10000,completed:true,result:{image:'x'.repeat(2200000)},
+    calls:[{callId:'preview-7',status:'COMPLETED',stopConfirmed:true}]}}};
+  await atomicJson(path.join(root,'execution.json'),legacy);
+  const store=createExecutionStore(root,{now:()=>5000});await store.assertSettled();
+  let invoked=0;assert.equal((await store.run({key,stage:'PREVIEW',timeoutMs:10000},()=>invoked++)).image.length,2200000);
+  await store.run({key:'next',stage:'REVIEW',timeoutMs:10000},()=>++invoked);
+  const state=await store.snapshot();assert.equal(state.protocol,3);assert.equal(state.groups[hashValue(key)].deadlineAt,10000);
+  assert.equal(state.groups[hashValue(key)].calls[0].callId,'preview-7');assert.equal(state.nextCall,9);assert.equal(invoked,1);
+  assert.ok((await fs.stat(path.join(root,'execution.json'))).size<10000);
 });

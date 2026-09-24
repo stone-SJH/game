@@ -35,11 +35,12 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
     const results=benchmark?.results||[];
     if(results.length>1)throw new Error('A registered slot contains multiple task results');
     const result=results[0];
+    const interruption=await readJson(path.join(root,'runner-interruption.json'));
     const frozenSpec=await readJson(path.join(project,'plan/modeling-specs.json'));
     const specMatches=frozenSpec ? frozenSpec.assets?.length===1&&hashValue(frozenSpec.assets[0])===task.specHash : null;
     const row={id:task.id,category:task.category,repeat:task.repeat,root,
-      status:result?(result.passed?'PASS':'FAIL'):frozenSpec?'IN_PROGRESS':'NOT_STARTED',specMatches,
-      durationMs:result?.durationMs??null,terminalFailure:result?.passed===false?{kind:result.kind||'UNCLASSIFIED',message:result.error}:null};
+      status:result?(result.passed?'PASS':'FAIL'):interruption?'INTERRUPTED':frozenSpec?'IN_PROGRESS':'NOT_STARTED',specMatches,
+      durationMs:result?.durationMs??null,terminalFailure:result?.passed===false?{kind:result.kind||'UNCLASSIFIED',message:result.error}:interruption?{kind:interruption.kind,message:interruption.reason}:null};
     const states=[];
     for(const file of await filesBelow(path.join(root,caseId,'modeling-state'),f=>path.basename(f)==='state.json')) {
       const state=await readJson(file);states.push(state);
@@ -50,12 +51,13 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
     row.recordedFailures=states.flatMap(s=>(s.failures||[]).map(f=>({kind:f.kind||f.reason||'UNKNOWN',phase:f.phase,attemptId:f.attemptId})));
     const calls=[];
     for(const file of await filesBelow(path.join(root,caseId,'modeling-state'),f=>path.basename(f)==='execution.json')) {
-      const state=await readJson(file);
+      const state=await readJson(file,null,64*1024*1024);
       for(const group of Object.values(state.groups||{})) for(const call of group.calls||[])calls.push({stage:group.stage,callId:call.callId,
         status:call.status,kind:call.error?.kind||null,stopConfirmed:call.error?.stopConfirmed??call.stopConfirmed??null});
     }
     row.calls={total:calls.length,byStage:tally(calls.map(c=>c.stage)),failures:tally(calls.filter(c=>c.kind).map(c=>c.kind)),
       inProgress:calls.filter(c=>c.status==='STARTED'),unconfirmedStops:calls.filter(c=>c.stopConfirmed===false)};
+    if(row.terminalFailure?.kind==='UNCLASSIFIED'&&row.calls.unconfirmedStops.length)row.terminalFailure.kind='STOP_UNCONFIRMED';
     const rawErrors=[];const usage=[];
     for(const file of await filesBelow(run,f=>f.endsWith('.stdout.log'))) {
       for(const line of (await fs.readFile(file,'utf8')).split(/\r?\n/)) {
@@ -91,13 +93,13 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
   const categories={};
   for(const category of new Set(rows.map(r=>r.category))) {
     const selected=rows.filter(r=>r.category===category);
-    categories[category]={registered:selected.length,finished:selected.filter(r=>['PASS','FAIL'].includes(r.status)).length,
-      passed:selected.filter(r=>r.status==='PASS').length,failed:selected.filter(r=>r.status==='FAIL').length,
+    categories[category]={registered:selected.length,finished:selected.filter(r=>['PASS','FAIL','INTERRUPTED'].includes(r.status)).length,
+      passed:selected.filter(r=>r.status==='PASS').length,failed:selected.filter(r=>['FAIL','INTERRUPTED'].includes(r.status)).length,
       ...(category==='reuse'?{reusedAndPassed:selected.filter(r=>r.status==='PASS'&&r.acceptedEvidencePresent&&r.assets.every(a=>a.route==='reuse_blender')&&r.sourceUnchanged).length}:{}),
       durationMs:selected.map(r=>r.durationMs).filter(n=>n!==null)};
   }
   const integrityPassed=inputIntegrity.every(r=>r.unchanged)&&rows.every(r=>r.specMatches!==false&&r.sourceUnchanged!==false&&r.acceptedEvidencePresent!==false&&r.assets.every(a=>a.changedFiles.length===0));
-  return {protocol:1,observedAt:new Date().toISOString(),variant,registered:tasks.length,finished:rows.filter(r=>['PASS','FAIL'].includes(r.status)).length,
+  return {protocol:1,observedAt:new Date().toISOString(),variant,registered:tasks.length,finished:rows.filter(r=>['PASS','FAIL','INTERRUPTED'].includes(r.status)).length,
     integrityPassed,inputIntegrity,categories,rows,
     note:'PASS is the preserved online task result, not supplemental UE or traversal acceptance. Incomplete samples remain in the registered denominator. Error event counts include CLI reconnection events, not additional host calls. Usage covers only completed calls and is not a total cost estimate.'};
 }
