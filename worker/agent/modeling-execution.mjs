@@ -103,5 +103,12 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
         executionFile: file, lastFailure: group.calls.at(-1)?.error || null });
     } finally { busy = false; }
   }
-  return { file, run, snapshot: load };
+  async function assertSettled() {
+    const state = await load();
+    for (const group of Object.values(state.groups)) {
+      const call = group.calls.find(c => c.status === 'STARTED' || c.error?.stopConfirmed === false);
+      if (call) throw modelingFailure('STOP_UNCONFIRMED', `Unfinished modeling call ${call.callId}; verify its process tree before recovery.`, { stopConfirmed: false });
+    }
+  }
+  return { file, run, snapshot: load, assertSettled };
 }

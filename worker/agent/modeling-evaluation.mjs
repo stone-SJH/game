@@ -68,10 +68,13 @@ export function validateSchema(value, schema, field = 'response') {
   }
   if (schema.type === 'null') { if (value !== null) throw new Error(`Invalid ${field} null.`); return value; }
   if (schema.type === 'object') {
-    if (!value || Array.isArray(value) || typeof value !== 'object' || Object.keys(value).some(key => !Object.hasOwn(schema.properties, key)) || schema.required.some(key => !Object.hasOwn(value, key))) throw new Error(`Invalid ${field} object.`);
-    for (const [key, child] of Object.entries(schema.properties)) validateSchema(value[key], child, `${field}.${key}`);
+    if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`Invalid ${field}: expected an object.`);
+    const unexpected = Object.keys(value).filter(key => !Object.hasOwn(schema.properties, key));
+    const missing = (schema.required || []).filter(key => !Object.hasOwn(value, key));
+    if (unexpected.length || missing.length) throw new Error(`Invalid ${field} object: missing keys [${missing.join(', ')}]; unexpected keys [${unexpected.join(', ')}].`);
+    for (const [key, child] of Object.entries(schema.properties)) if (Object.hasOwn(value, key)) validateSchema(value[key], child, `${field}.${key}`);
   } else if (schema.type === 'array') {
-    if (!Array.isArray(value) || value.length < (schema.minItems || 0) || value.length > (schema.maxItems ?? Infinity)) throw new Error(`Invalid ${field} array.`);
+    if (!Array.isArray(value) || value.length < (schema.minItems || 0) || value.length > (schema.maxItems ?? Infinity)) throw new Error(`Invalid ${field}: expected an array with ${schema.minItems || 0}..${schema.maxItems ?? 'unbounded'} items.`);
     value.forEach((item, index) => validateSchema(item, schema.items, `${field}[${index}]`));
   } else {
     const valid = schema.type === 'integer' ? Number.isSafeInteger(value) : typeof value === schema.type;
