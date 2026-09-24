@@ -229,3 +229,9 @@ UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始�
 证据 `r6-prepared/source-preview-path-comparison-v1.json`。目录长度与证据目录结构共同影响了 Windows I/O，
 因此复用兑现率差异不能单独归因为分阶段作者或 evaluator 的优劣。后续版本已修复长路径，
 不能通过缩短本轮路径重跑替换失败槽。
+
+18:00 CST，共同复验仍未创建输出目录。停止了仅等待前置条件的旧复验进程，补充运行配置锁后重新排队；
+没有中断建模任务或消耗任何复验槽。v2 复验登记除检查器哈希外，还逐槽校验原始 CLI/Node/config 哈希，
+仅允许预登记的建模与复验目录追加 trust 表，并固定 MODELING_AGENT_MODEL 覆盖项；变动即停止后续槽。
+四项 Windows 针对性测试通过，覆盖允许 trust 追加及模型配置漂移后不再执行下一槽。
+旧 v1 登记保留，待执行登记改为 `common-recheck-registration-v2.json`，输出位置仍为 `r6-common-recheck-v1`。

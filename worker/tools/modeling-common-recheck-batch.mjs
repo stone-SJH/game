@@ -5,6 +5,20 @@ import { pathToFileURL } from 'node:url';
 import { atomicJson, hashValue, localPath, readJson } from '../agent/modeling-io.mjs';
 import { verifyEvidence } from '../agent/modeling-execution.mjs';
 import { recheckAccepted } from './modeling-common-recheck.mjs';
+import { verifyConfigWithTaskTrust } from './modeling-config-audit.mjs';
+
+async function verifyRegistration(plan) {
+  await verifyEvidence(plan.checkerEvidence);
+  const checks=[];
+  for(const entry of plan.runtimeEvidence||[]) {
+    if(plan.taskTrustAdditions&&path.resolve(entry.file)===path.resolve(plan.taskTrustAdditions.file))
+      checks.push(await verifyConfigWithTaskTrust(entry,plan.taskTrustAdditions.projects));
+    else await verifyEvidence([entry]);
+  }
+  if(Object.hasOwn(plan,'modelOverride')&&(process.env.MODELING_AGENT_MODEL||null)!==plan.modelOverride)
+    throw new Error('Registered review model override changed');
+  return checks;
+}
 
 export async function waitForModelingBatch(file,{signal,pause=()=>new Promise(resolve=>setTimeout(resolve,30000))}={}) {
   for(;;) {
@@ -29,13 +43,13 @@ export async function recheckRegisteredBatch({plan,output,signal,recheck=recheck
     if(!/^[a-z0-9-]+\/[a-z0-9-]+$/.test(task.id)||ids.has(task.id)||!path.isAbsolute(task.benchmarkRoot))throw new Error('Invalid or duplicate slot');
     ids.add(task.id);
   }
-  await verifyEvidence(plan.checkerEvidence);
+  await verifyRegistration(plan);
   await fs.mkdir(output);
   const report={protocol:1,planHash:hashValue(plan),registered:plan.tasks.length,rows:[],complete:false,startedAt:new Date().toISOString()};
   await atomicJson(path.join(output,'registration.json'),plan);
   const save=()=>atomicJson(path.join(output,'report.json'),report);await save();
   for(const task of plan.tasks) {
-    signal?.throwIfAborted();await verifyEvidence(plan.checkerEvidence);
+    signal?.throwIfAborted();const configurationBefore=await verifyRegistration(plan);
     const benchmark=await readJson(path.join(task.benchmarkRoot,'benchmark-report.json'));
     if(!benchmark) {
       if(!task.interruptionEvidence)throw new Error(`Registered slot lacks a terminal report: ${task.id}`);
@@ -44,13 +58,13 @@ export async function recheckRegisteredBatch({plan,output,signal,recheck=recheck
     }
     if(benchmark.results?.length!==1)throw new Error(`Registered slot has an unexpected sample count: ${task.id}`);
     const directory=await localPath(output,task.id.replace('/','--'));
-    const row={id:task.id,status:'STARTED',output:directory,startedAt:new Date().toISOString()};
+    const row={id:task.id,status:'STARTED',output:directory,startedAt:new Date().toISOString(),configurationBefore};
     report.rows.push(row);await save();
     console.log(JSON.stringify({id:task.id,status:'STARTED'}));
     try {
       const result=await recheck({benchmarkRoot:task.benchmarkRoot,output:directory,signal});
       row.status='FINISHED';row.results=result.rows;row.onlinePassed=benchmark.results[0].passed;
-      row.finishedAt=new Date().toISOString();await verifyEvidence(plan.checkerEvidence);await save();
+      row.finishedAt=new Date().toISOString();row.configurationAfter=await verifyRegistration(plan);await save();
     } catch(error) {
       // The independent recheck already records bounded call failures. Do not replay a partial slot.
       row.status='STOPPED';row.error={kind:error.kind||null,message:error.message};await save();throw error;
