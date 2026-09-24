@@ -64,3 +64,29 @@ test('cancellation and unconfirmed stop never retry', async t => {
     assert.equal(count, 1);
   }
 });
+
+test('resuming a confirmed canceled author consumes its old attempt without replaying it', async t => {
+  const root=await fixture(t),controller=new AbortController();let calls=0;
+  const request={key:'author/attempt-1',stage:'AUTHOR',timeoutMs:10000};
+  await assert.rejects(createExecutionStore(root,{signal:controller.signal}).run(request,()=>{
+    calls++;controller.abort(new Error('pause'));
+    throw Object.assign(new Error('stopped'),{result:{canceled:true,stopConfirmed:true,exitCode:1}});
+  }));
+  await assert.rejects(createExecutionStore(root,{signal:new AbortController().signal}).run(request,()=>calls++),
+    error=>error.kind==='AUTHOR_INTERRUPTED'&&!error.hardFailure&&error.stopConfirmed);
+  assert.equal(calls,1);assert.equal((await createExecutionStore(root).snapshot()).nextCall,2);
+});
+
+test('resumed validation retains the old deadline and counts the canceled call', async t => {
+  const root=await fixture(t),controller=new AbortController();let calls=0,tick=0;
+  const request={...options,timeoutMs:1000};
+  await assert.rejects(createExecutionStore(root,{signal:controller.signal,now:()=>tick}).run(request,()=>{
+    calls++;tick=500;controller.abort(new Error('pause'));
+    throw Object.assign(new Error('stopped'),{result:{canceled:true,stopConfirmed:true,exitCode:1}});
+  }));
+  const first=Object.values((await createExecutionStore(root).snapshot()).groups)[0];
+  const result=await createExecutionStore(root,{signal:new AbortController().signal,now:()=>tick}).run(request,()=>{calls++;return 'valid';});
+  const resumed=Object.values((await createExecutionStore(root).snapshot()).groups)[0];
+  assert.equal(result,'valid');assert.equal(calls,2);assert.equal(resumed.calls.length,2);assert.equal(resumed.deadlineAt,first.deadlineAt);
+  assert.equal(resumed.cancellationResumes[0].consumedCalls,1);
+});

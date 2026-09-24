@@ -71,8 +71,22 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
       if (uncertain) throw modelingFailure('STOP_UNCONFIRMED', `Unfinished modeling call ${uncertain.callId}; verify its process tree before recovery.`, { stopConfirmed: false });
       await verifyEvidence(evidence);
       if (group.completed) return group.result;
-      // A terminal non-retryable failure is durable, including cancellation and integrity errors.
-      if (group.terminalError) throw modelingFailure(group.terminalError.kind, group.terminalError.message, { executionFile: file });
+      // A fresh, non-aborted signal denotes host resumption. A confirmed canceled author call
+      // consumed its attempt: report interruption without replaying it, so the pipeline can use
+      // the next original author allowance. Validation may use only its remaining call/time budget.
+      if (group.terminalError) {
+        const failure = group.terminalError;
+        if (failure.kind === 'CANCELED' && failure.stopConfirmed === true) {
+          if (stage === 'AUTHOR') throw modelingFailure('AUTHOR_INTERRUPTED', 'Previously canceled author stopped; its attempt remains consumed.',
+            { hardFailure: false, stopConfirmed: true, executionFile: file });
+          if (['REVIEW', 'TECHNICAL', 'SOURCE_PREVIEW'].includes(stage)) {
+            group.cancellationResumes ||= [];
+            group.cancellationResumes.push({ at: now(), consumedCalls: group.calls.length, deadlineAt: group.deadlineAt });
+            delete group.terminalError;
+            await atomicJson(file, state);
+          } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
+        } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
+      }
       while (group.calls.length < maxCalls && now() < Math.min(group.deadlineAt, taskDeadline)) {
         signal?.throwIfAborted();
         await verifyEvidence(evidence);
