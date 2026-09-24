@@ -62,6 +62,9 @@ final performs one bounded self-check, saves the required exports and returns fo
 - `ym.bone_action(rig, 'Wave', {'UpperArm.R': [(1,(0,0,0)), (12,(0,.6,0)), (24,(0,0,0))]})`
   creates a layered Action with a slot. Bind the mesh vertex groups and ARMATURE modifier first.
   `ym.action_channels(action, rig.animation_data.action_slot)` reads layered channels.
+  Inspect channel counts and keyframes through this helper using the assigned slot object directly.
+  The installed Blender 5.2 API has neither `Action.fcurves` nor `ActionSlot.name`; those legacy
+  inspection shortcuts raise AttributeError and consume the shared authoring budget.
   `ym.measure_motion(meshes, [1,12,24])` measures evaluated world vertices and restores the frame.
   `moving=false` means the action did not deform these vertices; a named Action is insufficient.
 - `ym.export_asset(output_directory, manifest, fbx=True)` exports selected LOD0 render geometry and

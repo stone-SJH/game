@@ -180,3 +180,8 @@ UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始�
 因此外层 runner 同时识别 `Unconfirmed process stop` / `Blender process stop unconfirmed` 并立即围栏，
 不修改基线源码或预算。七项 Windows runner 测试通过，日志 `runner-baseline-fence-tests.log`。
 本次 runner 更新发生在 24 槽对照尚未启动时；候选剩余批次仍使用启动时已加载的旧 runner 模块。
+
+绑定第 1 槽的四次工具属性错误归并到两种已验证诊断：`Action.fcurves` 不存在、`ActionSlot.name` 不存在。
+后续技能说明明确使用已经验证的 `ym.action_channels(action, rig.animation_data.action_slot)`，
+防止作者自检继续沿用旧 API。仅修改说明，未新增 helper/API；既有 helper 的 Blender 5.2 验证保持适用，
+新提示尚未用于冻结批次，也不声称已证明能消除模型的后续 API 误用。
