@@ -8,6 +8,7 @@ import { codexInvocation } from '../agent/production-harness.mjs';
 import { createTripoProvider } from '../agent/providers/tripo.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 import { atomicJson } from '../agent/modeling-io.mjs';
+import { createSingleStageAuthor } from './modeling-legacy-author.mjs';
 
 const cases = {
   'hard-surface': { description:'A red metal wall cabinet, with a recessed front door, black pull handle, brass hinges and beveled edges.',
@@ -32,8 +33,10 @@ const option=(name,fallback)=>argv.includes(name)?argv[argv.indexOf(name)+1]:fal
 for(let i=0;i<argv.length;i++) { if(['--case','--out','--repeat','--reference','--reuse-source','--variant'].includes(argv[i]))i++;else if(!['--tripo'].includes(argv[i]))throw new Error('Unknown benchmark option'); }
 const caseName=option('--case','hard-surface');if(!cases[caseName])throw new Error('Unknown case');
 const repeats=Number(option('--repeat','1'));if(!Number.isInteger(repeats)||repeats<1||repeats>3)throw new Error('repeat must be 1..3');
-const root=path.resolve(option('--out',await fs.mkdtemp(path.join(os.tmpdir(),'modeling-v2-live '))));
-await fs.mkdir(root,{recursive:true});
+const variant=option('--variant','v2');if(!['v2','legacy'].includes(variant))throw new Error('Unknown variant');
+if(variant==='legacy'&&argv.includes('--tripo'))throw new Error('Single-stage comparison fixes provider availability to disabled');
+const root=option('--out')?path.resolve(option('--out')):await fs.mkdtemp(path.join(os.tmpdir(),'modeling-v2-live '));
+if(option('--out'))await fs.mkdir(root,{recursive:false}); // A new batch cannot overwrite or resample a prior one.
 const abort=new AbortController();process.on('SIGINT',()=>abort.abort(new Error('Benchmark canceled')));
 const results=[];
 console.log(JSON.stringify({root,caseName,repeats,liveAuthor:true,liveEvaluation:true,liveVisualReview:true,providerEnabled:argv.includes('--tripo')}));
@@ -58,20 +61,26 @@ for(let i=0;i<repeats;i++) {
     spec.description=spec.description.replaceAll('red','blue');spec.prompt=spec.description;
     spec.requirements=spec.requirements.map(r=>r.replaceAll('red','blue'));
   }
-  if(option('--variant','v2')==='legacy')delete spec.contract;
-  const pipeline=createModelingPipeline({job:{taskId:id,workspaceId:id,runId:'benchmark',objective:spec.description,modelingSpecs:[spec]},project,output,signal:abort.signal,
-    invocation:codexInvocation([]),provider:createTripoProvider(argv.includes('--tripo')?{}:{keyFile:path.join(root,'no-provider-key')}),
-    reportProgress:async value=>console.log(JSON.stringify({case:id,step:value.step})),
-    step:async(name,command,args,timeoutMs,cwd,accepts,options={})=>{
+  const invocation=codexInvocation([]);
+  const step=async(name,command,args,timeoutMs,cwd,accepts,options={})=>{
       console.log(JSON.stringify({case:id,stage:name,state:'started'}));
       const result=await runCommand(command,args,{...options,cwd,timeoutMs,signal:abort.signal,stdoutFile:path.join(output,name+'.stdout.log'),stderrFile:path.join(output,name+'.stderr.log')});
       if(!result.stopConfirmed)throw Object.assign(new Error('Unconfirmed process stop'),{stopConfirmed:false});
       if(result.exitCode!==0||result.error||result.timedOut||result.canceled)throw Object.assign(new Error(`Benchmark step failed ${name}: ${result.timedOut?'shared attempt timeout':result.canceled?'canceled':result.error||`exit ${result.exitCode}`}; ${result.stderr.slice(-1200)}`),{result});
       return result;
-    }});
+    };
+  const pipeline=createModelingPipeline({job:{taskId:id,workspaceId:id,runId:'benchmark',objective:spec.description,modelingSpecs:[spec]},project,output,signal:abort.signal,
+    invocation,provider:createTripoProvider(argv.includes('--tripo')?{}:{keyFile:path.join(root,'no-provider-key')}),
+    reportProgress:async value=>console.log(JSON.stringify({case:id,step:value.step})),step,
+    ...(variant==='legacy'?{build:createSingleStageAuthor({project,output,signal:abort.signal,step,invocation})}:{})});
+  let fatal;
   try { const summary=await pipeline.prepare();await pipeline.verify();results.push({id,passed:true,durationMs:Date.now()-started,summary}); }
-  catch(error){results.push({id,passed:false,durationMs:Date.now()-started,error:error.message});if(abort.signal.aborted)throw error;}
-  await atomicJson(path.join(root,'benchmark-report.json'),{protocol:2,caseName,liveAuthor:true,liveVisualReview:true,results});
+  catch(error){results.push({id,passed:false,durationMs:Date.now()-started,error:error.message,kind:error.kind||null,lastFailure:error.lastFailure||null});
+    if(abort.signal.aborted||error.stopConfirmed===false||error.result?.stopConfirmed===false)fatal=error;}
+  await atomicJson(path.join(root,'benchmark-report.json'),{protocol:2,caseName,variant,fullContract:true,
+    comparisonScope:variant==='legacy'?'Single-stage author adapter with complete contract and common route/execution/acceptance harness; not a replay of the entire historical worker.':'Staged v2 author and online acceptance',
+    liveAuthor:true,liveVisualReview:true,results});
   console.log(JSON.stringify({case:id,passed:results.at(-1).passed,durationMs:Date.now()-started,error:results.at(-1).error}));
+  if(fatal)throw fatal;
 }
 if(results.some(r=>!r.passed))process.exitCode=1;
