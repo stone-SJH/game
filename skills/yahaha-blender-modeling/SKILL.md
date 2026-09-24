@@ -20,7 +20,7 @@ brief calls for continuous anatomy. Report a quality gap when the required struc
 The host requests a `blockout` or `final` stage. Blockout must save `source.blend`, `recipe.py`
 and `asset-manifest.json`; final must also export `model.glb`, the required FBX if specified,
 and `build-report.json`. The host renders and passes the blockout views to the next stage.
-For additional self-review call `blender_render_views`; inspect its image content, not just its path.
+For a necessary bounded self-review call `blender_render_views`; inspect its image content, not just its path.
 Use `blender_checkpoint` before a substantial revision. Never repair an accepted source in place.
 
 Keep `recipe.py` executable and self-contained apart from the host's pinned helpers and declared
@@ -41,6 +41,33 @@ inside a cell. Lightmap UVs have separate requirements.
 Only report smallEditsOnly for actual local cleanup; new topology, rig or silhouette is a rebuild.
 Host checks and independent image review determine acceptance. Repair the reported defect;
 do not revise requirements or load an external orchestrator to change budgets.
+
+## Verified Blender 5.2 helpers
+
+Add the supplied modeling helper directory to `sys.path`, then import `yahaha_modeling as ym`.
+The host pins these local helpers. Do not modify the archived upstream files. The launch prompt
+gives the remaining shared attempt time: blockout saves its three required artifacts and returns;
+final performs one bounded self-check, saves the required exports and returns for host QA.
+
+- `ym.ensure_world()` handles an empty scene with no World. `ym.set_render_engine('BLENDER_EEVEE')`
+  validates the installed render enum; use `CYCLES` for color baking.
+- `ym.workspace_path(workspace, relative)` confines paths, including resolved links. `ym.read_json(path)`
+  reads UTF-8 with or without BOM. `ym.write_json(path, data)` supports Vector, Matrix and IDProperty
+  collections and rejects nonfinite values; do not sanitize whole scripts with character replacement.
+- `ym.pbr_material('Bark', (.24,.075,.024,1))` creates exportable constant PBR color.
+  Procedural Noise/ColorRamp is not a portable Base Color: check `ym.base_color_issues(meshes)`.
+  For a single-material UV-unwrapped mesh, `ym.bake_base_color(mesh, png_path, size=1024)` bakes color,
+  connects and packs the image. Split material slots or bake them deliberately before using this helper.
+  Inspect the reimported GLB; source-only appearance cannot prove exported color fidelity.
+- `ym.bone_action(rig, 'Wave', {'UpperArm.R': [(1,(0,0,0)), (12,(0,.6,0)), (24,(0,0,0))]})`
+  creates a layered Action with a slot. Bind the mesh vertex groups and ARMATURE modifier first.
+  `ym.action_channels(action, rig.animation_data.action_slot)` reads layered channels.
+  `ym.measure_motion(meshes, [1,12,24])` measures evaluated world vertices and restores the frame.
+  `moving=false` means the action did not deform these vertices; a named Action is insufficient.
+- `ym.export_asset(output_directory, manifest, fbx=True)` exports selected LOD0 render geometry and
+  its rig to GLB; FBX also includes declared LOD/collision/socket helpers. Use `fbx=False` for GLB-only
+  contracts. All meshes still need manifest roles. Pack textures and save `source.blend` after final
+  edits; the helper does not save the editable scene or invent missing LODs, collision or binding.
 
 Provenance: modeling/UV practices adapted from the pinned MIT sources in `upstream/`, listed
 in `skills/modeling-upstream-lock.json`. Those archived source instructions are audit material;

@@ -45,7 +45,7 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
   }
   const plan = { protocol: 2, lockHash, selected, repairDimensions, resources,
     entrypoints: selected.map(name => `${root}/${name}/SKILL.md`),
-    helperDirectories: selected.filter(name => name === 'yahaha-blender-lowpoly').map(name => `${root}/${name}/scripts`),
+    helperDirectories: selected.filter(name => ['yahaha-blender-modeling', 'yahaha-blender-lowpoly'].includes(name)).map(name => `${root}/${name}/scripts`),
     stages: ['blockout', 'final'], upstreamLockHash: hashValue(upstream) };
   await atomicJson(await localPath(project, `${root}/skill-plan.json`), plan);
   return plan;
