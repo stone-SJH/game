@@ -74,6 +74,16 @@ test('host exit does not clear an unfinished nested author',async t=>{
   assert.equal(report.tasks[0].unfinishedCalls[0].callId,'author-1');assert.equal(report.finished,0);
 });
 
+test('legacy baseline stop failures fence the batch even without typed errors or execution indexes',async t=>{
+  const f=await fixture(t);let launches=0;
+  await assert.rejects(runRegisteredBatch({...f,launch:async(command,args)=>{
+    launches++;const out=args[args.indexOf('--out')+1];
+    await atomicJson(path.join(out,'benchmark-report.json'),{results:[{passed:false,error:'Unconfirmed process stop'}]});
+    return {exitCode:1,stopConfirmed:true};
+  }}),/FENCED/);
+  assert.equal(launches,1);assert.equal((await readJson(path.join(f.logDirectory,'report.json'))).tasks[0].state,'FENCED');
+});
+
 test('comparison waits for every candidate result and rejects nested work left running',async t=>{
   const f=await fixture(t),completionReport=path.join(f.root,'candidate-complete.json'),out=path.join(f.root,'candidate/fixture-1');
   const prerequisite={completionReport,candidateRegistered:1,candidateOutput:path.join(f.root,'candidate')};

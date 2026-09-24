@@ -14,6 +14,12 @@ async function absent(file) {
   catch(error) { if(error.code!=='ENOENT')throw error; }
 }
 
+function unconfirmedStop(result) {
+  // The cf86fe4 probe retained only the error message, without a typed kind or execution index.
+  return result?.kind==='STOP_UNCONFIRMED'||result?.stopConfirmed===false||result?.result?.stopConfirmed===false||
+    /\b(?:unconfirmed process stop|process stop unconfirmed)\b/i.test(result?.error||'');
+}
+
 export async function verifyBatch(plan) {
   if(plan.protocol!==1||!plan.tasks?.length||!plan.execution?.mode)throw new Error('Explicit execution plan required');
   if(!['DIAGNOSTIC_R4_FAILED','CALIBRATED'].includes(plan.execution.mode))throw new Error('Unknown admission mode');
@@ -97,7 +103,7 @@ export async function runRegisteredBatch({plan,logDirectory,signal,launch=runCom
       timedOut:result.timedOut,canceled:result.canceled,error:result.error||null});
     const benchmark=await readJson(path.join(out,'benchmark-report.json'));
     row.unfinishedCalls=await unfinishedCalls(out);
-    const uncertain=row.unfinishedCalls.length>0||benchmark?.results?.some(r=>r.kind==='STOP_UNCONFIRMED');
+    const uncertain=row.unfinishedCalls.length>0||benchmark?.results?.some(unconfirmedStop);
     row.state=result.stopConfirmed===false||uncertain?'FENCED':result.canceled?'CANCELED':result.timedOut?'HOST_TIMEOUT':benchmark?.results?.length===1?'FINISHED':'LAUNCH_FAILED';
     row.passed=benchmark?.results?.[0]?.passed??null;
     if(row.state==='FINISHED')report.finished++;
@@ -119,7 +125,7 @@ export async function verifyPrerequisite(prerequisite) {
     if(!relative||relative.startsWith('..')||path.isAbsolute(relative))throw new Error('Candidate output is outside its registered root');
     const result=await readJson(path.join(output,'benchmark-report.json'));
     if(result?.results?.length!==1)throw new Error('Candidate task has no terminal model result');
-    if((await unfinishedCalls(output)).length||result.results[0].kind==='STOP_UNCONFIRMED')throw new Error('Candidate contains an unconfirmed nested process');
+    if((await unfinishedCalls(output)).length||result.results.some(unconfirmedStop))throw new Error('Candidate contains an unconfirmed nested process');
   }
 }
 

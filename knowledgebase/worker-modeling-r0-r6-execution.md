@@ -175,3 +175,8 @@ UE probe 的补充入口目前仅通过语法检查，真实执行尚未开始�
 本地 IDLE/journal 空，部署仍为 `de4cf60`。证据 `worker-allocation-snapshot-1620.json`；
 这是当前状态核验，不能回填为 14:05 部署前的控制端核验。后续部署仍需重新检查当时状态。
 已验证后续修复已推送到远端 `fix/modeling-r6-audit`；冻结候选与对照源码未替换。
+
+对照启动前核对旧版 `cf86fe4` probe：它在终态只保留停止失败的文本，没有 typed kind 或 execution index。
+因此外层 runner 同时识别 `Unconfirmed process stop` / `Blender process stop unconfirmed` 并立即围栏，
+不修改基线源码或预算。七项 Windows runner 测试通过，日志 `runner-baseline-fence-tests.log`。
+本次 runner 更新发生在 24 槽对照尚未启动时；候选剩余批次仍使用启动时已加载的旧 runner 模块。
