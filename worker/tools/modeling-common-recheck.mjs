@@ -12,6 +12,34 @@ import { blenderExecutable } from '../agent/modeling-capabilities.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 
+export async function retainedFinals(project) {
+  const specs=(await readJson(path.join(project,'plan/modeling-specs.json')))?.assets||[],assets=[];
+  async function walk(directory,spec) {
+    for(const entry of await fs.readdir(directory,{withFileTypes:true}).catch(error=>{if(error.code==='ENOENT')return [];throw error;})) {
+      if(entry.isSymbolicLink())throw new Error('Retained output contains a link');
+      if(!entry.isDirectory())continue;
+      const child=path.join(directory,entry.name);
+      if(!/^(?:blender_direct|reuse_blender|tripo_then_blender)-[1-9]\d*$/.test(entry.name)) { await walk(child,spec);continue; }
+      const required=['source.blend','model.glb','asset-manifest.json'];
+      if(!(await Promise.all(required.map(name=>fs.stat(path.join(child,name)).then(s=>s.isFile()).catch(error=>{if(error.code==='ENOENT')return false;throw error;})))).every(Boolean))continue;
+      const files=[];
+      async function collect(folder) {
+        for(const item of await fs.readdir(folder,{withFileTypes:true})) {
+          const relative=path.relative(project,path.join(folder,item.name)).replaceAll('\\','/');
+          const file=await localPath(project,relative,{existing:true});
+          if(item.isDirectory())await collect(file);
+          else if(item.isFile())files.push({path:relative,sha256:await hashFile(file)});
+        }
+      }
+      await collect(child);files.sort((a,b)=>a.path.localeCompare(b.path));
+      assets.push({assetId:spec.assetId,spec,route:entry.name.replace(/-\d+$/,''),files,
+        evidenceSource:'retained-unaccepted',attempt:entry.name});
+    }
+  }
+  for(const spec of specs)await walk(await localPath(project,`art/models/${spec.assetId}`),spec);
+  return assets.sort((a,b)=>a.files[0].path.localeCompare(b.files[0].path));
+}
+
 export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,evaluate}) {
   const benchmark=await readJson(path.join(benchmarkRoot,'benchmark-report.json'));
   if(!benchmark?.results?.length)throw new Error('A completed benchmark is required');
@@ -22,16 +50,21 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
     files:await fileEvidence(['modeling-asset-check.py','modeling_scene.py','modeling_quality.py','modeling_reference.py','modeling_traversal.py']
       .map(file=>path.join(repositoryRoot,'worker/tools',file)))});
   for(const result of benchmark.results) {
-    if(!result.summary?.assets?.length) { rows.push({id:result.id,onlinePassed:result.passed,status:'NO_ACCEPTED_OUTPUT',originalFailure:result.kind||result.error});continue; }
     const project=path.join(benchmarkRoot,result.id,'project');
-    for(const asset of result.summary.assets) {
-      const target=path.join(output,`${result.id}-${asset.assetId}`);await fs.mkdir(target);
+    const assets=result.summary?.assets?.length?result.summary.assets:await retainedFinals(project);
+    if(!assets.length) { rows.push({id:result.id,onlinePassed:result.passed,status:'NO_COMPLETE_OUTPUT',originalFailure:result.kind||result.error});continue; }
+    for(const asset of assets) {
+      const target=path.join(output,`${result.id}-${asset.assetId}${asset.attempt?'-'+asset.attempt:''}`);await fs.mkdir(target);
+      await atomicJson(path.join(target,'input-manifest.json'),asset);
       const files=[];
       for(const file of asset.files) {
         const absolute=await localPath(project,file.path,{existing:true});
         if(await hashFile(absolute)!==file.sha256)throw new Error('Accepted evidence changed before recheck');files.push(absolute);
       }
-      const frozen=await fileEvidence(files),spec=asset.spec;
+      const spec=asset.spec;
+      for(const reference of [...spec.referenceImages,...(spec.contract?.referenceMatches||[]).map(match=>match.mask)])
+        files.push(await localPath(project,reference,{existing:true}));
+      const frozen=await fileEvidence([...new Set(files)]);
       const directory=path.dirname(await localPath(project,asset.files.find(f=>f.path.endsWith('/source.blend')).path,{existing:true}));
       const specFile=path.join(target,'spec.json');await atomicJson(specFile,spec);await atomicJson(path.join(target,'rubric.json'),visualRubric(spec));
       const execution=createExecutionStore(path.join(target,'execution'),{signal});
@@ -41,7 +74,8 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
         if(value.exitCode!==0||value.error||value.timedOut||value.canceled||!value.stopConfirmed)throw Object.assign(new Error(`Recheck ${name} failed`),{result:value});
         return value;
       };
-      const row={id:result.id,assetId:asset.assetId,onlinePassed:result.passed,sourceRoute:asset.route};
+      const row={id:result.id,assetId:asset.assetId,onlinePassed:result.passed,sourceRoute:asset.route,
+        evidenceSource:asset.evidenceSource||'accepted-manifest',attempt:asset.attempt||null,originalFailure:result.kind||result.error||null};
       let fatal;
       try {
         const geometry=await execution.run({key:'technical',stage:'TECHNICAL',input:{spec},evidence:frozen,maxCalls:2,timeoutMs:300000,retry:()=>true},async({callId,timeoutMs})=>{
@@ -68,13 +102,13 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
         row.status='INFRASTRUCTURE_ERROR';row.failure={kind:error.kind||'UNCATEGORIZED',message:error.message};
         if(signal?.aborted||error.stopConfirmed===false||error.result?.stopConfirmed===false)fatal=error;
       }
-      await verifyEvidence(frozen);row.acceptedFilesUnchanged=true;rows.push(row);
+      await verifyEvidence(frozen);row.inputFilesUnchanged=true;rows.push(row);
       await atomicJson(path.join(output,'report.json'),{registered:benchmark.results.length,rows,complete:false});
       if(fatal)throw fatal;
     }
   }
   const report={registered:benchmark.results.length,rows,complete:true,
-    note:'This common checker covers accepted outputs. Failed tasks without accepted output remain recorded; their retained intermediate attempts are not promoted to accepted assets. Original online verdicts are preserved.'};
+    note:'This common checker covers accepted outputs and every complete retained final attempt. A PASS on retained output never changes the failed online task verdict. Missing or interrupted tasks remain in the original denominator; incomplete blockouts are not final assets.'};
   await atomicJson(path.join(output,'report.json'),report);return report;
 }
 
