@@ -24,6 +24,10 @@ from this checkout; separately installed specialized skills remain in place.
 
 ## Update and deployment
 
+If autostart is installed, create `runtime/config/autostart.paused` before stopping
+the worker for maintenance. Keep it until the committed deployment is ready; the
+one-minute retry otherwise restarts an idle, stopped worker.
+
 Wait for the current task and pending result delivery to finish, and stop the old
 agent with Ctrl+C before updating code. The deployment script refuses any existing
 execution journal or running worker process. Do not kill active work or clear a
@@ -58,6 +62,51 @@ For rollback, stop between jobs, inspect `git log`, revert the faulty commit on 
 local deployment branch, and deploy again without `-Update`. Keep runtime data.
 Controller deployment is a separate ECS operation documented in
 [`../controller/DEPLOYMENT.md`](../controller/DEPLOYMENT.md).
+
+## Automatic startup
+
+Install from an elevated PowerShell in the worker account's desktop session:
+
+```powershell
+& .\worker\deploy\register-worker-autostart.ps1
+Start-ScheduledTask -TaskName 'YahahaGame-Worker-Autostart'
+& .\worker\deploy\register-worker-autostart.ps1 -CheckOnly
+& .\worker\deploy\monitor-worker.ps1 -Once -Json
+```
+
+The task uses startup and worker-account logon triggers, plus an indefinite retry
+every minute. It runs hidden in that account's interactive session so Codex, Blender
+and Unreal keep their existing desktop, profile and credentials. Windows must first
+establish that user's session; this does not configure automatic Windows login or
+promise GPU execution before login. A disconnected session can remain logged in.
+
+`autostart-worker.ps1` leaves an existing worker running and invokes the normal Git
+deployer only when no agent or execution journal exists. Dirty source, an interrupted
+RUNNING journal or pending RESULT journal blocks startup for operator inspection;
+no journal or task data is discarded. Startup uses the current committed checkout
+without fetching or merging remote changes. Scheduled/manual deployments share a
+runtime mutex, and the scheduled task ignores overlapping invocations.
+
+Inspect `runtime/logs/autostart-status.json`, `runtime/deployment.json`, worker logs
+and the read-only monitor after every deployment. The task's last result only proves
+its invocation succeeded; the controller heartbeat proves the worker is connected.
+Network/startup failures retry on the next minute. A still-running but unhealthy
+worker is reported by monitoring and is never killed automatically.
+
+For maintenance, create the pause marker before the intentional stop, then remove
+it and trigger the task when ready:
+
+```powershell
+New-Item -ItemType File -Force runtime/config/autostart.paused
+# Wait for idle, stop the worker, commit and verify changes, then deploy.
+Remove-Item -LiteralPath runtime/config/autostart.paused
+Start-ScheduledTask -TaskName 'YahahaGame-Worker-Autostart'
+```
+
+Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File worker/tests/autostart.tests.ps1`
+for startup regressions and repeat `register-worker-autostart.ps1 -CheckOnly` after
+future changes. Retire an obsolete task only after inspecting its action and backing
+up its XML in runtime diagnostics; do not disable unrelated supervisors.
 
 ## Migration from StoneWorker
 

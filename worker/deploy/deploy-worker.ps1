@@ -12,6 +12,18 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not $WorkerRoot) { $WorkerRoot = Join-Path $RepoRoot 'runtime' }
 $WorkerRoot = [IO.Path]::GetFullPath($WorkerRoot)
 
+# Serialize scheduled and manual deployments, including across Windows sessions.
+# Mutex acquisition is reentrant when -Update invokes this script again.
+$hasher = [Security.Cryptography.SHA256]::Create()
+try { $lockKey = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($WorkerRoot.TrimEnd('\').ToUpperInvariant()))).Replace('-', '') }
+finally { $hasher.Dispose() }
+$deploymentMutex = New-Object Threading.Mutex($false, "Global\YahahaGame-Deploy-$lockKey")
+$lockHeld = $false
+try {
+  try { $lockHeld = $deploymentMutex.WaitOne(0) }
+  catch [Threading.AbandonedMutexException] { $lockHeld = $true }
+  if (-not $lockHeld) { throw 'Another deployment owns this worker runtime. Retry after it finishes.' }
+
 function Invoke-Git([string[]]$GitArgs) {
   $output = & git.exe -C $RepoRoot @GitArgs
   if ($LASTEXITCODE -ne 0) { throw "Git failed: git $($GitArgs -join ' ')" }
@@ -84,6 +96,7 @@ if ($Update) {
   # Merge retains local deployment commits. Conflicts remain visible for the operator.
   Invoke-Git @('merge', '--no-edit', $upstream) | Out-Host
   if ((Invoke-Git @('rev-parse', 'HEAD')) -ne $revision) {
+    if ($lockHeld) { $deploymentMutex.ReleaseMutex(); $lockHeld = $false }
     & (Join-Path $RepoRoot 'worker\deploy\deploy-worker.ps1') -RepoRoot $RepoRoot -WorkerRoot $WorkerRoot
     return
   }
@@ -112,3 +125,7 @@ if (-not $registered) { throw "Worker registration was not confirmed. Inspect $s
 $record = [ordered]@{ deployedAt = (Get-Date).ToString('o'); repository = $RepoRoot; remote = $remoteUrl; branch = $branch; commit = $revision; workerRoot = $WorkerRoot; workerId = $env:WORKER_ID; launcherPid = $process.Id; stdout = $stdout; stderr = $stderr }
 $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $WorkerRoot 'deployment.json') -Encoding UTF8
 Write-Host "Worker $($env:WORKER_ID) registered from Git commit $revision. Logs: $stdout"
+} finally {
+  if ($lockHeld) { $deploymentMutex.ReleaseMutex() }
+  $deploymentMutex.Dispose()
+}

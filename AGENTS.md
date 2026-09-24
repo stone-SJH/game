@@ -73,3 +73,19 @@ verification.
 When deploying, use the repository-owned Git deployment scripts and record the exact commit. Do
 not create or upload a tar release from a cloud role. Preserve active tasks, allocations, worker
 journals and artifacts unless the task explicitly authorizes a tested migration.
+
+## Worker autostart gate
+
+For subsequent worker changes and deployments, verify the installed Windows autostart
+task with `worker/deploy/register-worker-autostart.ps1 -CheckOnly` and inspect a fresh
+`worker/deploy/monitor-worker.ps1 -Once -Json` snapshot. Check the task action, account,
+boot/logon/retry triggers, last result, heartbeat and single worker process. Run
+`worker/tests/autostart.tests.ps1` when changing startup or deployment behavior.
+
+Before an intentional worker stop, create `runtime/config/autostart.paused` so the
+scheduled retry does not restart it during maintenance. Remove that marker after the
+committed deployment is ready, trigger `YahahaGame-Worker-Autostart`, and verify its
+status and registration. Never stop active work, clear an execution journal, enable
+Windows auto-login, or fetch/merge code merely to satisfy an autostart check. A missing
+user desktop is a distinct readiness limitation; report it rather than claiming an
+unattended cold-boot test passed. Keep machine credentials and task XML backups outside Git.
