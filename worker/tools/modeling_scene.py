@@ -2,6 +2,9 @@
 import hashlib
 import json
 import math
+import os
+import shutil
+import tempfile
 from pathlib import Path
 import bpy
 import bmesh
@@ -11,17 +14,41 @@ VIEWS = {'front': (0, -1, 0), 'side': (1, 0, 0), 'back': (0, 1, 0),
          'top': (0, 0, 1), 'perspective': (1, -1, .65), 'lower-oblique': (-1, -1, .18), 'other-side': (-1, 0, 0), 'bottom': (0, 0, -1)}
 
 
+def io_path(file):
+    """Use extended Windows paths for Python I/O under Blender's embedded runtime."""
+    value = os.path.abspath(os.fspath(file))
+    if os.name == 'nt' and not value.startswith('\\\\?\\'):
+        value = '\\\\?\\UNC\\' + value[2:] if value.startswith('\\\\') else '\\\\?\\' + value
+    return Path(value)
+
+
 def sha256(file):
     digest = hashlib.sha256()
-    with open(file, 'rb') as stream:
+    with io_path(file).open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
 
 
 def write_json(file, data):
-    Path(file).parent.mkdir(parents=True, exist_ok=True)
-    Path(file).write_text(json.dumps(data, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    target = io_path(file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+
+
+def render_image(file):
+    """Blender's image writer also has MAX_PATH limits; retain evidence at the requested path."""
+    target = Path(file)
+    io_path(target).parent.mkdir(parents=True, exist_ok=True)
+    if os.name == 'nt' and len(os.path.abspath(target)) >= 240:
+        with tempfile.TemporaryDirectory(prefix='modeling-render-') as temporary:
+            short_file = Path(temporary) / 'image.png'
+            bpy.context.scene.render.filepath = str(short_file)
+            bpy.ops.render.render(write_still=True)
+            shutil.copyfile(short_file, io_path(target))
+    else:
+        bpy.context.scene.render.filepath = str(target)
+        bpy.ops.render.render(write_still=True)
 
 
 def load_scene(file):
@@ -106,7 +133,7 @@ def inspect_scene(manifest=None):
 
 def render_views(directory, names, manifest=None, silhouette=False, size=512):
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    io_path(directory).mkdir(parents=True, exist_ok=True)
     objects = mesh_objects(manifest)
     points = bounds_of(objects)
     if not points:
@@ -166,8 +193,7 @@ def render_views(directory, names, manifest=None, silhouette=False, size=512):
         camera.location = center + direction.normalized() * extent * 4
         camera.rotation_euler = (center - camera.location).to_track_quat('-Z', 'Y').to_euler()
         file = directory / (name + ('-mask' if silhouette else '') + '.png')
-        scene.render.filepath = str(file)
-        bpy.ops.render.render(write_still=True)
+        render_image(file)
         result.append({'view': name, 'file': str(file), 'sha256': sha256(file),
                        'camera': {'location': list(camera.location), 'center': list(center), 'orthoScale': camera.data.ortho_scale}})
     return result

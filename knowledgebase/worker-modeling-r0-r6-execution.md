@@ -88,3 +88,12 @@ Blender 自带 Python 写报告触发 Windows 路径错误，两次失败后预�
 `modeling-batch-runner.mjs` 将 probe 脚本作为首个参数，日志写在任务目录外，启动前持久化 STARTED，
 每槽检查 Git SHA、源/配置哈希；未知子调用停止状态会阻断后续任务。两工具使用新的执行清单与报告目录，
 保留此前启动错误，不自动重放失败槽位。对照任务内部预算保持原值，外层 4 小时仅作失控 host 的看门狗。
+
+### 后续路径修复（不混入 `de4cf60` 批次）
+
+源预览错误由实际 261 字符报告路径触发。修复采用 Windows extended path 完成 Python 报告/哈希 I/O；
+Blender 图像保存另有长路径限制，长路径输出先写入短临时目录，再复制至原登记证据路径。
+短路径行为不变，不改系统注册表或接受门槛。`long-path-io-v1` 的 327 字符英文路径与 297 字符中文路径通过；
+完整源预览 `long-path-source-preview-v2/result.json` 在 309 字符路径下报告及四视图均通过。
+`long-path-source-preview-v1` 保留了只修 Python I/O 时遇到的 Blender 图像保存失败。
+这些是确定性工具验证，不增加 R6 建模样本。

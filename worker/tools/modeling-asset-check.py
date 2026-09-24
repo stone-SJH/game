@@ -11,7 +11,7 @@ import bpy
 import bmesh
 from mathutils import Vector
 sys.path.insert(0, str(Path(__file__).parent))
-from modeling_scene import load_scene
+from modeling_scene import load_scene, write_json, render_image
 
 
 def inspect_scene(spec):
@@ -99,8 +99,7 @@ def render_views(directory, bounds):
         camera.location = center + Vector(direction).normalized() * extent * 4
         camera.rotation_euler = (center - camera.location).to_track_quat('-Z', 'Y').to_euler()
         file = directory / f'{name}.png'
-        scene.render.filepath = str(file)
-        bpy.ops.render.render(write_still=True)
+        render_image(file)
         previews.append(str(file))
     return previews
 
@@ -118,14 +117,14 @@ def main():
         load_scene(candidate)
         stats, bounds = inspect_scene({'maxTriangles': 2000000, 'requireClosedMesh': False, 'requireRig': False})
         previews = render_views(Path(options.report).parent, bounds)
-        Path(options.report).write_text(json.dumps({'source': stats, 'previews': previews}, indent=2) + '\n', encoding='utf-8')
+        write_json(options.report, {'source': stats, 'previews': previews})
         return
     if not options.directory or not options.spec:
         parser.error('--directory and --spec are required for asset validation')
     directory = Path(options.directory).resolve()
     spec = json.loads(Path(options.spec).read_text(encoding='utf-8-sig'))
     if spec.get('contract'):
-        from modeling_scene import render_views as fixed_views, sha256, write_json
+        from modeling_scene import render_views as fixed_views, sha256
         from modeling_quality import check_scene
         from modeling_reference import compare
         manifest = json.loads((directory / 'asset-manifest.json').read_text(encoding='utf-8-sig'))
@@ -183,7 +182,7 @@ def main():
     previews = render_views(Path(options.report).parent, bounds)
     report = {'protocol': 1, 'assetId': spec['assetId'], 'passed': source['passed'] and exported['passed'],
               'source': source, 'export': exported, 'previews': previews, 'blenderVersion': bpy.app.version_string}
-    Path(options.report).write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    write_json(options.report, report)
 
 
 if __name__ == '__main__':
