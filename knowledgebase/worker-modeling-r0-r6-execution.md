@@ -122,3 +122,14 @@ Codex 首次启动任务目录时向全局配置追加项目 trust 表，使原�
 旧 worker 会拒绝 v3，避免错误解释分离结果。迁移仅在新代码正常调用时执行，不修改本轮冻结批次的证据。
 验证包括多份图片结果、哈希篡改拒绝、旧超限索引迁移及真实 Blender 暂停恢复；24 项针对性测试通过，
 实际 Blender 报告 `r6-result-storage-resume/resume-report.json` 通过。
+
+15:04 CST，新的受控 runner 继续原登记清单中未启动的 7 个槽，仍使用 `de4cf60`，输出沿用
+`candidate-retry2` 下各自未创建的目录。执行清单 `candidate-remaining-plan-v1.json`，日志/持久状态在
+`candidate-remaining-run-v1`。旧 runner 的 4 个终态加低模中断及这 7 槽共同构成原 12 槽，不把其中任一失败删除。
+后续 24 槽对照按 `comparison-execution-plan-v5.json` 排队，等待这 7 槽结束且无进程围栏后串行执行。
+三方 provider 仍明确关闭。路径与存储修复只在新工作树，尚未部署或替换冻结候选代码。
+
+全套后续 worker 单元测试 128/128 通过，日志 `r6-followup-worker-tests.log`。
+新增 probe 错误保留 STOP_UNCONFIRMED 类型及完整进程结果，避免今后丢失超时/退出/停止错误原因。
+复用第 1 槽独立几何对比 `r6-reuse-1-diff/report.json`：源/目标均 2,156 三角面，但几何哈希不同，
+材质发生变化；不能因面数相同称为保形改色复用。

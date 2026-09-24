@@ -65,7 +65,7 @@ for(let i=0;i<repeats;i++) {
   const step=async(name,command,args,timeoutMs,cwd,accepts,options={})=>{
       console.log(JSON.stringify({case:id,stage:name,state:'started'}));
       const result=await runCommand(command,args,{...options,cwd,timeoutMs,signal:abort.signal,stdoutFile:path.join(output,name+'.stdout.log'),stderrFile:path.join(output,name+'.stderr.log')});
-      if(!result.stopConfirmed)throw Object.assign(new Error('Unconfirmed process stop'),{stopConfirmed:false});
+      if(!result.stopConfirmed)throw Object.assign(new Error('Unconfirmed process stop'),{kind:'STOP_UNCONFIRMED',stopConfirmed:false,result});
       if(result.exitCode!==0||result.error||result.timedOut||result.canceled)throw Object.assign(new Error(`Benchmark step failed ${name}: ${result.timedOut?'shared attempt timeout':result.canceled?'canceled':result.error||`exit ${result.exitCode}`}; ${result.stderr.slice(-1200)}`),{result});
       return result;
     };
