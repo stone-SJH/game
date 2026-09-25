@@ -33,6 +33,7 @@ export async function retainedFinals(project) {
       }
       await collect(child);files.sort((a,b)=>a.path.localeCompare(b.path));
       assets.push({assetId:spec.assetId,spec,route:entry.name.replace(/-\d+$/,''),files,
+        modelDirectory:path.relative(project,child).replaceAll('\\','/'),
         evidenceSource:'retained-unaccepted',attempt:entry.name});
     }
   }
@@ -65,7 +66,10 @@ export async function recheckAccepted({benchmarkRoot,output,signal,stepOverride,
       for(const reference of [...spec.referenceImages,...(spec.contract?.referenceMatches||[]).map(match=>match.mask)])
         files.push(await localPath(project,reference,{existing:true}));
       const frozen=await fileEvidence([...new Set(files)]);
-      const directory=path.dirname(await localPath(project,asset.files.find(f=>f.path.endsWith('/source.blend')).path,{existing:true}));
+      // Retained manifests freeze nested blockouts too; their sorted source.blend is not the final.
+      const sourcePath=asset.modelDirectory?`${asset.modelDirectory}/source.blend`:asset.files.find(f=>f.path.endsWith('/source.blend'))?.path;
+      if(!sourcePath||!asset.files.some(file=>file.path===sourcePath))throw new Error('Final source is absent from the frozen manifest');
+      const directory=path.dirname(await localPath(project,sourcePath,{existing:true}));
       const specFile=path.join(target,'spec.json');await atomicJson(specFile,spec);await atomicJson(path.join(target,'rubric.json'),visualRubric(spec));
       const execution=createExecutionStore(path.join(target,'execution'),{signal});
       const step=stepOverride||async function(name,command,args,timeoutMs,cwd,accepts,options={}) {

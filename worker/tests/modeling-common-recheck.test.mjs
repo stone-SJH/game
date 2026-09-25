@@ -76,3 +76,22 @@ test('common recheck retains reference and runtime dependency quality gaps witho
   assert.deepEqual(row.gaps.map(g=>g.id),['uv','referenceMatch','runtimeDependency']);assert.equal(row.gaps[0].component,'source');
   assert.equal(row.gaps[1].iou,0.2);assert.equal(row.gaps[2].name,'paint.png');assert.equal(row.inputFilesUnchanged,true);
 });
+
+test('retained final with a complete nested blockout checks the final FBX and preserves both inputs',async t=>{
+  const options=await failedFinal(t,defaultContract({runtime:{...defaultContract().runtime,engine:'unreal',profile:'fbx-static'}}));
+  await fs.writeFile(path.join(options.directory,'model.fbx'),'final FBX');
+  const blockout=path.join(options.directory,'blockout');await fs.mkdir(blockout);
+  for(const name of ['source.blend','model.glb','asset-manifest.json'])await fs.writeFile(path.join(blockout,name),'blockout '+name);
+  const project=path.join(options.benchmarkRoot,'fixture-1/project'),assets=await retainedFinals(project);
+  assert.equal(assets.length,1);assert.equal(assets[0].modelDirectory,'art/models/fixture/frozen/blender_direct-1');
+  assert.equal(assets[0].files.length,7);assert.ok(assets[0].files.find(file=>file.path.endsWith('/source.blend')).path.includes('/blockout/'));
+  let calls=0;
+  const report=await recheckAccepted({...options,stepOverride:async(name,command,args)=>{
+    calls++;assert.equal(args[args.indexOf('--directory')+1],options.directory);
+    await atomicJson(args[args.indexOf('--report')+1],{assetId:'fixture',passed:false,
+      sourceHash:await hashFile(path.join(options.directory,'source.blend')),exportHash:await hashFile(path.join(options.directory,'model.glb')),
+      source:{gates:[{id:'fixtureGap',status:'GAP'}]},export:{gates:[]}});
+  },evaluate:()=>assert.fail('Technical GAP must not invoke a reviewer')});
+  assert.equal(calls,1);assert.equal(report.rows[0].status,'TECHNICAL_GAP');assert.equal(report.rows[0].onlinePassed,false);
+  assert.equal(report.rows[0].inputFilesUnchanged,true);assert.equal(report.rows[0].gaps[0].id,'fixtureGap');
+});
