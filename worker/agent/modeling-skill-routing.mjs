@@ -45,7 +45,7 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
   }
   const plan = { protocol: 2, lockHash, selected, repairDimensions, resources,
     entrypoints: selected.map(name => `${root}/${name}/SKILL.md`),
-    helperDirectories: selected.filter(name => name === 'yahaha-blender-lowpoly').map(name => `${root}/${name}/scripts`),
+    helperDirectories: selected.filter(name => ['yahaha-blender-modeling', 'yahaha-blender-lowpoly'].includes(name)).map(name => `${root}/${name}/scripts`),
     stages: ['blockout', 'final'], upstreamLockHash: hashValue(upstream) };
   await atomicJson(await localPath(project, `${root}/skill-plan.json`), plan);
   return plan;
@@ -65,4 +65,15 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
   if (hashValue(await readJson(file)) !== hashValue(toolchain)) {
     throw Object.assign(new Error('Active modeling task toolchain changed. Restore its pinned release or stop with evidence; budgets cannot restart under another toolchain.'), { hardFailure: true });
   }
+}
+
+export async function modelingToolHashes() {
+  const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
+    'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs'];
+  for (const directory of ['agent', 'tools']) {
+    for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {
+      if (/^modeling[-_].*\.(mjs|py)$/.test(entry)) files.push(`${directory}/${entry}`);
+    }
+  }
+  return Promise.all(files.sort().map(async file => ({ file, sha256: await hashFile(path.join(repositoryRoot, 'worker', file)) })));
 }

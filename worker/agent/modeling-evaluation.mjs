@@ -1,5 +1,5 @@
 import { monitorInvocationArgs } from './iteration-monitor.mjs';
-import { contractSchema, validateContractSemantics } from './modeling-contract.mjs';
+import { contractSchema, generatedContractSchema, validateContractSemantics } from './modeling-contract.mjs';
 
 const string = { type: 'string', minLength: 1, maxLength: 3000 };
 const strings = { type: 'array', maxItems: 30, items: string };
@@ -18,7 +18,7 @@ export const modelingPlanSchema = object({
   reason: string, assets: { type: 'array', maxItems: 30, items: assetSpecSchema },
 });
 export const modelingPlanV2Schema = object({ reason: string, assets: { type: 'array', maxItems: 30,
-  items: object({ ...assetSpecSchema.properties, contract: contractSchema }) } });
+  items: object({ ...assetSpecSchema.properties, contract: generatedContractSchema }) } });
 const prediction = object({ criterion: string, achievable: { type: 'boolean' }, evidence: string });
 const predictions = { type: 'array', minItems: 1, maxItems: 30, items: prediction };
 export const modelingDecisionSchema = object({
@@ -38,12 +38,13 @@ export const visualReviewSchema = object({
   smallEditsOnly: { type: 'boolean' }, repairInstructions: { type: 'string', maxLength: 4000 },
 });
 
-export function visualSchemaFor(spec) {
+export function visualSchemaFor(spec, evidence) {
+  const views = evidence ? { views: { type: 'array', maxItems: evidence.length, items: { type: 'string', enum: evidence.map(row => row.id) } } } : {};
   return { ...visualReviewSchema, properties: { ...visualReviewSchema.properties,
     criteria: { ...visualReviewSchema.properties.criteria, minItems: spec.requirements.length, maxItems: spec.requirements.length,
       items: { ...visualReviewSchema.properties.criteria.items, properties: {
-        ...visualReviewSchema.properties.criteria.items.properties, criterion: { type: 'string', enum: spec.requirements },
-      } } },
+        ...visualReviewSchema.properties.criteria.items.properties, ...views, criterion: { type: 'string', enum: spec.requirements },
+      }, required: [...visualReviewSchema.properties.criteria.items.required, ...Object.keys(views)] } },
   } };
 }
 
@@ -68,10 +69,13 @@ export function validateSchema(value, schema, field = 'response') {
   }
   if (schema.type === 'null') { if (value !== null) throw new Error(`Invalid ${field} null.`); return value; }
   if (schema.type === 'object') {
-    if (!value || Array.isArray(value) || typeof value !== 'object' || Object.keys(value).some(key => !Object.hasOwn(schema.properties, key)) || schema.required.some(key => !Object.hasOwn(value, key))) throw new Error(`Invalid ${field} object.`);
-    for (const [key, child] of Object.entries(schema.properties)) validateSchema(value[key], child, `${field}.${key}`);
+    if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`Invalid ${field}: expected an object.`);
+    const unexpected = Object.keys(value).filter(key => !Object.hasOwn(schema.properties, key));
+    const missing = (schema.required || []).filter(key => !Object.hasOwn(value, key));
+    if (unexpected.length || missing.length) throw new Error(`Invalid ${field} object: missing keys [${missing.join(', ')}]; unexpected keys [${unexpected.join(', ')}].`);
+    for (const [key, child] of Object.entries(schema.properties)) if (Object.hasOwn(value, key)) validateSchema(value[key], child, `${field}.${key}`);
   } else if (schema.type === 'array') {
-    if (!Array.isArray(value) || value.length < (schema.minItems || 0) || value.length > (schema.maxItems ?? Infinity)) throw new Error(`Invalid ${field} array.`);
+    if (!Array.isArray(value) || value.length < (schema.minItems || 0) || value.length > (schema.maxItems ?? Infinity)) throw new Error(`Invalid ${field}: expected an array with ${schema.minItems || 0}..${schema.maxItems ?? 'unbounded'} items.`);
     value.forEach((item, index) => validateSchema(item, schema.items, `${field}[${index}]`));
   } else {
     const valid = schema.type === 'integer' ? Number.isSafeInteger(value) : typeof value === schema.type;
@@ -117,9 +121,11 @@ export function selectModelingRoute(advice, { spec, candidates, providerEnabled,
   return { route: 'blender_direct', editPlan: advice.direct.plan, reason: advice.rationale };
 }
 
-export function reviewPasses(review, spec) {
-  validateSchema(review, visualReviewSchema);
+export function reviewPasses(review, spec, evidence) {
+  validateSchema(review, evidence ? visualSchemaFor(spec, evidence) : visualReviewSchema);
   if (review.criteria.length !== spec.requirements.length || new Set(review.criteria.map(item => item.criterion)).size !== spec.requirements.length || review.criteria.some(item => !spec.requirements.includes(item.criterion))) throw new Error('Visual review must cover every original requirement.');
+  if (evidence && review.criteria.some(item => new Set(item.views).size !== item.views.length ||
+      (item.status === 'PASS' && !item.views.some(id => evidence.some(row => row.id === id && row.role === 'target'))))) throw new Error('Each PASS must cite visible target evidence; duplicate or unknown image IDs are invalid.');
   return review.criteria.every(item => item.status === 'PASS');
 }
 

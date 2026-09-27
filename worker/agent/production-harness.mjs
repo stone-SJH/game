@@ -462,7 +462,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       const deliverables = await inspectProduction(project);
       if (deliverables.missing.length) throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}.`);
       stage = 'modeling-unreal-validation';
-      await validateUnrealModels({ summary: modelingResults, project, output, unreal, projectFile: deliverables.files.projectFile, step, signal, invocation, attempt });
+      await validateUnrealModels({ summary: modelingResults, project, output, unreal, projectFile: deliverables.files.projectFile, step, signal, invocation, attempt, job });
       stage = 'unreal-project-validation';
       try {
         await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
@@ -534,7 +534,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
         acceptanceFailure: error.acceptanceFailure, qualityFailure: error.qualityFailure,
       });
-      if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || error.reviewed) throw error;
+      if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || error.reviewed || (error.kind && error.hardFailure)) throw error;
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });
       if (feedback.action === 'stop') throw new Error(`Iteration monitor stopped at iteration ${attempt}: ${feedback.reason}`);
       const waitMs = feedback.category === 'service' ? Math.min(300000, retryDelayMs * 2 ** Math.min(feedback.occurrences - 1, 5)) : retryDelayMs;

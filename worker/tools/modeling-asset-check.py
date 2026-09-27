@@ -11,6 +11,7 @@ import bpy
 import bmesh
 from mathutils import Vector
 sys.path.insert(0, str(Path(__file__).parent))
+from modeling_scene import load_scene, write_json, render_image
 
 
 def inspect_scene(spec):
@@ -98,8 +99,7 @@ def render_views(directory, bounds):
         camera.location = center + Vector(direction).normalized() * extent * 4
         camera.rotation_euler = (center - camera.location).to_track_quat('-Z', 'Y').to_euler()
         file = directory / f'{name}.png'
-        scene.render.filepath = str(file)
-        bpy.ops.render.render(write_still=True)
+        render_image(file)
         previews.append(str(file))
     return previews
 
@@ -114,25 +114,17 @@ def main():
     options = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
     if options.candidate:
         candidate = Path(options.candidate).resolve()
-        bpy.ops.wm.read_factory_settings(use_empty=True)
-        if candidate.suffix.lower() == '.blend':
-            bpy.ops.wm.open_mainfile(filepath=str(candidate), load_ui=False, use_scripts=False)
-        elif candidate.suffix.lower() == '.glb':
-            bpy.ops.import_scene.gltf(filepath=str(candidate))
-        elif candidate.suffix.lower() == '.fbx':
-            bpy.ops.import_scene.fbx(filepath=str(candidate))
-        else:
-            raise ValueError('Unsupported candidate format')
+        load_scene(candidate)
         stats, bounds = inspect_scene({'maxTriangles': 2000000, 'requireClosedMesh': False, 'requireRig': False})
         previews = render_views(Path(options.report).parent, bounds)
-        Path(options.report).write_text(json.dumps({'source': stats, 'previews': previews}, indent=2) + '\n', encoding='utf-8')
+        write_json(options.report, {'source': stats, 'previews': previews})
         return
     if not options.directory or not options.spec:
         parser.error('--directory and --spec are required for asset validation')
     directory = Path(options.directory).resolve()
     spec = json.loads(Path(options.spec).read_text(encoding='utf-8-sig'))
     if spec.get('contract'):
-        from modeling_scene import load_scene, render_views as fixed_views, sha256, write_json
+        from modeling_scene import render_views as fixed_views, sha256
         from modeling_quality import check_scene
         from modeling_reference import compare
         manifest = json.loads((directory / 'asset-manifest.json').read_text(encoding='utf-8-sig'))
@@ -140,7 +132,7 @@ def main():
         source = check_scene(spec, manifest)
         load_scene(directory / 'model.glb')
         exported = check_scene(spec, manifest, exported=True)
-        view_names = ['front','side','back','top','perspective'] + (['other-side','bottom'] if spec['contract']['asymmetric'] else [])
+        view_names = ['front','side','back','top','perspective'] + (['lower-oblique'] if spec['contract']['assetClass'] == 'organic-static' else []) + (['other-side','bottom'] if spec['contract']['asymmetric'] else [])
         views = fixed_views(Path(options.report).parent, view_names)
         motion_views = []
         if spec['contract']['runtime']['animations'] and exported['passed']:
@@ -182,16 +174,15 @@ def main():
             'sourceHash':sha256(directory/'source.blend'),'exportHash':sha256(directory/'model.glb'),
             'blenderVersion':bpy.app.version_string})
         return
-    bpy.ops.wm.open_mainfile(filepath=str(directory / 'source.blend'), load_ui=False, use_scripts=False)
+    load_scene(directory / 'source.blend')
     source, _ = inspect_scene(spec)
     # Inspect the actual runtime interchange file too, not only the editable source.
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.gltf(filepath=str(directory / 'model.glb'))
+    load_scene(directory / 'model.glb')
     exported, bounds = inspect_scene(spec)
     previews = render_views(Path(options.report).parent, bounds)
     report = {'protocol': 1, 'assetId': spec['assetId'], 'passed': source['passed'] and exported['passed'],
               'source': source, 'export': exported, 'previews': previews, 'blenderVersion': bpy.app.version_string}
-    Path(options.report).write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    write_json(options.report, report)
 
 
 if __name__ == '__main__':
