@@ -81,8 +81,22 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           `Objective: ${job.objective}`, `Explicit quality: ${JSON.stringify(job.qualityCriteria || job.payload?.qualityCriteria || [])}`,
           `Existing registered candidates: ${JSON.stringify(candidates)}`,
         ].join('\n');
-        try { result = await reviewer('modeling-plan', v2Enabled ? modelingPlanV2Schema : modelingPlanSchema, intakePrompt, [], { maxCalls: 2, validate: validateSpecs }); }
-        catch (error) { throwIfStopped(error, signal); if (error.kind !== 'VALIDATION_INFRASTRUCTURE_EXHAUSTED') throw error; }
+        try {
+          result = await reviewer('modeling-plan', v2Enabled ? modelingPlanV2Schema : modelingPlanSchema, intakePrompt, [],
+            { maxCalls: 2, timeoutMs: setting('MODELING_INTAKE_TIMEOUT_MS', 1200000, 1, 1800000), validate: validateSpecs });
+        } catch (error) {
+          throwIfStopped(error, signal);
+          if (error.kind !== 'VALIDATION_INFRASTRUCTURE_EXHAUSTED') throw error;
+          if (v2Enabled) {
+            const lastFailure = error.lastFailure;
+            throw modelingFailure(error.kind, [
+              'V2 modeling intake unavailable; cannot discard technical requirements.',
+              `Last failure: ${lastFailure?.kind || error.kind}.`,
+              `Execution evidence: ${error.executionFile}.`,
+              lastFailure?.message || error.message,
+            ].join(' '), { cause: error, executionFile: error.executionFile, lastFailure });
+          }
+        }
         if (!result && v2Enabled) throw Object.assign(new Error('V2 modeling intake unavailable; cannot discard technical requirements.'), { hardFailure: true });
         if (!result) result = { reason: 'Intake unavailable; preserve the objective as one conservative Blender specification for refinement.', assets: [{
           assetId: 'requested-model', description: String(job.objective).slice(0, 3000), prompt: String(job.objective).slice(0, 1024),

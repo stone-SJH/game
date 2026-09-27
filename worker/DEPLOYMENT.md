@@ -181,7 +181,8 @@ expired leases, local storage failures and uncertain process shutdown still stop
 | `MODELING_ROUTING_ENABLED` | `1` | Set to `0` for the previous production workflow. |
 | `MODELING_HARNESS_V2_ENABLED` | `0` | Opt in new tasks to pinned skills, blockout feedback and DCC/Unreal gates. Explicit v2 specs also opt in. |
 | `MODELING_AGENT_MODEL` | inherited | Optional model for evaluation, authoring and visual review. |
-| `MODELING_EVALUATION_TIMEOUT_MS` | `120000` | Budget per restricted agent call. |
+| `MODELING_EVALUATION_TIMEOUT_MS` | `120000` | Budget per route evaluation or visual review call. |
+| `MODELING_INTAKE_TIMEOUT_MS` | `1200000` | Budget per multi-asset intake call (20 minutes; 1–1800000 ms); at most two calls, also capped by the task deadline. |
 | `MODELING_BUILD_TIMEOUT_MS` | `1800000` | Budget per direct/reuse authoring attempt. |
 | `MODELING_CLEANUP_TIMEOUT_MS` | `300000` | Budget per generated-model cleanup attempt. |
 | `TRIPO_MODEL` | `v3.1-20260211` | Pinned generation model. |
@@ -201,6 +202,13 @@ checks do not replace engine validation or a rig/animation deformation test.
 Reports are saved under `plan/modeling/` and `stages/asset-production-and-import/models/`, with
 host resumable state in the workspace's sibling `modeling-state/` directory and run reports in
 `runs/<runId>/`. Preserve these directories when continuing a task.
+
+Intake can require substantially more output than a single-asset review. It uses its own
+timeout while keeping the original V2 schema and technical checks. A failed V2 intake remains
+a hard stop; the error includes its last failure kind and the retained `execution.json` path.
+Changing the intake timeout does not reset an existing stage's durable budget: replay with
+changed limits is rejected. Start a new task for a changed budget; do not delete the failed
+task's journal, execution state, or artifacts.
 
 Run `npm run test:worker` and `powershell.exe -NoProfile -ExecutionPolicy Bypass -File worker/tests/deployment.tests.ps1`.
 The isolated real-tool probe is:
