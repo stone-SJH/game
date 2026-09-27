@@ -156,6 +156,7 @@ def main():
             matches.append({'image':match['image'],'mask':match['mask'],'maskHash':sha256(reference),
                             **compare(reference,rendered,match['minIoU'],match['maxAspectError'])})
         dependencies, dependency_errors = [], []
+        fbx_evidence = None
         if spec['contract']['runtime']['profile'].startswith('fbx'):
             load_scene(directory/'model.fbx')
             workspace = Path(options.workspace or directory).resolve()
@@ -167,9 +168,12 @@ def main():
                     dependency_errors.append(im.name)
                 else:
                     dependencies.append({'file':str(file),'sha256':sha256(file)})
+            from modeling_export_evidence import inspect_fbx
+            fbx_evidence = inspect_fbx(spec, manifest, Path(options.report).parent/'fbx')
         write_json(options.report, {'protocol':2,'assetId':spec['assetId'],
-            'passed':source['passed'] and exported['passed'] and not dependency_errors and all(m['status']=='PASS' for m in matches),
+            'passed':source['passed'] and exported['passed'] and not dependency_errors and all(m['status']=='PASS' for m in matches) and (fbx_evidence is None or fbx_evidence['passed']),
             'source':source,'export':exported,'views':views,'motionViews':motion_views,'referenceMatches':matches,
+            'fbx':fbx_evidence, 'lodViews':fbx_evidence['views'] if fbx_evidence else [],
             'runtimeDependencies':dependencies,'missingRuntimeDependencies':dependency_errors,
             'sourceHash':sha256(directory/'source.blend'),'exportHash':sha256(directory/'model.glb'),
             'blenderVersion':bpy.app.version_string})

@@ -7,9 +7,10 @@ import { createModelingReviewer } from './modeling-review.mjs';
 import { visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
 import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
 import { pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
+import { assetQuality } from './iteration-quality.mjs';
 
-export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, job = {}, evaluate }) {
-  const assets = summary?.assets?.filter(a => a.contract?.runtime.engine === 'unreal') || [];
+export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, job = {}, evaluate, allowProvisional = false }) {
+  const assets = summary?.assets?.filter(a => a.usable !== false && a.contract?.runtime.engine === 'unreal') || [];
   if (!assets.length) return { status: 'NOT_APPLICABLE', assets: [] };
   const entries = await readJson(await localPath(project, 'plan/modeling-engine-imports.json'));
   if (entries?.protocol !== 2 || !Array.isArray(entries.assets)) throw new Error('Missing v2 modeling engine import mapping.');
@@ -68,23 +69,29 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
   signal.throwIfAborted();
   if (!report.passed) throw Object.assign(new Error(`Unreal modeling gates failed: ${JSON.stringify(report.assets).slice(0,5000)}`), { kind: 'TECHNICAL_GAP' });
   const review = createModelingReviewer({ execution, project, output, signal, step, invocation, evaluate });
+  const qualities = [];
   for (const asset of assets) {
     const row=report.assets.find(r=>r.assetId===asset.assetId && r.requirementsHash===asset.requirementsHash);
     if (!row?.passed || !row.views?.length) throw new Error('Missing current engine asset evidence.');
     const images=[];
+    for (const file of asset.spec.referenceImages || []) images.push(await localPath(project, file, { existing: true }));
     for (const view of row.views) {
       const file=await localPath(directory,path.relative(directory,view.file),{existing:true});
       if (await hashFile(file)!==view.sha256 || (await fs.stat(file)).size>10*1024*1024) throw new Error('Invalid UE screenshot evidence.');
       images.push(file);
     }
-    const visual = visualEvidence(images);
+    const visual = visualEvidence(images, asset.spec.referenceImages?.length || 0);
     const prompt = visualReviewPrompt({ spec: asset.spec, evidence: visual, metrics: row, phase: 'unreal-capture' });
     const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
       key: `engine-visual:${evidenceKey}:${asset.assetId}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) });
     await atomicJson(path.join(directory,`${asset.assetId}-visual.json`), result);
-    if (!reviewPasses(result,asset.spec,visual)) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
+    const passed = reviewPasses(result,asset.spec,visual);
+    qualities.push({ assetId: asset.assetId, ...assetQuality(result, passed), reportFile: path.join(directory,`${asset.assetId}-visual.json`) });
+    if (!passed && !allowProvisional) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
   }
-  const result={protocol:2,status:'ENGINE_READY',reportFile,assets:assets.map(a=>({assetId:a.assetId,requirementsHash:a.requirementsHash,status:'ENGINE_READY'}))};
+  const result={protocol:2,status:qualities.every(row => row.accepted) ? 'ENGINE_READY' : 'ENGINE_PROVISIONAL',reportFile,
+    score: Math.round(qualities.reduce((n, row) => n + row.score, 0) / qualities.length),
+    assets:assets.map(a=>({assetId:a.assetId,requirementsHash:a.requirementsHash,status:qualities.find(row => row.assetId === a.assetId).accepted ? 'ENGINE_READY' : 'ENGINE_PROVISIONAL', quality:qualities.find(row => row.assetId === a.assetId)}))};
   await verifyEvidence(evidence);
   await atomicJson(path.join(directory,'engine-ready.json'),result);
   return result;

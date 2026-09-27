@@ -47,7 +47,8 @@ test('failure classification distinguishes Help probe, service outage and cleanu
     assert.equal(classifyIterationFailure(error, 'unreal-project-validation').action, commandlet === 'Help' ? 'replace-validator' : 'stop');
   }
   assert.equal(classifyIterationFailure(failed('usage', { exitCode: 2 }), 'production-orchestrator').action, 'stop');
-  assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true }), 'production-orchestrator').action, 'stop');
+  assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true }), 'production-orchestrator').action, 'retry');
+  assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true, stopConfirmed: false }), 'production-orchestrator').action, 'stop');
 });
 
 test('acceptance failures preserve the failing criteria for bounded repair', async t => {
@@ -272,7 +273,7 @@ test('known invalid Help validation is replaced once on existing deliverables, r
   };
   await runProductionHarness({ ...f, onIterationReview: f.onReview });
   assert.deepEqual(steps, ['production-orchestrator-1', 'unreal-project-validation-1', 'unreal-project-validation-repair-1', 'packaged-game-playtest-1']);
-  assert.deepEqual(f.reviews.map(value => value.record.action), ['replace-validator', 'complete', 'skip']);
+  assert.deepEqual(f.reviews.filter(value => value.record.kind !== 'iteration-delivery').map(value => value.record.action), ['replace-validator', 'skip']);
   const failure = { ...f, step: async (...args) => {
     const result = await f.step(...args);
     if (args[0] === 'packaged-game-playtest-1') {
@@ -282,7 +283,9 @@ test('known invalid Help validation is replaced once on existing deliverables, r
     return result;
   } };
   process.env.CODEX_MAX_ATTEMPTS = '1';
-  await assert.rejects(runProductionHarness(failure), /Acceptance report does not prove/);
+  const resumed = await runProductionHarness(failure);
+  assert.equal(resumed.qualityAccepted, true);
+  assert.equal(steps.filter(name => name.startsWith('production-orchestrator')).length, 1);
 });
 
 test('unavailable LoadPackage stops immediately instead of regenerating the game', async t => {
@@ -293,7 +296,7 @@ test('unavailable LoadPackage stops immediately instead of regenerating the game
     if (name.startsWith('unreal-project-validation')) throw failed('Validation failed', { stdout: 'LoadPackageCommandlet looked like a commandlet, but we could not find the class.' });
     return success();
   };
-  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at iteration 1/);
+  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at execution attempt 1/);
   assert.equal(iterations, 1);
 });
 
@@ -304,7 +307,7 @@ test('harness passes failure diagnosis to the next production prompt and stops r
     if (args[0].startsWith('production-orchestrator')) prompts.push(args[6].input);
     return originalStep(...args);
   };
-  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at iteration 3/);
+  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at execution attempt 3/);
   assert.equal(prompts.length, 3);
   assert.match(prompts[1], /Production deliverables missing/);
   assert.match(prompts[2], /Restore the existing default map reference/);

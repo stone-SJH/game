@@ -90,14 +90,13 @@ test('playable checkpoint is published before a later acceptance failure', async
     }
     return { exitCode: 0, timedOut: false, error: null, stderr: '', stdout: '', stopConfirmed: true };
   };
-  await assert.rejects(runProductionHarness({
+  const delivered = await runProductionHarness({
     job: { taskId: 'task', runId: 'run', workspaceId: 'workspace', objective: 'fixture' }, project, output,
     signal: new AbortController().signal, step, unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {},
     onIterationPackage: async value => checkpoints.push(value),
-  }), error => {
-    assert.match(error.message, /Failed criteria: near-aaa-visual-fidelity:FAIL/);
-    return true;
   });
+  assert.equal(delivered.qualityAccepted, false);
+  assert.ok(delivered.delivery.issues.some(issue => /near-aaa-visual-fidelity:FAIL/.test(issue.reason)));
   assert.equal(checkpoints.length, 1);
   assert.equal(checkpoints[0].attempt, 1);
   assert.equal(checkpoints[0].packageFile, packageFile);
@@ -238,7 +237,7 @@ test('service failures with cleanup warnings use bounded retries and publish the
   const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
   const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
   assert.equal(result.status, 'FAIL');
-  assert.match(result.reason, /Iteration monitor stopped at iteration 3/);
+  assert.match(result.reason, /Iteration monitor stopped at execution attempt 3/);
   assert.match(result.reason, /503 Service Unavailable/);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 3);

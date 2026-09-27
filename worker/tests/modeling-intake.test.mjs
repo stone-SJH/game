@@ -70,7 +70,7 @@ test('intake timeout can be configured independently and is capped by the task d
   assert.equal(group.deadlineAt, Date.parse(f.options.job.deadlineAt));
 });
 
-test('ordinary reviews keep their two-minute timeout', async t => {
+test('ordinary reviews allow the default twenty-minute timeout', async t => {
   const f = await fixture(t);
   const review = createModelingReviewer({ ...f.options, execution: createExecutionStore(f.state),
     step: async (name, command, args, timeoutMs) => {
@@ -79,7 +79,7 @@ test('ordinary reviews keep their two-minute timeout', async t => {
     } });
   await review({ name: 'modeling-visual', prompt: 'Review the supplied evidence.',
     schema: { type: 'object', additionalProperties: false, properties: { passed: { type: 'boolean' } }, required: ['passed'] } });
-  assert.ok(f.calls[0].timeoutMs > 119000 && f.calls[0].timeoutMs <= 120000);
+  assert.ok(f.calls[0].timeoutMs > 1199000 && f.calls[0].timeoutMs <= 1200000);
 });
 
 test('exhausted intake retains timeout diagnostics, stops the monitor and cannot reset on resume', async t => {

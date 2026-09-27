@@ -6,10 +6,11 @@ import { executionPolicy, fileEvidence, modelingFailure, verifyEvidence } from '
 // A valid GAP is a completed review, not a reason to sample another answer.
 export function createModelingReviewer({ execution, project, output, signal, step, invocation, evaluate, onRepair = async () => {} }) {
   const policy = executionPolicy(invocation);
-  return async function review({ name, schema, prompt, images = [], referenceFiles = [], research = false, validate = value => value,
-    normalize = value => ({ value, repairs: [] }), maxCalls = 3, identity = {}, key, timeoutMs = policy.reviewMs }) {
+  return async function review({ name, schema, prompt, images = [], referenceFiles = [], research = false, researchOutput = false, validate = value => value,
+    normalize = value => ({ value, repairs: [] }), maxCalls = policy.reviewCalls, identity = {}, key, timeoutMs = policy.reviewMs }) {
     const evidence = await fileEvidence([...images, ...referenceFiles]);
-    const input = { schema, prompt, images, policy, ...(research ? { research: true } : {}) };
+    if (researchOutput && !research) throw new Error('Only reference research may request workspace output.');
+    const input = { schema, prompt, images, policy, ...(research ? { research: true, researchOutput } : {}) };
     return execution.run({ key: key || `${name}:${hashValue({ input, evidence })}`, stage: 'REVIEW', identity: { name, ...identity }, input,
       // These are generated agent handoffs. Incomplete engineering output gets the same
       // bounded internal repair; explicit user specifications are validated outside reviews.
@@ -44,6 +45,10 @@ export function createModelingReviewer({ execution, project, output, signal, ste
           const args = modelingInvocationArgs(invocation, project, schemaFile, responseFile, images);
           if (research) args.splice(args.length - 1, 0, '-c', 'web_search="live"',
             '-c', 'features.shell_tool=true', '-c', 'features.unified_exec=true', '-c', 'features.code_mode_host=true');
+          if (researchOutput) {
+            args[args.indexOf('--sandbox') + 1] = 'workspace-write';
+            args.splice(args.length - 1, 0, '-c', 'sandbox_workspace_write.network_access=true');
+          }
           if (process.env.MODELING_AGENT_MODEL) args.splice(args.length - 1, 0, '--model', process.env.MODELING_AGENT_MODEL);
           await step(tag, invocation.command, args, timeoutMs, project, undefined, { input: effectivePrompt, env: agentEnvironment() });
         }
@@ -56,7 +61,7 @@ export function createModelingReviewer({ execution, project, output, signal, ste
         const value = normalized.value;
         repairs = normalized.repairs;
         validateSchema(value, schema);
-        validate(value, { previousValue });
+        await validate(value, { previousValue });
         await atomicJson(path.join(output, `${tag}-validation.json`), { status: 'PASS', responseEvidence, repairs });
         if (repairs.length) await atomicJson(path.join(output, `${tag}-normalized.json`), value);
         return value;

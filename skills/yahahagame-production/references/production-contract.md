@@ -74,6 +74,29 @@ used as current evidence.
 
 No report, screenshot, process exit code, or model statement alone is sufficient.
 
+## Provisional iteration delivery
+
+The acceptance rules above describe a fully accepted result. They do not prohibit delivering
+an imperfect iteration. When a stage has usable output but retains visual or evidence gaps,
+write `PROVISIONAL` in its stage report/manifest and `GAP` for the unpassed checks. Continue
+the other stages, package and launch the game, and report the actual criteria without claiming
+acceptance. A provisional acceptance report uses `status:"PROVISIONAL"`, `passed:false`, and
+honest `PASS`/`GAP` component statuses and criteria.
+
+The host preserves each launchable package with its dependencies, preview, reports, score and
+repair instructions. Its overall score is the lowest of criterion coverage, applicable quality
+dimension coverage, mean asset score, and mean observed stage score (all on 0–100). A score is
+observed coverage, not a claim that missing evidence passed. Default target: 85. Unresolved
+technical/report issues still require another round even if the score reaches that target.
+Default maximum: ten additional complete iterations. At the limit, deliver the best retained
+playable round with `qualityAccepted:false` and its actual gaps instead of failing the task.
+
+Modeling retains its local retry limits per whole production round. A new round repairs the
+previous best source and reconsiders available generation strategies; passing assets are
+reused. Review/service errors are recorded as unverified quality, not fabricated visual GAP
+measurements. Budgets and completed rounds survive resume. Cancellation, process-stop
+uncertainty and modified frozen evidence still fence execution.
+
 ## Controller/API additions
 
 The current task API needs these authenticated routes:

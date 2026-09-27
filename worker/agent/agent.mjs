@@ -272,6 +272,8 @@ export async function executeJob(job, ctx) {
           review.dimensions = Object.fromEntries(Object.entries(record.dimensions || {}).map(([name, item]) => [name, item.status]));
         }
         iterationReviews.push(review);
+        if (record.kind === 'iteration-delivery') Object.assign(review, { score: record.score, threshold: record.threshold,
+          qualityAccepted: record.qualityAccepted, status: record.status, issues: record.issues });
         try {
           review.artifactId = await uploadFile(path.basename(file), file, 'application/json', { timeoutMs: 10000 });
           artifactIds.push(review.artifactId);
@@ -303,18 +305,24 @@ export async function executeJob(job, ctx) {
     clearInterval(snapshotTimer);
     await publishing;
   }
-  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective });
+  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective,
+    ...(production?.delivery ? { step: `Delivered iteration ${production.delivery.iteration}: ${production.delivery.score}/100 (target ${production.delivery.threshold})` } : {}) });
   const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
     deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null,
-    playablePackages, iterationReviews };
+    playablePackages, iterationReviews, qualityAccepted: production?.qualityAccepted ?? false, delivery: production?.delivery || null };
   const reportName = 'production-report.json';
   const file = path.join(output, reportName);
   await atomicJson(file, report);
   artifactIds.push(await uploadFile(reportName, file, 'application/json'));
   // Full tool output lives in the streamed report artifact, not the bounded control request.
   const summary = { protocol: 2, production: true, passed: report.passed, failure, deliverables: report.deliverables,
+    qualityAccepted: report.qualityAccepted, delivery: report.delivery ? {
+      iteration: report.delivery.iteration, status: report.delivery.status, score: report.delivery.score,
+      threshold: report.delivery.threshold, qualityAccepted: report.delivery.qualityAccepted,
+      stoppedReason: report.delivery.stoppedReason,
+    } : null,
     steps: logs.map(({ name, passed, exitCode, timedOut }) => ({ name, passed, exitCode, timedOut })) };
-  return { status: failure ? 'FAIL' : 'PASS', reason: failure || 'Tool pipeline passed.', report: summary, artifactIds, stopConfirmed: true };
+  return { status: failure ? 'FAIL' : 'PASS', reason: failure || (production?.qualityAccepted === false ? `Playable iteration delivered with recorded gaps (${production.delivery?.score ?? 0}/100).` : 'Tool pipeline passed.'), report: summary, artifactIds, stopConfirmed: true };
 }
 
 export async function runAgent({ control, workerId, token, root, signal, once = false, intervalMs = 2000, execute = executeJob }) {

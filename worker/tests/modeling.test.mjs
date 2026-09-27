@@ -199,6 +199,30 @@ test('missing key evaluates locally and still authors and checks the asset', asy
   await f.pipeline.verify();
 });
 
+test('a completed deficient iteration can upgrade from Blender to available 3D generation without dropping requirements', async t => {
+  const f = await pipelineFixture(t, { enabled: true, generated: 'ready' }); let assessments = 0;
+  f.options.evaluate = async ({ prompt }) => {
+    const decision = advice(true);
+    decision.thirdParty.preferred = ++assessments > 1;
+    if (assessments > 1) assert.match(prompt, /Previous completed iteration quality:.*completedIterations/);
+    return decision;
+  };
+  f.options.check = async ({ decision, spec: actual }) => {
+    assert.deepEqual(actual.requirements, spec.requirements);
+    const passed = decision.route === 'tripo_then_blender';
+    return { passed, kind: passed ? null : 'VISUAL_GAP', smallEditsOnly: true, feedback: {
+      criteria: spec.requirements.map(criterion => ({ criterion, status: passed ? 'PASS' : 'GAP', evidence: 'Recorded fixture silhouette' })),
+      repairInstructions: passed ? '' : 'Improve silhouette', smallEditsOnly: true } };
+  };
+  const first = await createModelingPipeline(f.options).prepare({ iteration: 1 });
+  assert.equal(first.assets[0].status, 'DCC_PROVISIONAL');
+  assert.equal(f.calls.includes('provider'), false);
+  const second = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(second.assets[0].status, 'DCC_READY');
+  assert.equal(second.assets[0].route, 'tripo_then_blender');
+  assert.equal(f.calls.filter(call => call === 'provider').length, 1);
+});
+
 test('third-party outage completes via Blender and accepted models survive retries', async t => {
   const f = await pipelineFixture(t);
   const summary = await f.pipeline.prepare();
@@ -286,12 +310,14 @@ test('provider outage disables third-party assessment for subsequent assets', as
   assert.equal(f.calls.filter(call => call === 'provider').length, 1);
 });
 
-test('failed direct quality stops at the modeling budget instead of accepting deficient output', async t => {
+test('failed technical output remains missing while the rest of production can continue', async t => {
   const f = await pipelineFixture(t, { enabled: false }); let checks = 0;
   f.options.check = async () => { checks++; return { passed: false, smallEditsOnly: false, feedback: 'Missing required parts' }; };
-  await assert.rejects(createModelingPipeline(f.options).prepare(), error => error.hardFailure === true && /quality budget exhausted/.test(error.message));
+  const summary = await createModelingPipeline(f.options).prepare();
+  assert.equal(summary.assets[0].status, 'NO_USABLE_ARTIFACT');
+  assert.equal(summary.assets[0].usable, false);
   assert.equal(checks, 3);
-  assert.equal(await readJson(path.join(f.project, 'plan/modeling-results.json')), null);
+  assert.equal((await readJson(path.join(f.project, 'plan/modeling-results.json'))).status, 'ASSETS_PROVISIONAL');
 });
 
 test('evaluator unavailable falls back within two calls; unsafe stop never starts a build', async t => {

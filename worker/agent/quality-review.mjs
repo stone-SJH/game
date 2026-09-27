@@ -1,6 +1,6 @@
 import { monitorInvocationArgs } from './iteration-monitor.mjs';
 
-const MAX_QUALITY_ITERATIONS = 5;
+const MAX_QUALITY_ITERATIONS = 100;
 const QUALITY_MARKER = /(?:quality\s+(?:acceptance\s+)?criteria|quality\s+requirements|quality\s+standards|质量验收条件|质量标准|质量要求)\s*[:：]/i;
 const DIMENSIONS = ['artPrecision', 'levelPacing', 'interactionFeel'];
 const STATUS = ['PASS', 'GAP', 'NOT_APPLICABLE'];
@@ -100,8 +100,9 @@ function integerSetting(name, fallback, max, min = 0) {
 
 export function qualityReviewSettings() {
   return {
-    maxIterations: integerSetting('QUALITY_REVIEW_MAX_ITERATIONS', MAX_QUALITY_ITERATIONS, MAX_QUALITY_ITERATIONS),
-    timeoutMs: integerSetting('QUALITY_REVIEW_TIMEOUT_MS', 60000, 60000, 1000),
+    maxIterations: integerSetting('QUALITY_REVIEW_MAX_ITERATIONS', 10, MAX_QUALITY_ITERATIONS),
+    timeoutMs: integerSetting('QUALITY_REVIEW_TIMEOUT_MS', 1200000, 3600000, 1000),
+    scoreThreshold: integerSetting('QUALITY_SCORE_THRESHOLD', 85, 100, 1),
   };
 }
 
@@ -114,7 +115,7 @@ export function qualityReviewInvocationArgs(invocation, project, schemaFile, res
 export function qualityReviewPrompt({ job, project, criteria, attempt, evidence = null, previous = null }) {
   return [
     'You are the independent quality acceptance reviewer for a game-production iteration.',
-    'The hard production gates already passed. Use only the supplied machine-readable task evidence; do not edit files, run commands, start agents, or invent requirements.',
+    'A launchable iteration has been produced. Stage reports may honestly contain gaps; evaluate them without treating provisional delivery as acceptance. Use only supplied evidence; do not edit files, run commands, start agents, or invent requirements.',
     'Evaluate the explicit quality acceptance criteria below and report evidence relative to the workspace.',
     'Return every supplied criterion ID exactly once. Requested criteria cannot be marked NOT_APPLICABLE. Inspect attached scene images directly. Evidence entries must be actual workspace-relative file paths, without fragments or commentary.',
     'Always assess these dimensions: art precision (visual fidelity, asset integration, composition), level pacing (route rhythm, difficulty ramp, rest and challenge spacing), and interaction feel (input response, camera/control feedback, recovery and affordance). Mark a dimension NOT_APPLICABLE only when the objective truly does not cover it.',

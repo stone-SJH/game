@@ -69,6 +69,7 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
 
 export async function modelingToolHashes() {
   const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
+    'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs',
     'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs'];
   for (const directory of ['agent', 'tools']) {
     for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {

@@ -10,10 +10,10 @@ function setting(name, fallback, max, min = 1) {
 
 export function monitorSettings() {
   return {
-    sameFailureLimit: setting('ITERATION_SAME_FAILURE_LIMIT', 3, 100),
-    failureLimit: setting('ITERATION_FAILURE_LIMIT', 8, 1000),
-    timeoutMs: setting('ITERATION_MONITOR_TIMEOUT_MS', 60000, 60000),
-    maxCalls: setting('ITERATION_MONITOR_MAX_CALLS', 2, 2, 0),
+    sameFailureLimit: setting('ITERATION_SAME_FAILURE_LIMIT', 6, 100),
+    failureLimit: setting('ITERATION_FAILURE_LIMIT', 24, 1000),
+    timeoutMs: setting('ITERATION_MONITOR_TIMEOUT_MS', 1200000, 3600000),
+    maxCalls: setting('ITERATION_MONITOR_MAX_CALLS', 4, 20, 0),
   };
 }
 
@@ -22,7 +22,9 @@ export function classifyIterationFailure(error, stage) {
   const diagnostic = [error.message, result.error, result.stdout, result.stderr].filter(Boolean).join('\n');
   if (error.stopConfirmed === false || result.stopConfirmed === false) return { category: 'process-stop', action: 'stop' };
   if (result.canceled) return { category: 'canceled', action: 'stop' };
-  if (error.hardFailure || result.error || result.timedOut) return { category: 'execution', action: 'stop' };
+  if (error.hardFailure) return { category: 'execution', action: 'stop' };
+  if (result.timedOut && result.stopConfirmed === true) return { category: 'timeout', action: 'retry' };
+  if (result.error || result.timedOut) return { category: 'execution', action: 'stop' };
   if (stage === 'production-orchestrator' && result.exitCode === 2) return { category: 'cli-usage', action: 'stop' };
   if (stage.startsWith('unreal-project-validation') && /(?:\w+Commandlet[^\n]*(?:could not find the class|not found)|(?:unknown|unrecognized|not found)[^\n]*commandlet)/i.test(diagnostic)) {
     const help = stage === 'unreal-project-validation' && /HelpCommandlet[^\n]*(?:could not find the class|not found)/i.test(diagnostic);

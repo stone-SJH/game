@@ -84,11 +84,15 @@ test('technical process retries preserve the authored model and reject no source
 
 test('review exhaustion preserves technical evidence and cannot restart its budget on resume', async t => {
   const f = await fixture(t, [{ verdict: 'PASS' }], true);
-  for (let i = 0; i < 2; i++) await assert.rejects(createModelingPipeline(f.options).prepare(), e => e.kind === 'VALIDATION_INFRASTRUCTURE_EXHAUSTED' && e.hardFailure);
-  assert.deepEqual(f.counts, { author: 1, technical: 1, review: 3 });
+  for (let i = 0; i < 2; i++) {
+    const result = await createModelingPipeline(f.options).prepare();
+    assert.equal(result.assets[0].status, 'DCC_PROVISIONAL');
+    assert.equal(result.assets[0].quality.accepted, false);
+  }
+  assert.deepEqual(f.counts, { author: 1, technical: 1, review: 4 });
   const states = (await fs.readdir(path.join(f.root, 'modeling-state'))).filter(n => n !== 'tasks');
   const state = await readJson(path.join(f.root, 'modeling-state', states[0], 'state.json'));
-  assert.equal(state.pending.phase, 'VISUAL_PENDING');
+  assert.equal(state.pending, null);
   assert.deepEqual(state.rejectedSources, []);
   assert.equal(state.attempts.reuse_blender, 1);
 });
@@ -100,11 +104,33 @@ test('a valid visual GAP ends its review and starts a real repair', async t => {
   assert.equal(result.assets[0].failures[0].kind, 'VISUAL_GAP');
 });
 
+test('a visually deficient asset hands off its best usable result, other assets complete, and only a completed new iteration repairs it', async t => {
+  const f = await fixture(t, [validReview('GAP')]); let improve = false;
+  f.options.job.modelingSpecs = [spec, { ...spec, assetId: 'other' }];
+  f.options.check = async ({ spec: asset, previousAttemptDirectory }) => {
+    if (improve && asset.assetId === 'fixture') assert.ok(previousAttemptDirectory);
+    const passed = asset.assetId === 'other' || improve;
+    return { passed, kind: passed ? null : 'VISUAL_GAP', smallEditsOnly: true, feedback: validReview(passed ? 'PASS' : 'GAP') };
+  };
+  const first = await createModelingPipeline(f.options).prepare({ iteration: 1 });
+  assert.deepEqual(first.assets.map(asset => asset.status), ['DCC_PROVISIONAL', 'DCC_READY']);
+  assert.equal(f.counts.author, 4);
+  assert.equal(first.assets[0].quality.accepted, false);
+  await createModelingPipeline(f.options).prepare({ iteration: 1 });
+  assert.equal(f.counts.author, 4);
+  improve = true;
+  const next = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.deepEqual(next.assets.map(asset => asset.status), ['DCC_READY', 'DCC_READY']);
+  assert.equal(f.counts.author, 5);
+  assert.equal(next.assets[1].reused, true);
+});
+
 test('all author executions failing do not mislabel a reuse quality gap', async t => {
   const f = await fixture(t, [validReview('PASS')], true);
   f.options.build = async () => { f.counts.author++; throw new Error('author service unavailable'); };
-  await assert.rejects(createModelingPipeline(f.options).prepare(), e => e.kind === 'AUTHOR_EXECUTION_EXHAUSTED');
-  assert.deepEqual(f.counts, { author: 2, technical: 0, review: 0 });
+  const result = await createModelingPipeline(f.options).prepare();
+  assert.equal(result.assets[0].status, 'NO_USABLE_ARTIFACT');
+  assert.deepEqual(f.counts, { author: 5, technical: 0, review: 0 });
 });
 
 test('Unreal visual retries and resumed acceptance reuse the original capture and import', async t => {

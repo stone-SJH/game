@@ -69,8 +69,9 @@ test('quality criteria preserve explicit markers and plain-language requests', (
   const natural = extractQualityCriteria({ objective: '场景要一比一复刻。玩家必须能通关。请独立审核操作手感。' });
   assert.equal(natural.length, 3);
   assert.equal(natural[1].description, '玩家必须能通关。');
-  assert.equal(qualityReviewSettings().maxIterations, 5);
-  assert.throws(() => { process.env.QUALITY_REVIEW_MAX_ITERATIONS = '6'; qualityReviewSettings(); }, /QUALITY_REVIEW_MAX_ITERATIONS/);
+  assert.equal(qualityReviewSettings().maxIterations, 10);
+  assert.equal(qualityReviewSettings().timeoutMs, 1200000);
+  assert.throws(() => { process.env.QUALITY_REVIEW_MAX_ITERATIONS = '101'; qualityReviewSettings(); }, /QUALITY_REVIEW_MAX_ITERATIONS/);
   delete process.env.QUALITY_REVIEW_MAX_ITERATIONS;
 });
 
@@ -102,7 +103,8 @@ test('quality review repairs only a concrete gap and then completes', async t =>
     unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {}, onIterationReview: async value => reviews.push(value.record) });
   assert.equal(calls.filter(name => name.startsWith('production-orchestrator-')).length, 2);
   assert.equal(qualityCalls.count, 2);
-  assert.deepEqual(reviews.map(record => record.action), ['complete', 'repair-project', 'complete', 'complete']);
+  assert.deepEqual(reviews.filter(record => record.kind === 'quality-review').map(record => record.action), ['repair-project', 'complete']);
+  assert.deepEqual(reviews.filter(record => record.kind === 'iteration-delivery').map(record => record.score), [67, 100]);
   assert.equal(JSON.parse(await fs.readFile(path.join(project, 'plan', 'production-context.json'), 'utf8')).qualityReview.maxAdditionalIterations, 5);
   assert.equal(JSON.parse(await fs.readFile(path.join(output, 'quality-review-1.json'), 'utf8')).remainingGap, 0.4);
   assert.equal(JSON.parse(await fs.readFile(path.join(output, 'quality-review-2.json'), 'utf8')).action, 'complete');
@@ -114,7 +116,7 @@ test('quality advice cannot complete with an unresolved dimension gap', () => {
   assert.throws(() => parseQualityAdvice(JSON.stringify(value)), /unresolved gap/);
 });
 
-test('quality review stops after its bounded additional-iteration budget', async t => {
+test('quality budget returns a retained playable result with honest gaps instead of global failure', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-review-budget-'));
   const project = path.join(root, 'project'), output = path.join(root, 'run');
   await fs.mkdir(path.join(project, 'plan'), { recursive: true });
@@ -137,8 +139,11 @@ test('quality review stops after its bounded additional-iteration budget', async
   };
   const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
     objective: 'Make a platformer.\n质量验收条件：\n- 美术精度达到卡通参考' };
-  await assert.rejects(runProductionHarness({ job, project, output, signal: new AbortController().signal, step,
-    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {} }), /Quality review budget exhausted/);
+  const delivered = await runProductionHarness({ job, project, output, signal: new AbortController().signal, step,
+    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {} });
+  assert.equal(delivered.qualityAccepted, false);
+  assert.equal(delivered.delivery.status, 'DELIVERED_WITH_GAPS');
+  assert.equal(await fs.readFile(delivered.files.packageFile, 'utf8'), 'game');
   assert.equal(productionCalls, 3);
   assert.equal(qualityCalls, 3);
 });
@@ -192,7 +197,7 @@ test('natural language repairs stage proof after first-launch trust registration
     if (name.startsWith('production-orchestrator')) {
       assert.match(options.input, /engineering-plan.json/);
       assert.match(options.input, /playerMetrics/);
-      assert.match(options.input, /checks:\[\{id,status:"PASS",evidence:/);
+      assert.match(options.input, /checks:\[\{id,status:"PASS" or "GAP",evidence:/);
       await seedDeliverables(project);
       const file = path.join(project, 'acceptance/acceptance-report.json');
       const acceptance = JSON.parse(await fs.readFile(file, 'utf8'));

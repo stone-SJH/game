@@ -44,8 +44,11 @@ the implementation details.
 5. **Validate**: run focused checks after each stage, then build, package, launch, and playtest the
    integrated result. Capture machine-readable evidence plus screenshots/video/logs where useful.
 6. **Review and hand off**: write `acceptance/acceptance-report.json`, publish the package and
-   key previews as artifacts, and list known limitations. Completion requires every required
-   criterion to be PASS.
+   key previews as artifacts, and list known limitations. Quality acceptance requires every
+   required criterion to be PASS. A usable but deficient stage is PROVISIONAL: retain its
+   artifacts and gaps, continue integration and deliver a playable iteration. The host scores
+   the whole round and starts another improvement round when needed; never report visual
+   shortfalls alone as a global task failure or invent PASS to continue.
 
 ## Stage template
 
@@ -81,8 +84,11 @@ Each stage report must contain: `stageId`, `revisionId`, `attempt`, `status`, `s
 all required outputs exist with hashes.
 
 Each `stages/<stageId>/evidence.json` must contain `protocol:1`, the matching `stageId`,
-`status:"PASS"`, a hashed `files` list, and a nonempty `checks` array. Each check must have
-an ID, `status:"PASS"`, and actual workspace-relative evidence paths after verification.
+`status:"PASS"` or `"GAP"`, a hashed `files` list, and a nonempty `checks` array. Each check must have
+an ID, its actual `status:"PASS"` or `"GAP"`, and actual workspace-relative evidence paths after verification.
+Use `PROVISIONAL` in the stage report/manifest when quality or evidence gaps remain. Finish the
+remaining stages using the best technically usable artifacts. Keep unknowns explicit. If an
+asset is unavailable, document a temporary engine-native representation and its unmet target.
 A free-text `validation` array or an artifact inventory alone is not passing proof.
 Read and write task JSON/text as UTF-8 explicitly, including `Get-Content -Encoding UTF8`
 on Windows PowerShell.

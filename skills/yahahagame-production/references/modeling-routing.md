@@ -1,7 +1,7 @@
 # Modeling routing handoff
 
 This reference describes the worker-owned modeling boundary. The harness owns the route and
-state; the production agent consumes accepted model evidence and integrates it into the game.
+state; the production agent consumes accepted or explicitly provisional model evidence and integrates it into the game.
 
 ## Before modeling
 
@@ -21,8 +21,9 @@ state; the production agent consumes accepted model evidence and integrates it i
   to engineering, but it must not hide LOD, profile or other contract defects.
 - Internal repairs use the same durable stage budget, deadline and evidence. A valid visual GAP
   requires an author repair; it is never resampled into PASS. Integrity/process-stop failures
-  stop immediately. Exhausted internal recovery is a diagnosed system failure, not missing user
-  requirements; retain the evidence and never bypass the technical gate.
+  stop immediately. If review infrastructure remains unavailable after bounded repair but the
+  technical export checks passed, retain an unreviewed provisional artifact with score zero;
+  continue the round and retry review later. Never claim the unmeasured visual criteria passed.
 - Engineering normalization may complete only host-determined handoff choices: a non-rigged asset
   with a complete traversal path uses `fbx-static` plus convex collision, and a rigged player
   uses controller/gameplay traversal acceptance instead of a mesh sweep. It never invents a
@@ -96,6 +97,21 @@ GLB/FBX, saves it and places it at unit scale in a dedicated map. Write
 `plan/modeling-engine-imports.json` using the schema in the Unreal handoff skill. Host Unreal
 checks plus independent review of real map captures establish `ENGINE_READY`. Neither state
 replaces packaged-game/playtest acceptance.
+
+Technically usable output below its visual target is `DCC_PROVISIONAL`, with a coverage score,
+the complete criterion review and repair instructions. Finish the current whole-game iteration
+with that artifact after the local route retry budget. Passing assets are reused next round;
+deficient assets start from the best retained source and may switch to available 3D generation
+after another route assessment. A valid GAP is never resampled within the same asset attempt.
+`NO_USABLE_ARTIFACT` records exhausted production without a technically usable export; it is
+not an importable model. Continue with an explicitly documented temporary representation.
+
+Original-reference research precedes fidelity-dependent modeling and records inspected local
+images, source URLs and hashes. Retrieval blockers remain explicit provisional quality gaps.
+The host passes engineering unknowns, author reports and up to 12 supplemental images to review;
+author images alone cannot establish acceptance. Host FBX inspection measures proxy binding
+names and produces identical-camera LOD comparisons. The original technical and visual targets
+remain unchanged throughout provisional delivery and subsequent improvement rounds.
 
 The UE 5.8 FBX/Interchange converter maps `auto_generate_collision=false` to disabling collision
 import, including UCX. Keep it true, import normals/tangents, verify the exact convex hull count,

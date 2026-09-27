@@ -131,11 +131,11 @@ def inspect_scene(manifest=None):
             'dimensionsMeters': dimensions(bounds_of(mesh_objects(manifest))), 'objects': rows}
 
 
-def render_views(directory, names, manifest=None, silhouette=False, size=512):
+def render_views(directory, names, manifest=None, silhouette=False, size=512, framing=None):
     directory = Path(directory)
     io_path(directory).mkdir(parents=True, exist_ok=True)
     objects = mesh_objects(manifest)
-    points = bounds_of(objects)
+    points = framing if framing is not None else bounds_of(objects)
     if not points:
         raise ValueError('No render geometry')
     center = Vector([(max(p[i] for p in points) + min(p[i] for p in points)) / 2 for i in range(3)])

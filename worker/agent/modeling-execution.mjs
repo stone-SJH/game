@@ -21,8 +21,8 @@ export function executionPolicy(invocation = {}) {
   return { version: EXECUTION_POLICY_VERSION, model: process.env.MODELING_AGENT_MODEL || 'inherited',
     invocation: { command: invocation.command || null, argsHash: hashValue(invocation.args || []) }, nodeVersion: process.version,
     reasoning: { author: 'inherited; pinned runtime config', review: 'medium' },
-    buildMs: setting('MODELING_BUILD_TIMEOUT_MS', 1800000), cleanupMs: setting('MODELING_CLEANUP_TIMEOUT_MS', 300000),
-    reviewMs: setting('MODELING_EVALUATION_TIMEOUT_MS', 120000), reviewCalls: 3, technicalMs: 300000, technicalCalls: 2 };
+    buildMs: setting('MODELING_BUILD_TIMEOUT_MS', 3600000), cleanupMs: setting('MODELING_CLEANUP_TIMEOUT_MS', 900000),
+    reviewMs: setting('MODELING_EVALUATION_TIMEOUT_MS', 1200000), reviewCalls: 4, technicalMs: 900000, technicalCalls: 3 };
 }
 
 export async function fileEvidence(files) {

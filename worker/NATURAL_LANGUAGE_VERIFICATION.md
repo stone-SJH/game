@@ -111,7 +111,8 @@ Probe directories above are under `C:/Users/stone/AppData/Local/Temp/`.
 ## Release and continuation
 
 The default intake and engineering timeout remains 20 minutes per call, at most two calls
-per stage, clipped by the task deadline. Other review budgets are unchanged.
+per stage, clipped by the task deadline. The subsequent iteration-delivery release extends other
+review budgets and supports scored provisional rounds; see `MODELING_ITERATION_DELIVERY.md`.
 
 Existing failed tasks retain their pinned release and consumed budgets. This change does not
 silently reset them or migrate them onto a new toolchain. Test the repaired workflow with a
