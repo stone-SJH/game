@@ -80,3 +80,19 @@ comparison cameras. The original shrine source/export hashes remain unchanged af
 runs the actual Windows host load/launch checks on an isolated retained project, injects one
 report gap in round one and restores its original evidence in round two. This checks iteration
 delivery and recovery; it is not a claim that the full shrine game has been built or accepted.
+
+Windows verification on 2026-09-28:
+
+- The main implementation (`20a514a`) passed 186 Node regression tests, syntax checks for
+  43 JavaScript and 22 Python files, and the real Blender export evidence fault-injection probe.
+- Retained-project path handling (`e0afac9`) passed nine focused snapshot/quality tests.
+  The first deep snapshot exposed a Windows DLL loader path-length failure; shallow snapshot
+  directories fixed it, and the acceptance probe now launches the retained package too.
+- The final real Windows acceptance probe completed in 61.5 seconds: round one recorded the
+  injected stage gap and delivered at 93/100; round two restored the evidence and reached
+  100/100. Both Unreal project loads, both package launches and the retained package launch
+  exited successfully. The seed project's production context was unchanged.
+
+The final report is
+`D:/StoneWorker/modeling-v2-audit/quality-20260928/windows-iterations-short/probe-report.json`.
+The earlier failing snapshot launch is retained under `windows-iterations/` for comparison.
