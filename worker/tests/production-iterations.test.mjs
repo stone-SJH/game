@@ -13,6 +13,8 @@ test('whole iterations retain launch dependencies, score history and the best re
   const packageFile = path.join(project, 'package/Game.exe'), preview = path.join(project, 'preview.png');
   await fs.writeFile(packageFile, 'first executable'); await fs.writeFile(preview, 'first preview');
   await fs.writeFile(path.join(project, 'package/Content/Game.pak'), 'launch dependency');
+  await fs.mkdir(path.join(project, 'package/Game/Saved/Logs'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package/Game/Saved/Logs/Game.log'), 'mutable runtime log');
   const options = { job: { taskId: 'task', workspaceId: 'workspace', objective: 'Game' }, project, policy: { maxIterations: 10 } };
   let ledger = await createProductionIterations(options);
   assert.equal(await ledger.reserveAttempt(), 1);
@@ -21,6 +23,11 @@ test('whole iterations retain launch dependencies, score history and the best re
   const first = await complete(70);
   assert.equal(first.record.status, 'DELIVERED_WITH_GAPS');
   assert.equal(await fs.readFile(path.join(path.dirname(first.retained.files.packageFile), 'Content/Game.pak'), 'utf8'), 'launch dependency');
+  assert.ok(first.retained.files.packageFile.length < packageFile.length + 40);
+  await assert.rejects(fs.stat(path.join(path.dirname(first.retained.files.packageFile), 'Game/Saved/Logs/Game.log')), { code: 'ENOENT' });
+  await fs.mkdir(path.join(path.dirname(first.retained.files.packageFile), 'Game/Saved/Logs'), { recursive: true });
+  await fs.writeFile(path.join(path.dirname(first.retained.files.packageFile), 'Game/Saved/Logs/Game.log'), 'created by a snapshot launch');
+  await ledger.best();
   await fs.writeFile(packageFile, 'worse executable'); await fs.writeFile(preview, 'worse preview');
   await complete(40);
   ledger = await createProductionIterations(options);

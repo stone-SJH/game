@@ -4,7 +4,8 @@ import { atomicJson, hashValue, readJson, localPath } from './modeling-io.mjs';
 import { fileEvidence, verifyEvidence, modelingFailure } from './modeling-execution.mjs';
 
 export async function createProductionIterations({ job, project, policy }) {
-  const root = path.join(path.dirname(project), 'production-state', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, objective: job.objective }));
+  const identity = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, objective: job.objective });
+  const root = path.join(path.dirname(project), 'production-state', identity);
   const file = path.join(root, 'iterations.json');
   const state = await readJson(file, null, 64 * 1024 * 1024) || { protocol: 1, policy, iteration: 1, attempts: 0, rounds: [], best: null };
   if (state.protocol !== 1 || hashValue(state.policy) !== hashValue(policy)) throw modelingFailure('ITERATION_POLICY_CHANGED', 'Restore the production iteration policy pinned for this task.');
@@ -23,11 +24,18 @@ export async function createProductionIterations({ job, project, policy }) {
       const iteration = state.iteration;
       const directory = path.join(root, 'deliveries', `iteration-${iteration}`);
       await fs.mkdir(directory, { recursive: true });
-      const packageRoot = path.dirname(deliverables.files.packageFile), snapshotRoot = path.join(directory, 'project');
+      // UE still loads some third-party DLLs through Windows APIs with MAX_PATH limits.
+      // Keep executable snapshots close to the original project's path depth.
+      const packageRoot = path.dirname(deliverables.files.packageFile);
+      const snapshotRoot = path.join(path.dirname(project), 'rounds', identity.slice(0, 20), String(iteration));
       const sourceFiles = [];
       const included = source => {
         const relative = path.relative(project, source);
-        if (source === packageRoot || source.startsWith(packageRoot + path.sep)) return true;
+        if (source === packageRoot || source.startsWith(packageRoot + path.sep)) {
+          const parts = path.relative(packageRoot, source).split(path.sep);
+          return parts[0] !== 'Saved' && parts[1] !== 'Saved'; // Runtime writes, not package dependencies.
+        }
+        if (relative.split(path.sep)[0] === 'Saved') return packageRoot.startsWith(source + path.sep);
         return !relative.split(path.sep).some(part => ['Intermediate', 'DerivedDataCache', '.git', '.codex', '__pycache__'].includes(part));
       };
       async function collect(current) {

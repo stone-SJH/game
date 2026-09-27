@@ -102,6 +102,8 @@ try {
     await validateEngineeringAcceptance(engineering, await readJson(path.join(project, 'acceptance/acceptance-report.json')), project);
     delivered = await runProductionHarness({ ...pipelineOptions, job: { ...retainedContext, referenceFiles: [] }, unreal: process.env.UNREAL_CMD,
       onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') iterationDeliveries.push({ iteration: record.iteration, score: record.score, status: record.status }); } });
+    await pipelineOptions.step('retained-package-playtest', delivered.files.packageFile,
+      ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, path.dirname(delivered.files.packageFile));
   } else if (mode === 'production') delivered = await runProductionHarness({ ...pipelineOptions, unreal: process.env.UNREAL_CMD });
   else await createModelingPipeline(pipelineOptions).prepare();
 } catch (caught) { if (caught !== stop) error = caught; }

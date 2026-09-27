@@ -26,8 +26,9 @@ Unresolved technical/report issues require another round even above that score. 
 means all gates passed; reaching the score threshold does not relabel individual gaps.
 
 Each completed round preserves the whole project, relative evidence paths and complete package
-under the task's `production-state/.../deliveries/iteration-N/project` directory. Intermediate
-build/cache directories are excluded. Files are hashed, later rounds cannot overwrite them, and
+under the task's `rounds/<identity-prefix>/N` directory; its ledger and reports are under
+`production-state/`. The shallow project path avoids Windows DLL loader length limits.
+Intermediate build/cache directories and mutable package runtime logs are excluded. Files are hashed, later rounds cannot overwrite them, and
 the best score survives subsequent regressions, failures and resumption. Durable records track
 execution attempts separately from complete production iterations. Missing/unlaunchable packages
 still trigger bounded repair; cancellation and unconfirmed process shutdown still stop execution.
