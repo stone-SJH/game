@@ -271,6 +271,9 @@ Internal schema/contract repair retains the preceding response and all asset/fie
 Generated drafts normalize an exactly repeated LOD0 without changing triangle budgets; explicit
 and frozen contracts remain strict. See [V2 internal recovery](MODELING_INTERNAL_RECOVERY.md)
 for ownership, evidence and failure handling.
+Engineering also normalizes only host-determined traversal handoffs: complete passage paths on
+static assets use FBX convex collision, while rigged player traversal is tested by the controller
+and gameplay acceptance. Dimensions, paths and capsule values remain agent-owned decisions.
 
 The isolated planning probe runs live model calls without authoring, publishing or modifying
 the source task. It creates new task identities and writes `probe-report.json` with retained

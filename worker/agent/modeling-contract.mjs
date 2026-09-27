@@ -54,7 +54,7 @@ export function contractIssues(spec, { allowIncompleteTraversal = false } = {}) 
   const traversal = c.traversal;
   // A traversal ability/visual prop is not a static player passage. Engineering separately
   // classifies room shells, doorways and paths; a bare mention of "traversal" is not geometry.
-  if (!allowIncompleteTraversal && Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\b(?:player|capsule)\s+(?:passage|clearance|sweep)\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
+  if (!spec.requireRig && !allowIncompleteTraversal && Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\b(?:player|capsule)\s+(?:passage|clearance|sweep)\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
     issue('contract.traversal', 'CONTRACT_INCOMPLETE: traversability requires explicit capsule dimensions and paths; do not invent defaults.', 'CONTRACT_INCOMPLETE');
   }
   if (traversal) {

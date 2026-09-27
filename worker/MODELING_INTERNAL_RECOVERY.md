@@ -96,6 +96,33 @@ generation. The failed task's context, both original raw responses and execution
 their hashes. Audit summaries and logs are outside Git at
 `D:/StoneWorker/modeling-v2-audit/engineering-20260927/internal-repair-*`.
 
+### Follow-up failure: `workspace-d22b9ae0-77a6-45e1-b26b-d9561ce153e8`
+
+This run reached engineering successfully. Its first engineering response had two ordinary
+agent defects: a negative water-surface dimension and no traversal contract for the player
+asset. The second response corrected those, but attached a static traversal sweep to
+`playable-link`, whose frozen asset is a rigged `fbx-skeletal` character with no mesh collision.
+The validator correctly rejected the contradictory `fbx-skeletal/none` versus static
+`fbx-static/convex` handoff after the two-call engineering allowance.
+
+The final recovery rule is:
+
+- A complete traversal contract on a non-rigged passage asset gets the calibrated `fbx-static`
+  and `convex` handoff locally. The repair is deterministic, recorded in validation evidence,
+  and does not choose dimensions or paths.
+- A rigged player/character never receives a static mesh sweep. The host clears only that
+  generated `needsTraversal` flag and per-mesh traversal object, while retaining the global
+  `playerCapsule` and requiring controller/gameplay acceptance to test movement. It preserves
+  the rigged asset's original profile, collision and animation requirements.
+- A negative dimension, missing path, capsule mismatch or contradictory user constraint remains
+  an agent repair finding. The host never replaces those values with defaults.
+
+The actual retained responses from the follow-up run were replayed against the repaired code.
+Two engineering calls now pass with 17 assets and all four objective requirements retained;
+the second response records the rigged-player normalization and the durable call records are
+`FAILED`, `COMPLETED`. This replay passed without changing the failed task or adding a third
+model call.
+
 Use `node --test worker/tests/*.test.mjs` and the isolated intake probe to verify a retained
 failure. `--draft` supplies only the first response; any required internal repair uses a real
 model call. The source task stays unchanged and the probe uses a new execution identity.

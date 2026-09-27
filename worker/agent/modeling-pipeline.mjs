@@ -11,7 +11,7 @@ import { createExecutionStore, executionPolicy, failureRecord, modelingFailure, 
 import { createModelingReviewer } from './modeling-review.mjs';
 import { RUBRIC_VERSION, visualRubric, visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
 import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
-import { validateModelingDraft, normalizeModelingDraft, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
+import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
   provider = createTripoProvider(), probe = discoverModelingCapabilities, build, check, checkBase, evaluate,
@@ -122,6 +122,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
             engineeringPrompt(job, draft, requirements, references.entries), references.images, { maxCalls: 2,
               timeoutMs: setting('MODELING_INTAKE_TIMEOUT_MS', 1200000, 1, 1800000), referenceFiles: references.files,
               research: references.entries.some(item => item.requiresToolRead) || /研究|考据|原版|原游戏|复刻|\b(?:research|recreate|replica)\b/i.test(job.objective || ''),
+              normalize: value => normalizeEngineeringResponse(value, draft, requirements, references.entries),
               validate: value => resolveEngineering(draft, value, { requirements, references: references.entries }) });
           result = resolveEngineering(draft, engineering, { requirements, references: references.entries });
           await writeEngineeringPlan(project, engineeringFile, job, draft, engineering, requirements, references.entries);

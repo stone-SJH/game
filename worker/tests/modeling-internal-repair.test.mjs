@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { defaultContract } from '../agent/modeling-contract.mjs';
 import { modelingPlanV2Schema, validateSpecs } from '../agent/modeling-evaluation.mjs';
-import { normalizeModelingDraft, validateModelingDraft, validateModelingDraftRepair } from '../agent/modeling-engineering.mjs';
+import { normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraft, validateModelingDraftRepair } from '../agent/modeling-engineering.mjs';
 import { createModelingReviewer } from '../agent/modeling-review.mjs';
 import { createExecutionStore } from '../agent/modeling-execution.mjs';
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
@@ -195,6 +195,58 @@ test('incomplete generated engineering is repaired internally instead of stoppin
   const request = await readJson(path.join(f.output, 'modeling-engineering-review-2-request.json'));
   assert.equal(request.repairOf.kind, 'CONTRACT_INCOMPLETE');
   assert.ok(request.prompt.includes(JSON.stringify(valid)));
+});
+
+test('complete traversal paths repair the fixed FBX and convex handoff locally', () => {
+  const draft = normalizeModelingDraft(raw).value;
+  const response = {
+    reason: 'Engineering selected a passage.', playerCapsule: { radiusMeters: .42, halfHeightMeters: .96, axis: 'Z' },
+    playerDecision: 'Use the project capsule.', assets: draft.assets.map(asset => ({ assetId: asset.assetId,
+      needsTraversal: asset.assetId === 'ice-pillar', contract: structuredClone(asset.contract), designDecisions: ['Passage test uses the project capsule.'] })),
+    requirements: [{ id: 'requirement-1', owner: 'modeling', implementation: 'Build the pillar.', verification: 'Run the passage test.' }], references: [], sources: [], unresolvedFacts: [],
+  };
+  const planned = response.assets[0];
+  planned.contract.traversal = { version: 1, space: 'asset-local-meters', capsule: response.playerCapsule, marginMeters: .01,
+    paths: [{ id: 'passage', startMeters: [0, -1, 1], endMeters: [0, 1, 1] }], ueQuery: { channel: 'Visibility', traceComplex: false } };
+  planned.contract.runtime.profile = 'glb-static'; planned.contract.runtime.collision = 'none';
+  const normalized = normalizeEngineeringResponse(response, draft, [{ id: 'requirement-1', description: 'Build the pillar.' }], []);
+  assert.deepEqual(normalized.value.assets[0].contract.runtime.profile, 'fbx-static');
+  assert.deepEqual(normalized.value.assets[0].contract.runtime.collision, 'convex');
+  assert.equal(normalized.repairs.length, 2);
+});
+
+test('rigged player traversal belongs to controller acceptance, not static mesh collision', () => {
+  const draft = normalizeModelingDraft(raw).value;
+  draft.assets[0].requireRig = true;
+  draft.assets[0].contract.runtime.profile = 'fbx-skeletal';
+  draft.assets[0].contract.runtime.collision = 'none';
+  const response = {
+    reason: 'Player controller is verified separately.', playerCapsule: { radiusMeters: .42, halfHeightMeters: .96, axis: 'Z' },
+    playerDecision: 'Use the project capsule.', assets: [{ assetId: draft.assets[0].assetId, needsTraversal: true,
+      contract: { ...structuredClone(draft.assets[0].contract), traversal: { version: 1, space: 'asset-local-meters', capsule: { radiusMeters: .42, halfHeightMeters: .96, axis: 'Z' }, marginMeters: .01,
+        paths: [{ id: 'player-path', startMeters: [0, -1, 1], endMeters: [0, 1, 1] }], ueQuery: { channel: 'Visibility', traceComplex: false } } }, designDecisions: [] }],
+    requirements: [{ id: 'requirement-1', owner: 'gameplay', implementation: 'Implement the player controller.', verification: 'Run packaged traversal.' }], references: [], sources: [], unresolvedFacts: [],
+  };
+  const normalized = normalizeEngineeringResponse(response, draft, [{ id: 'requirement-1', description: 'Implement the player controller.' }], []);
+  assert.equal(normalized.value.assets[0].needsTraversal, false);
+  assert.equal(normalized.value.assets[0].contract.traversal, null);
+  assert.equal(normalized.value.assets[0].contract.runtime.profile, 'fbx-skeletal');
+  assert.equal(normalized.repairs[0].field, 'needsTraversal/contract.traversal');
+});
+
+test('a rigged player with an incomplete static traversal flag is cleared without inventing paths', () => {
+  const draft = normalizeModelingDraft(raw).value;
+  draft.assets[0].requireRig = true;
+  draft.assets[0].contract.runtime.profile = 'fbx-skeletal';
+  draft.assets[0].contract.runtime.collision = 'none';
+  const response = {
+    reason: 'Player controller is verified separately.', playerCapsule: null, playerDecision: 'Use gameplay controller metrics.',
+    assets: [{ assetId: draft.assets[0].assetId, needsTraversal: true, contract: structuredClone(draft.assets[0].contract), designDecisions: [] }],
+    requirements: [{ id: 'requirement-1', owner: 'gameplay', implementation: 'Implement the player controller.', verification: 'Run packaged traversal.' }], references: [], sources: [], unresolvedFacts: [],
+  };
+  const normalized = normalizeEngineeringResponse(response, draft, [{ id: 'requirement-1', description: 'Implement the player controller.' }], []);
+  assert.equal(normalized.value.assets[0].needsTraversal, false);
+  assert.equal(normalized.value.assets[0].contract.traversal, null);
 });
 
 test('a resumed repair verifies the previous raw response hash before calling any agent', async t => {

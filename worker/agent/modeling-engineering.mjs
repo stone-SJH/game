@@ -46,6 +46,40 @@ export function normalizeModelingDraft(raw) {
   return { value, repairs };
 }
 
+// A traversable asset has one host-calibrated static handoff. If the engineering agent has
+// already supplied a complete capsule/path contract, repair only a missing enum choice locally;
+// do not spend another model call or invent geometry. Explicit source constraints remain frozen
+// and skeletal traversal stays an agent-owned contradiction.
+export function normalizeEngineeringResponse(raw, draft, requirements = [], references = []) {
+  validateSchema(raw, engineeringSchema(draft, requirements, references));
+  const value = structuredClone(raw), repairs = [];
+  for (const planned of value.assets) {
+    const original = draft.assets.find(asset => asset.assetId === planned.assetId);
+    // A rigged player/character is tested through its controller and gameplay acceptance. It
+    // cannot use the static passage asset profile; retain playerCapsule globally and remove only
+    // the inapplicable per-mesh sweep the engineering agent attached to the character.
+    if (original?.requireRig && (planned.needsTraversal || planned.contract.traversal)) {
+      repairs.push({ assetId: planned.assetId, field: 'needsTraversal/contract.traversal', before: {
+        needsTraversal: planned.needsTraversal, traversal: planned.contract.traversal }, after: { needsTraversal: false, traversal: null },
+      reason: 'Rigged player traversal is validated by the controller and gameplay tests, not a static mesh sweep.' });
+      planned.needsTraversal = false;
+      planned.contract.traversal = null;
+    }
+    if (!planned.needsTraversal || !planned.contract.traversal) continue;
+    if (planned.contract.runtime.profile !== 'fbx-static') {
+      repairs.push({ assetId: planned.assetId, field: 'contract.runtime.profile', before: planned.contract.runtime.profile,
+        after: 'fbx-static', reason: 'A complete static traversal contract uses the calibrated FBX handoff.' });
+      planned.contract.runtime.profile = 'fbx-static';
+    }
+    if (planned.contract.runtime.collision !== 'convex') {
+      repairs.push({ assetId: planned.assetId, field: 'contract.runtime.collision', before: planned.contract.runtime.collision,
+        after: 'convex', reason: 'A complete static traversal contract uses the calibrated convex collision handoff.' });
+      planned.contract.runtime.collision = 'convex';
+    }
+  }
+  return { value, repairs };
+}
+
 export function validateModelingDraftRepair(previous, next) {
   // A malformed response may have no usable contract. The schema repair still receives its raw evidence.
   try { validateSchema(previous, modelingPlanV2Schema); } catch { return; }

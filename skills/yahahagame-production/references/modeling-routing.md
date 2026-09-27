@@ -23,6 +23,10 @@ state; the production agent consumes accepted model evidence and integrates it i
   requires an author repair; it is never resampled into PASS. Integrity/process-stop failures
   stop immediately. Exhausted internal recovery is a diagnosed system failure, not missing user
   requirements; retain the evidence and never bypass the technical gate.
+- Engineering normalization may complete only host-determined handoff choices: a non-rigged asset
+  with a complete traversal path uses `fbx-static` plus convex collision, and a rigged player
+  uses controller/gameplay traversal acceptance instead of a mesh sweep. It never invents a
+  dimension, capsule, pivot coordinate or path. These repairs are written to validation evidence.
 - The planner receives verified uploaded images/text and records every objective requirement,
   its implementation and verification, plus unresolved reference facts. Read-only research can
   inspect sources; unknown facts remain acceptance obligations. Code-only requests retain this
