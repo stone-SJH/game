@@ -360,10 +360,15 @@ test('default harness runs modeling intake before main production; no-model task
     step: async (name, command, args, timeout, cwd, accepts, options) => {
       calls.push(name);
       if (name.startsWith('modeling-plan')) await atomicJson(args[args.indexOf('-o') + 1], { reason: 'Only code repair', assets: [] });
+      if (name.startsWith('modeling-engineering')) await atomicJson(args[args.indexOf('-o') + 1], {
+        reason: 'Only code repair', playerCapsule: null, playerDecision: 'Keep existing controller metrics.', assets: [],
+        requirements: [{ id: 'requirement-1', owner: 'gameplay', implementation: 'Repair existing game code.', verification: 'Run the regression playtest.' }],
+        references: [], sources: [], unresolvedFacts: [],
+      });
       if (name.startsWith('production-orchestrator')) assert.match(options.input, /NOT_APPLICABLE/);
       return success;
     },
   }), /deliverables missing/);
   assert.ok(calls[0].startsWith('modeling-plan'));
-  assert.ok(calls[1].startsWith('production-orchestrator'));
+  assert.ok(calls.at(-1).startsWith('production-orchestrator'));
 });

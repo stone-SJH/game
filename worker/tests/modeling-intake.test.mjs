@@ -9,6 +9,7 @@ import { createExecutionStore } from '../agent/modeling-execution.mjs';
 import { createIterationMonitor } from '../agent/iteration-monitor.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
 import { atomicJson, hashValue, readJson } from '../agent/modeling-io.mjs';
+import { objectiveRequirements } from '../agent/modeling-engineering.mjs';
 
 const plan = { reason: 'Retain every independently reviewable asset and its technical contract.',
   assets: Array.from({ length: 16 }, (_, i) => ({ assetId: `prop-${i}`, description: `Red prop ${i}`,
@@ -36,7 +37,12 @@ async function fixture(t) {
     probe: async () => { throw intakeComplete; },
     step: async (name, command, args, timeoutMs) => {
       calls.push({ name, timeoutMs });
-      await atomicJson(args[args.indexOf('-o') + 1], plan);
+      await atomicJson(args[args.indexOf('-o') + 1], name.startsWith('modeling-engineering') ? {
+        reason: 'The props have no player passage requirement.', playerCapsule: null, playerDecision: 'No player requested.',
+        assets: plan.assets.map(asset => ({ assetId: asset.assetId, needsTraversal: false, contract: asset.contract, designDecisions: [] })),
+        requirements: objectiveRequirements(job.objective).map(item => ({ id: item.id, owner: 'modeling', implementation: 'Author all sixteen props.', verification: 'Inspect all sixteen outputs.' })),
+        references: [], sources: [], unresolvedFacts: [],
+      } : plan);
     } };
   return { root, project, output, state, options, calls, intakeComplete, abort };
 }
@@ -44,7 +50,7 @@ async function fixture(t) {
 test('multi-asset intake gets twenty minutes and retains every V2 contract', async t => {
   const f = await fixture(t);
   await assert.rejects(createModelingPipeline(f.options).prepare(), error => error === f.intakeComplete);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
   assert.ok(f.calls[0].timeoutMs > 1190000 && f.calls[0].timeoutMs <= 1200000);
   assert.deepEqual(await readJson(path.join(f.project, 'plan/modeling-specs.json')), plan);
   const group = Object.values((await readJson(path.join(f.state, 'execution.json'))).groups)[0];
@@ -126,19 +132,19 @@ test('V2 intake still rejects missing contracts and records schema failures', as
   assert.equal(await readJson(path.join(f.state, 'plan.json')), null);
 });
 
-test('missing traversal specifications remain a distinct non-retryable contract failure', async t => {
+test('missing traversal specifications reach engineering but cannot reach authoring unresolved', async t => {
   const f = await fixture(t);
-  f.options.evaluate = async () => {
-    f.calls.push('review');
+  f.options.evaluate = async ({ name }) => {
+    f.calls.push(name);
     return { reason: 'Player capsule and asset-local paths were not supplied.',
       assets: [{ ...plan.assets[0], description: 'A traversable doorway' }] };
   };
   await assert.rejects(createModelingPipeline(f.options).prepare(), error => {
-    assert.equal(error.kind, 'CONTRACT_INCOMPLETE');
+    assert.equal(error.kind, 'VALIDATION_INFRASTRUCTURE_EXHAUSTED');
     assert.doesNotMatch(error.message, /intake unavailable/);
     return true;
   });
-  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls, ['modeling-plan', 'modeling-engineering', 'modeling-engineering']);
   assert.equal(await readJson(path.join(f.state, 'plan.json')), null);
 });
 

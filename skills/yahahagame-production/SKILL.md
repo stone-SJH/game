@@ -65,6 +65,12 @@ Use these default stages and remove stages that the objective does not require:
 For a task that requests or implies 3D modeling, the worker harness runs a bounded modeling
 sub-pipeline inside `asset-production-and-import` before the main production call. Read
 [references/modeling-routing.md](references/modeling-routing.md) when that sub-pipeline is active.
+For generated V2 intake, read the host-frozen `plan/engineering-plan.json` before implementation.
+It preserves every objective requirement, records missing player/geometry metrics as explicit
+design choices, and carries unresolved reference facts into acceptance. Implement the same
+capsule in gameplay (meters in the contract, centimeters in Unreal). Acceptance must cover each
+requirement ID with actual evidence, measured player metrics when specified, and evidence resolving
+each outstanding source fact. Do not edit the frozen plan or claim a static sweep proves gameplay.
 The host evaluates existing licensed assets first, then chooses bounded Blender MCP authoring or
 the optional Tripo-to-Blender path. A missing or failed Tripo provider is a recorded fallback to
 Blender and never a reason to lower the asset acceptance gates.
