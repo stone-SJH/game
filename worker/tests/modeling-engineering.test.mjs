@@ -91,6 +91,21 @@ test('supplied dimensions, pivot and paths remain immutable', () => {
   }
 });
 
+test('engineering repair receives all frozen field findings with original values and asset identity', () => {
+  const frozen = resolveEngineering(draft, planFor(), { requirements });
+  const changed = planFor(frozen);
+  changed.assets[0].contract.pivot.meters = [0, 0, 0];
+  changed.assets[0].contract.runtime.lodTriangles = [];
+  changed.assets[0].contract.budgets.materials++;
+  assert.throws(() => resolveEngineering(frozen, changed, { requirements }), error => {
+    assert.deepEqual(error.validationIssues.map(item => item.field).sort(), ['contract.budgets', 'contract.pivot', 'contract.runtime.lodTriangles']);
+    assert.ok(error.validationIssues.every(item => item.assetId === 'room-shell'));
+    assert.match(error.message, /null meters for a known pivot mode/);
+    assert.match(error.message, /Preserve \[500\]/);
+    return true;
+  });
+});
+
 test('reference intake carries text and images and rejects changed or unsafe files', async t => {
   const project = await temp(t);
   await fs.mkdir(path.join(project, 'references'));

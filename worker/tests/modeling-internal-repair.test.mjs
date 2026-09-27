@@ -151,6 +151,52 @@ test('internal LOD correction flows through engineering once and never changes a
   assert.equal(calls.length, 2);
 });
 
+test('repair changes only invalid vector and LOD entries and preserves unique runtime names', () => {
+  const previous = normalizeModelingDraft(raw).value;
+  previous.assets[0].contract.runtime.lodTriangles = [9000, 10000];
+  previous.assets[0].contract.dimensions.meters = [1, 0, 3];
+  previous.assets[0].contract.runtime.sockets = ['base', 'top', 'top'];
+  const corrected = structuredClone(previous);
+  corrected.assets[0].contract.runtime.lodTriangles = [9000, 4500];
+  corrected.assets[0].contract.dimensions.meters = [1, 2, 3];
+  corrected.assets[0].contract.runtime.sockets = ['base', 'top'];
+  validateModelingDraft(corrected);
+  validateModelingDraftRepair(previous, corrected);
+  for (const mutate of [
+    value => { value.assets[0].contract.runtime.lodTriangles[0] = 12000; },
+    value => { value.assets[0].contract.dimensions.meters[0] = 2; },
+    value => { value.assets[0].contract.runtime.sockets = ['top']; },
+  ]) {
+    const changed = structuredClone(corrected); mutate(changed);
+    assert.throws(() => validateModelingDraftRepair(previous, changed), /repair/i);
+  }
+});
+
+test('mentioning a traversal ability does not force a static capsule sweep onto a held visual prop', () => {
+  const plan = normalizeModelingDraft(raw).value, asset = plan.assets[0];
+  asset.description = 'A paraglider visual asset for traversal ability presentation.';
+  asset.requirements = ['The held glider should not obstruct traversal.'];
+  asset.contract.runtime.collision = 'none';
+  validateSpecs(plan);
+  asset.description = 'A traversable doorway';
+  assert.throws(() => validateSpecs(plan), error => error.kind === 'CONTRACT_INCOMPLETE');
+});
+
+test('incomplete generated engineering is repaired internally instead of stopping on its first response', async t => {
+  const f = await fixture(t), valid = normalizeModelingDraft(raw).value;
+  let calls = 0;
+  const reviewer = createModelingReviewer({ ...f.options, evaluate: async () => valid });
+  const result = await reviewer({ ...reviewOptions, name: 'modeling-engineering', validate: () => {
+    if (++calls === 1) throw Object.assign(new Error('The generated engineering contract omitted its capsule paths.'),
+      { kind: 'CONTRACT_INCOMPLETE', hardFailure: true });
+  } });
+  assert.equal(calls, 2);
+  assert.deepEqual(result, valid);
+  const request = await readJson(path.join(f.output, 'modeling-engineering-review-2-request.json'));
+  assert.equal(request.repairOf.kind, 'CONTRACT_INCOMPLETE');
+  assert.ok(request.prompt.includes(JSON.stringify(valid)));
+});
+
 test('a resumed repair verifies the previous raw response hash before calling any agent', async t => {
   const f = await fixture(t);
   const invalid = normalizeModelingDraft(raw).value; invalid.assets[0].contract.runtime.profile = 'glb-static';

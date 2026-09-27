@@ -16,6 +16,10 @@ regenerated the asset list, changed IDs/budgets and repeated the error.
 There was another defect: a missing traversal contract threw before the remaining checks, so
 draft intake ignored that exception and also missed later LOD/profile defects on those assets.
 The first draft's glider promised sockets/LODs under `glb-static`, an unsupported handoff.
+The old passage detector also matched any use of “traversal”, including a held glider's ability
+description. Static passage requirements now require passage intent; engineering still owns
+semantic classification of room shells and doorways. Incomplete generated engineering receives
+its remaining internal repair call instead of stopping immediately on `CONTRACT_INCOMPLETE`.
 
 Original evidence remains in workspace `workspace-ea978dd7-0404-4323-8c17-e79d9ae87633`, run
 `run-7a4ce202-54f7-4587-8cc1-dbea2edde235`, plus the task's `modeling-state` execution record.
@@ -68,6 +72,15 @@ Regression tests cover exact LOD0 normalization without data mutation, ambiguous
 findings previously hidden by missing traversal, multi-asset/profile repair with the preceding
 response, protection against dropping assets/LODs/requirements, resumed accepted results,
 unchanged durable budgets, explicit-spec strictness and tampered repair evidence.
+Engineering findings also include every changed frozen field and its original value. Known
+pivot modes retain their exact representation, including null coordinates; filling those nulls
+is not required to define an origin. Repair protects valid vector/LOD entries and every unique
+required socket/animation name.
+
+Windows regression results: 175 Node tests, syntax checks for all 37 agent/tool modules,
+6 Python traversal tests, deployment tests, and all 11 autostart tests passed. Actual Unreal
+loading and packaged launch passed on retained project copies at
+`C:/Users/stone/AppData/Local/Temp/engineering-intake-live-RVG7Yt`.
 
 Use `node --test worker/tests/*.test.mjs` and the isolated intake probe to verify a retained
 failure. `--draft` supplies only the first response; any required internal repair uses a real

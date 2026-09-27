@@ -11,7 +11,9 @@ export function createModelingReviewer({ execution, project, output, signal, ste
     const evidence = await fileEvidence([...images, ...referenceFiles]);
     const input = { schema, prompt, images, policy, ...(research ? { research: true } : {}) };
     return execution.run({ key: key || `${name}:${hashValue({ input, evidence })}`, stage: 'REVIEW', identity: { name, ...identity }, input,
-      evidence, maxCalls, timeoutMs, totalMs: maxCalls * timeoutMs, retry: error => error.kind !== 'CONTRACT_INCOMPLETE' },
+      // These are generated agent handoffs. Incomplete engineering output gets the same
+      // bounded internal repair; explicit user specifications are validated outside reviews.
+      evidence, maxCalls, timeoutMs, totalMs: maxCalls * timeoutMs, retry: () => true },
     async ({ callId, timeoutMs, previousError }) => {
       const tag = `${name}-${callId}`;
       const schemaFile = path.join(output, `${tag}-schema.json`), responseFile = path.join(output, `${tag}-response.json`);

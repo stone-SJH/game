@@ -56,16 +56,21 @@ export function validateModelingDraftRepair(previous, next) {
     if (!revised) throw new Error(`Internal repair must preserve asset ID ${asset.assetId}.`);
     const { contract, ...requirements } = asset, { contract: repaired, ...revisedRequirements } = revised;
     if (!isDeepStrictEqual(requirements, revisedRequirements)) throw new Error(`Internal repair must preserve ${asset.assetId} requirements and LOD0 budget.`);
-    const allowed = contractIssues(asset, { allowIncompleteTraversal: true }).map(item => item.field.replace(/\[\d+\]/g, ''));
+    const allowed = contractIssues(asset, { allowIncompleteTraversal: true }).map(item => item.field);
     function unchanged(before, after, field) {
       if (isDeepStrictEqual(before, after)) return;
       if (allowed.includes(field)) return;
-      if (before && after && !Array.isArray(before) && typeof before === 'object' && typeof after === 'object') {
+      if (Array.isArray(before) && Array.isArray(after) && before.length === after.length) {
+        before.forEach((item, index) => unchanged(item, after[index], `${field}[${index}]`));
+      } else if (before && after && !Array.isArray(before) && typeof before === 'object' && typeof after === 'object') {
         for (const key of Object.keys(before)) unchanged(before[key], after[key], `${field}.${key}`);
       } else throw new Error(`Internal repair changed valid field ${asset.assetId}.${field}.`);
     }
     unchanged(contract, repaired, 'contract');
     if (repaired.runtime.lodTriangles.length < contract.runtime.lodTriangles.length) throw new Error('Internal repair cannot remove required reduced LOD levels.');
+    for (const key of ['sockets', 'animations']) {
+      if (contract.runtime[key].some(name => !repaired.runtime[key].includes(name))) throw new Error(`Internal repair cannot remove required ${key}.`);
+    }
   }
 }
 
@@ -116,26 +121,31 @@ export function resolveEngineering(draft, engineering, { requirements = [], refe
       throw new Error(`Engineering plan must cover every ${key} exactly once.`);
     }
   }
+  const issues = [];
   const assets = draft.assets.map(asset => {
     const planned = engineering.assets.find(item => item.assetId === asset.assetId), original = asset.contract, resolved = planned.contract;
+    const issue = (field, message) => issues.push({ assetId: asset.assetId, field, message });
     for (const key of Object.keys(original)) {
       if (['dimensions', 'pivot', 'traversal', 'runtime'].includes(key)) continue;
-      if (!isDeepStrictEqual(original[key], resolved[key])) throw new Error(`Engineering changed frozen ${asset.assetId}.${key}.`);
+      if (!isDeepStrictEqual(original[key], resolved[key])) issue(`contract.${key}`, `Engineering changed frozen ${asset.assetId}.${key}. Preserve ${JSON.stringify(original[key])}.`);
     }
-    if (original.dimensions.meters !== null && !isDeepStrictEqual(original.dimensions, resolved.dimensions)) throw new Error('Engineering cannot change explicit dimensions.');
-    if ((original.pivot.mode !== 'unknown' || original.pivot.meters !== null) && !isDeepStrictEqual(original.pivot, resolved.pivot)) throw new Error('Engineering cannot change an explicit pivot.');
-    if (original.traversal && !isDeepStrictEqual(original.traversal, resolved.traversal)) throw new Error('Engineering cannot change supplied traversal specifications.');
+    if (original.dimensions.meters !== null && !isDeepStrictEqual(original.dimensions, resolved.dimensions)) issue('contract.dimensions', `Engineering cannot change explicit dimensions. Preserve ${JSON.stringify(original.dimensions)}.`);
+    if ((original.pivot.mode !== 'unknown' || original.pivot.meters !== null) && !isDeepStrictEqual(original.pivot, resolved.pivot)) issue('contract.pivot', `Engineering cannot change an explicit pivot. Preserve ${JSON.stringify(original.pivot)}; null meters for a known pivot mode is already a valid representation.`);
+    if (original.traversal && !isDeepStrictEqual(original.traversal, resolved.traversal)) issue('contract.traversal', 'Engineering cannot change supplied traversal specifications.');
     for (const key of Object.keys(original.runtime)) {
       if (planned.needsTraversal && ['profile', 'collision'].includes(key) && !asset.requireRig) continue;
-      if (!isDeepStrictEqual(original.runtime[key], resolved.runtime[key])) throw new Error(`Engineering changed runtime requirement ${key}.`);
+      if (!isDeepStrictEqual(original.runtime[key], resolved.runtime[key])) issue(`contract.runtime.${key}`, `Engineering changed runtime requirement ${key}. Preserve ${JSON.stringify(original.runtime[key])}.`);
     }
     if (planned.needsTraversal) {
-      if (!resolved.traversal || !resolved.dimensions.meters || resolved.pivot.mode === 'unknown') throw new Error('Engineering must define traversable geometry, its origin and capsule paths.');
-      if (!engineering.playerCapsule || !isDeepStrictEqual(resolved.traversal.capsule, engineering.playerCapsule)) throw new Error('Traversal capsules must match the declared player controller.');
-    } else if (resolved.traversal) throw new Error('Traversal intent contradicts the supplied paths.');
-    if (!isDeepStrictEqual(original, resolved) && !planned.designDecisions.length) throw new Error('Engineering choices must be recorded, not silently defaulted.');
-    return { ...asset, contract: resolved };
+      if (!resolved.traversal || !resolved.dimensions.meters || resolved.pivot.mode === 'unknown') issue('contract.traversal', 'Engineering must define traversable geometry, its origin and capsule paths.');
+      if (!engineering.playerCapsule || !isDeepStrictEqual(resolved.traversal?.capsule, engineering.playerCapsule)) issue('contract.traversal.capsule', 'Traversal capsules must match the declared player controller.');
+    } else if (resolved.traversal) issue('contract.traversal', 'Traversal intent contradicts the supplied paths.');
+    if (!isDeepStrictEqual(original, resolved) && !planned.designDecisions.length) issue('designDecisions', 'Engineering choices must be recorded, not silently defaulted.');
+    const spec = { ...asset, contract: resolved };
+    issues.push(...contractIssues(spec));
+    return spec;
   });
+  if (issues.length) throw Object.assign(new Error(issues.map(item => `${item.assetId}.${item.field}: ${item.message}`).join('\n')), { validationIssues: issues });
   const result = { ...draft, assets };
   validateSpecs(result);
   return result;
@@ -146,6 +156,7 @@ export function engineeringPrompt(job, draft, requirements, references) {
     'You are the engineering planner before any 3D authoring. Turn the supplied natural-language objective and draft assets into executable specifications.',
     'Keep every original asset, textual requirement, explicit measurement, rig/animation/LOD budget and quality target. Return one contract for every asset and one implementation/verification owner for every requirement ID.',
     'Choose reasonable missing gameplay metrics and geometry as EXPLICIT ENGINEERING DESIGN DECISIONS. Do not claim those choices are measurements of a referenced game. Record each choice in designDecisions and playerDecision. Supplied exact dimensions, paths and constraints are immutable.',
+    'Preserve a known pivot object exactly, including null meters for base-center or center modes. Those modes already define an origin; adding [0,0,0] changes the frozen representation. Only an unknown pivot may be planned here.',
     'Classify whether each asset needs a player passage test from meaning, including corridors, doorways, room shells and walkable spaces in any language. Static passage assets require a complete traversal contract, fbx-static and convex collision. Do not use a convex hull spanning a hollow room.',
     'Define one player capsule for the actual controller and reuse it in every traversal contract. Half-height includes hemispheres. Coordinates are asset-local meters, Z up, front -Y. Choose dimensions and an explicit pivot/origin before giving capsule-center paths.',
     'Capsule sweep endpoints are CENTER coordinates, not foot positions. Include vertical and horizontal clearance for both capsule dimensions and margin; floor contact must not make an otherwise passable sweep intersect the floor. Paths must exercise the intended passage, not empty space away from the asset.',

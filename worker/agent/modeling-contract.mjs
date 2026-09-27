@@ -52,16 +52,19 @@ export function contractIssues(spec, { allowIncompleteTraversal = false } = {}) 
   const issues = [];
   const issue = (field, message, kind = 'CONTRACT_INVALID') => issues.push({ assetId: spec.assetId, field, message, kind });
   const traversal = c.traversal;
-  if (!allowIncompleteTraversal && Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\btraversal\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
+  // A traversal ability/visual prop is not a static player passage. Engineering separately
+  // classifies room shells, doorways and paths; a bare mention of "traversal" is not geometry.
+  if (!allowIncompleteTraversal && Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\b(?:player|capsule)\s+(?:passage|clearance|sweep)\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
     issue('contract.traversal', 'CONTRACT_INCOMPLETE: traversability requires explicit capsule dimensions and paths; do not invent defaults.', 'CONTRACT_INCOMPLETE');
   }
   if (traversal) {
-    if (c.runtime.collision !== 'convex' || c.runtime.profile !== 'fbx-static') issue('contract.runtime', 'Traversal requires the calibrated static FBX convex-collision profile.');
-    if (traversal.capsule.halfHeightMeters < traversal.capsule.radiusMeters) issue('contract.traversal.capsule', 'Capsule half-height includes its hemispheres and cannot be smaller than the radius.');
+    if (c.runtime.collision !== 'convex') issue('contract.runtime.collision', 'Traversal requires the calibrated static FBX convex-collision profile.');
+    if (c.runtime.profile !== 'fbx-static') issue('contract.runtime.profile', 'Traversal requires the calibrated static FBX convex-collision profile.');
+    if (traversal.capsule.halfHeightMeters < traversal.capsule.radiusMeters) issue('contract.traversal.capsule.halfHeightMeters', 'Capsule half-height includes its hemispheres and cannot be smaller than the radius.');
     if (new Set(traversal.paths.map(p => p.id)).size !== traversal.paths.length) issue('contract.traversal.paths', 'Duplicate traversal path id.');
     if (traversal.paths.some(p => p.startMeters.every((v,i) => v === p.endMeters[i]))) issue('contract.traversal.paths', 'Traversal requires a nonzero sweep path.');
   }
-  if (c.dimensions.meters?.some(n => n <= 0)) issue('contract.dimensions.meters', 'Measured dimensions must be positive.');
+  c.dimensions.meters?.forEach((n, i) => { if (n <= 0) issue(`contract.dimensions.meters[${i}]`, 'Measured dimensions must be positive.'); });
   if (c.pivot.mode === 'custom' && !c.pivot.meters) issue('contract.pivot', 'Custom pivot requires a position.');
   if (c.runtime.profile === 'fbx-skeletal' && !spec.requireRig) issue('contract.runtime.profile', 'Skeletal export requires a rig.');
   if (c.assetClass === 'skeletal-character' && !spec.requireRig) issue('contract.assetClass', 'Skeletal character requires measured rig binding.');
@@ -71,7 +74,9 @@ export function contractIssues(spec, { allowIncompleteTraversal = false } = {}) 
     const previous = i ? a[i - 1] : spec.maxTriangles;
     if (n >= previous) issue(`contract.runtime.lodTriangles[${i}]`, `LOD budgets must decrease from LOD0. LOD${i + 1}=${n} must be < ${previous}; maxTriangles=${spec.maxTriangles} already specifies LOD0. lodTriangles contains LOD1 and later only.`);
   });
-  if (new Set(c.runtime.sockets).size !== c.runtime.sockets.length || new Set(c.runtime.animations).size !== c.runtime.animations.length) issue('contract.runtime', 'Duplicate runtime requirement.');
+  for (const key of ['sockets', 'animations']) {
+    if (new Set(c.runtime[key]).size !== c.runtime[key].length) issue(`contract.runtime.${key}`, 'Duplicate runtime requirement; retain every unique required name.');
+  }
   for (const match of c.referenceMatches) {
     if (!spec.referenceImages.includes(match.image)) issue('contract.referenceMatches', 'Reference match must name a supplied reference.');
     if (match.view === 'perspective') issue('contract.referenceMatches', 'Exact reference matching requires a registered orthographic view.');
