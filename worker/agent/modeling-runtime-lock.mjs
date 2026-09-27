@@ -1,8 +1,29 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { hashFile } from './modeling-io.mjs';
+import { hashFile, hashValue } from './modeling-io.mjs';
 import { createRequire } from 'node:module';
+
+// A danger-full-access exec registers its own workspace as trusted on first launch.
+// Ignore only that exact, standalone registration; keep revocations, other settings and
+// project config bytes pinned. Unrecognized TOML representations fail closed.
+export function runtimeConfigFingerprint(text, project) {
+  const normalize = value => {
+    const absolute = path.resolve(value).replaceAll('\\', '/');
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  };
+  let pinned = text;
+  if (project && !text.includes('"""') && !text.includes("'''")) {
+    const registration = /\r?\n?\[projects\.('[^'\r\n]*'|"(?:[^"\\\r\n]|\\.)*")\]\r?\ntrust_level = "trusted"\r?\n?(?=\r?\n|\[|$)/g;
+    pinned = text.replace(registration, (block, quoted) => {
+      let registered;
+      try { registered = quoted.startsWith("'") ? quoted.slice(1, -1) : JSON.parse(quoted); }
+      catch { return block; }
+      return normalize(registered) === normalize(project) ? '' : block;
+    });
+  }
+  return hashValue({ normalization: 'current-project-trust-registration-v1', content: pinned });
+}
 
 // Hash configuration rather than recording its contents. Never include auth.json or credentials.
 export async function modelingRuntimeIdentity(invocation = {}, project) {
@@ -14,6 +35,11 @@ export async function modelingRuntimeIdentity(invocation = {}, project) {
   }
   const configFile = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
   await add(configFile);
+  let projectConfigDirectoryPresent = false;
+  try { projectConfigDirectoryPresent = (await fs.stat(path.join(project, '.codex'))).isDirectory(); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  let globalConfigPath;
+  try { globalConfigPath = await fs.realpath(configFile); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   try {
     const text = await fs.readFile(configFile, 'utf8');
     // Only the global model identifier is reportable; never serialize config text/provider settings.
@@ -57,6 +83,8 @@ export async function modelingRuntimeIdentity(invocation = {}, project) {
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  return { version: 1, cliVersion, configuredModel, configuredReasoning, modelOverride: process.env.MODELING_AGENT_MODEL || null,
-    files: await Promise.all([...files].sort().map(async file => ({ file, sha256: await hashFile(file) }))), missing: missing.sort() };
+  return { version: 2, cliVersion, configuredModel, configuredReasoning, projectConfigDirectoryPresent,
+    modelOverride: process.env.MODELING_AGENT_MODEL || null,
+    files: await Promise.all([...files].sort().map(async file => ({ file, sha256: file === globalConfigPath
+      ? runtimeConfigFingerprint(await fs.readFile(file, 'utf8'), projectConfigDirectoryPresent ? null : project) : await hashFile(file) }))), missing: missing.sort() };
 }

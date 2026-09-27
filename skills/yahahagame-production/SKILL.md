@@ -65,6 +65,12 @@ Use these default stages and remove stages that the objective does not require:
 For a task that requests or implies 3D modeling, the worker harness runs a bounded modeling
 sub-pipeline inside `asset-production-and-import` before the main production call. Read
 [references/modeling-routing.md](references/modeling-routing.md) when that sub-pipeline is active.
+For generated V2 intake, read the host-frozen `plan/engineering-plan.json` before implementation.
+It preserves every objective requirement, records missing player/geometry metrics as explicit
+design choices, and carries unresolved reference facts into acceptance. Implement the same
+capsule in gameplay (meters in the contract, centimeters in Unreal). Acceptance must cover each
+requirement ID with actual evidence, measured player metrics when specified, and evidence resolving
+each outstanding source fact. Do not edit the frozen plan or claim a static sweep proves gameplay.
 The host evaluates existing licensed assets first, then chooses bounded Blender MCP authoring or
 the optional Tripo-to-Blender path. A missing or failed Tripo provider is a recorded fallback to
 Blender and never a reason to lower the asset acceptance gates.
@@ -73,6 +79,16 @@ Each stage report must contain: `stageId`, `revisionId`, `attempt`, `status`, `s
 `finishedAt`, `inputs`, `outputs`, `commands`, `toolVersions`, `evidence`, `warnings`, and
 `nextStage`. A stage is `ACCEPTED` only when its report and evidence manifest are written and
 all required outputs exist with hashes.
+
+Each `stages/<stageId>/evidence.json` must contain `protocol:1`, the matching `stageId`,
+`status:"PASS"`, a hashed `files` list, and a nonempty `checks` array. Each check must have
+an ID, `status:"PASS"`, and actual workspace-relative evidence paths after verification.
+A free-text `validation` array or an artifact inventory alone is not passing proof.
+Read and write task JSON/text as UTF-8 explicitly, including `Get-Content -Encoding UTF8`
+on Windows PowerShell.
+Keep the complete Windows package in `package/Windows/` with its root executable and runtime
+dependencies. Existing `Build/Windows/`, `Build/Win64/`, `package/Win64/` and
+`Saved/StagedBuilds/Windows/` or `Win64/` packages are accepted too; never deliver a lone EXE.
 
 ## Skill routing
 

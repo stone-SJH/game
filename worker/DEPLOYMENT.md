@@ -230,7 +230,8 @@ expired leases, local storage failures and uncertain process shutdown still stop
 | `MODELING_ROUTING_ENABLED` | `1` | Set to `0` for the previous production workflow. |
 | `MODELING_HARNESS_V2_ENABLED` | `0` | Opt in new tasks to pinned skills, blockout feedback and DCC/Unreal gates. Explicit v2 specs also opt in. |
 | `MODELING_AGENT_MODEL` | inherited | Optional model for evaluation, authoring and visual review. |
-| `MODELING_EVALUATION_TIMEOUT_MS` | `120000` | Budget per restricted agent call. |
+| `MODELING_EVALUATION_TIMEOUT_MS` | `120000` | Budget per route evaluation or visual review call. |
+| `MODELING_INTAKE_TIMEOUT_MS` | `1200000` | Budget per intake or engineering call (20 minutes; 1–1800000 ms); each stage has at most two calls and is capped by the task deadline. |
 | `MODELING_BUILD_TIMEOUT_MS` | `1800000` | Budget per direct/reuse authoring attempt. |
 | `MODELING_CLEANUP_TIMEOUT_MS` | `300000` | Budget per generated-model cleanup attempt. |
 | `TRIPO_MODEL` | `v3.1-20260211` | Pinned generation model. |
@@ -250,6 +251,52 @@ checks do not replace engine validation or a rig/animation deformation test.
 Reports are saved under `plan/modeling/` and `stages/asset-production-and-import/models/`, with
 host resumable state in the workspace's sibling `modeling-state/` directory and run reports in
 `runs/<runId>/`. Preserve these directories when continuing a task.
+
+Intake can require substantially more output than a single-asset review. It uses its own
+timeout while keeping the original V2 schema and technical checks. A failed V2 intake remains
+a hard stop; the error includes its last failure kind and the retained `execution.json` path.
+Changing the intake timeout does not reset an existing stage's durable budget: replay with
+changed limits is rejected. Start a new task for a changed budget; do not delete the failed
+task's journal, execution state, or artifacts.
+
+Generated V2 intake now resolves incomplete traversal specifications in a separate engineering
+stage before Blender. It retains uploaded references, explicit metrics, asset requirements and
+every natural-language objective clause. Missing measurements become recorded design choices;
+missing facts about an original game remain research/acceptance obligations. The frozen
+`plan/engineering-plan.json` is handed to production and checked against final requirement,
+player-metric and source-resolution evidence. A draft never passes the authoring contract gate.
+Intake and engineering have separate durable call budgets; neither is reset on continuation.
+Resuming the same task preserves accepted stage records and consumed stage attempts.
+
+The isolated planning probe runs live model calls without authoring, publishing or modifying
+the source task. It creates new task identities and writes `probe-report.json` with retained
+requests, responses and execution evidence:
+
+```powershell
+node worker/tools/modeling-intake-probe.mjs --objective 'Create a room with a walkable doorway.'
+node worker/tools/modeling-intake-probe.mjs --context D:\Audit\production-context.json --draft D:\Audit\modeling-plan-review-1-response.json
+node worker/tools/modeling-intake-probe.mjs --mode production --objective 'Create a minimal playable UI game with a restart button and a Windows package.'
+```
+
+`--mode production` runs the complete local harness, including generation, Unreal checks,
+packaged-executable launch and acceptance. It does not publish to the controller; it retains
+the isolated workspace and enforces a 45-minute overall probe deadline.
+`--seed-project DIRECTORY` copies an existing project into a new production probe identity,
+excluding caches and project Codex configuration. It never imports old execution budgets or
+alters the original project, and supports testing evidence repair against retained real builds.
+`--mode acceptance --seed-project DIRECTORY` copies retained artifacts and executes the host
+engineering acceptance, Unreal load, packaged launch, stage and final evidence gates without
+calling a production author. Its report is acceptance verification, not a new generation run.
+Complete Windows packages are discovered in `package/Windows`, `package/Win64`,
+`Saved/StagedBuilds/Windows`, `Saved/StagedBuilds/Win64`, `Build/Windows` and `Build/Win64`.
+
+New runtime fingerprints ignore only Codex's automatic standalone trusted registration for
+the current task when no project `.codex` directory exists. Creating project configuration,
+revoking trust or changing model/settings/code remains a toolchain change. Old pinned task
+identities are not migrated or reset.
+
+Quality review recognizes ordinary Chinese/English acceptance requests, checks every original
+criterion ID, attaches the actual scene image and rejects PASS without existing nonempty evidence.
 
 Run `npm run test:worker` and `powershell.exe -NoProfile -ExecutionPolicy Bypass -File worker/tests/deployment.tests.ps1`.
 The isolated real-tool probe is:

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { inspectProduction, runProductionHarness } from '../agent/production-harness.mjs';
+import { collectQualityEvidence, inspectProduction, runProductionHarness } from '../agent/production-harness.mjs';
 import { extractQualityCriteria, parseQualityAdvice, qualityReviewSettings } from '../agent/quality-review.mjs';
 
 const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
@@ -62,10 +62,13 @@ function qualityAdvice(action) {
   };
 }
 
-test('quality criteria require an explicit marker and the default budget is five', () => {
+test('quality criteria preserve explicit markers and plain-language requests', () => {
   const criteria = extractQualityCriteria({ objective: 'Make a platformer.\n质量验收条件：\n- 美术精度达到卡通参考\n- 关卡节奏有休息段\n- 交互手感响应及时' });
   assert.equal(criteria.length, 3);
-  assert.equal(extractQualityCriteria({ objective: 'Make a polished platformer.' }).length, 0);
+  assert.equal(extractQualityCriteria({ objective: 'Make a polished platformer.' }).length, 1);
+  const natural = extractQualityCriteria({ objective: '场景要一比一复刻。玩家必须能通关。请独立审核操作手感。' });
+  assert.equal(natural.length, 3);
+  assert.equal(natural[1].description, '玩家必须能通关。');
   assert.equal(qualityReviewSettings().maxIterations, 5);
   assert.throws(() => { process.env.QUALITY_REVIEW_MAX_ITERATIONS = '6'; qualityReviewSettings(); }, /QUALITY_REVIEW_MAX_ITERATIONS/);
   delete process.env.QUALITY_REVIEW_MAX_ITERATIONS;
@@ -83,6 +86,7 @@ test('quality review repairs only a concrete gap and then completes', async t =>
     calls.push(name);
     if (name.startsWith('production-orchestrator')) await seedDeliverables(project);
     if (name.startsWith('quality-review-')) {
+      assert.ok(args.includes('--image'));
       qualityCalls.count++;
       await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify(qualityAdvice(qualityCalls.count === 1 ? 'repair-project' : 'complete')));
     }
@@ -123,6 +127,7 @@ test('quality review stops after its bounded additional-iteration budget', async
     if (name.startsWith('quality-review-')) {
       qualityCalls++;
       const advice = qualityAdvice('repair-project');
+      advice.criteria = advice.criteria.slice(0, 1);
       advice.recommendedAdditionalIterations = 2;
       await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify(advice));
     }
@@ -136,4 +141,78 @@ test('quality review stops after its bounded additional-iteration budget', async
     unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {} }), /Quality review budget exhausted/);
   assert.equal(productionCalls, 3);
   assert.equal(qualityCalls, 3);
+});
+
+test('quality review rejects omitted, duplicate, skipped or unsupported criteria', () => {
+  const expected = qualityAdvice('complete').criteria;
+  for (const mutate of [
+    advice => advice.criteria.pop(),
+    advice => { advice.criteria[1].id = advice.criteria[0].id; },
+    advice => { advice.criteria[0].status = 'NOT_APPLICABLE'; },
+    advice => { advice.criteria[0].evidence = []; },
+    advice => { advice.dimensions.artPrecision.evidence = ['   ']; },
+  ]) {
+    const advice = qualityAdvice('complete');
+    mutate(advice);
+    assert.throws(() => parseQualityAdvice(JSON.stringify(advice), expected));
+  }
+  assert.deepEqual(extractQualityCriteria({ qualityCriteria: ['  ', 'A', '', 'B'] }).map(row => row.id), ['quality-1', 'quality-2']);
+});
+
+test('large asset plans cannot crowd out the actual scene image from quality review', async t => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-images-'));
+  t.after(() => fs.rm(project, { recursive: true, force: true }));
+  await fs.mkdir(path.join(project, 'plan'));
+  for (let i = 0; i < 60; i++) await fs.writeFile(path.join(project, 'plan', `${i}.json`), JSON.stringify({ output: 'x'.repeat(16000) }));
+  await fs.writeFile(path.join(project, 'scene-preview.png'), 'image');
+  const evidence = await collectQualityEvidence(project);
+  assert.equal(evidence[0].path, 'scene-preview.png');
+  assert.equal(evidence[0].type, 'image');
+});
+
+test('natural language repairs stage proof after first-launch trust registration without replanning', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engineering-production-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project'), output = path.join(root, 'run');
+  const codexConfig = path.join(root, 'codex-config');
+  await fs.mkdir(codexConfig);
+  await fs.writeFile(path.join(codexConfig, 'config.toml'), 'model = "fixture"\n');
+  environment(t, { MODELING_ROUTING_ENABLED: '1', MODELING_HARNESS_V2_ENABLED: '1', CODEX_CMD: process.execPath,
+    CODEX_MAX_ATTEMPTS: '2', CODEX_RETRY_DELAY_MS: '1', CODEX_HOME: codexConfig });
+  const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality', objective: 'Repair existing input code.' };
+  const calls = [];
+  const step = async (name, command, args, timeout, cwd, accepts, options) => {
+    calls.push(name);
+    if (name.startsWith('modeling-plan')) await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify({ reason: 'Existing code only.', assets: [] }));
+    if (name.startsWith('modeling-engineering')) await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify({
+      reason: 'Retain input repair.', playerCapsule: null, playerDecision: 'Existing controller unchanged.', assets: [],
+      requirements: [{ id: 'requirement-1', owner: 'gameplay', implementation: 'Repair the input.', verification: 'Exercise input in the packaged game.' }],
+      references: [], sources: [], unresolvedFacts: [],
+    }));
+    if (name.startsWith('production-orchestrator')) {
+      assert.match(options.input, /engineering-plan.json/);
+      assert.match(options.input, /playerMetrics/);
+      assert.match(options.input, /checks:\[\{id,status:"PASS",evidence:/);
+      await seedDeliverables(project);
+      const file = path.join(project, 'acceptance/acceptance-report.json');
+      const acceptance = JSON.parse(await fs.readFile(file, 'utf8'));
+      acceptance.criteria = [{ id: 'requirement-1', status: 'PASS', evidence: ['acceptance/playtest-evidence.json'] }];
+      await fs.writeFile(file, JSON.stringify(acceptance));
+      if (name.endsWith('-1')) {
+        await fs.appendFile(path.join(codexConfig, 'config.toml'), `\n[projects.'${project}']\ntrust_level = "trusted"\n`);
+        await fs.writeFile(path.join(project, 'stages/intake-and-contract/evidence.json'), JSON.stringify({
+          protocol: 1, status: 'PASS', files: [], validation: ['Claims without structured proof must fail.'],
+        }));
+      } else assert.match(options.input, /passing proof missing/);
+    }
+    const result = { exitCode: 0, stdout: '', stderr: '', timedOut: false, stopConfirmed: true };
+    assert.ok(!accepts || await accepts(result)); return result;
+  };
+  await runProductionHarness({ job, project, output, signal: new AbortController().signal, step, unreal: 'test-engine' });
+  assert.ok(calls[0].startsWith('modeling-plan'));
+  assert.ok(calls[1].startsWith('modeling-engineering'));
+  assert.ok(calls.some(name => name.startsWith('packaged-game-playtest')));
+  assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
+  assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 1);
+  assert.equal(calls.filter(name => name.startsWith('production-orchestrator')).length, 2);
 });

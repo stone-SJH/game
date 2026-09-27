@@ -8,6 +8,14 @@ state; the production agent consumes accepted model evidence and integrates it i
 - Split the request into independently reviewable asset specifications.
 - Record each requirement verbatim, including quality, precision, triangle, rig, mesh, material,
   and reference-image requirements.
+- Generated V2 assets first form a draft. Missing traversal data is resolved by a bounded
+  engineering planner before authoring: one player capsule, clearance, local center paths,
+  dimensions and pivot. Unspecified measurements are documented project decisions, never
+  asserted as measurements of a referenced game. Supplied constraints remain immutable.
+- The planner receives verified uploaded images/text and records every objective requirement,
+  its implementation and verification, plus unresolved reference facts. Read-only research can
+  inspect sources; unknown facts remain acceptance obligations. Code-only requests retain this
+  requirement coverage without inventing model work.
 - Inspect only licensed, registered assets in the current workspace. A filename match is not
   evidence of similarity or editability.
 - Probe the actual Blender MCP stdio server and record its tool list and Blender version. A CLI
@@ -31,6 +39,11 @@ author statement is not an acceptance result.
 
 The modeling host writes `plan/modeling-specs.json`, decisions under `plan/modeling/`, and
 geometry reports, visual reviews, and hashes under `stages/asset-production-and-import/models/`.
+Generated V2 intake also writes `plan/engineering-plan.json`. The host protects its hash and
+requires final criteria for every original requirement ID. Report `playerMetrics` in meters
+with the exact frozen capsule and real runtime evidence. Resolve `unresolvedFacts` through
+`referenceResolutions` with actual research evidence; neither the plan nor the acceptance report
+itself proves execution. Dynamic gates, gliding, climbing and puzzle completion need gameplay tests.
 Provider resumable state lives outside the project in the workspace's `modeling-state/` directory.
 The main production agent must keep accepted source
 and GLB files unchanged. A new asset or changed specification is requested through

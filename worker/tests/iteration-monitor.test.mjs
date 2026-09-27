@@ -107,6 +107,20 @@ test('packaged executable discovery ignores workspace tools', async t => {
   assert.equal(inspected.missing.includes('packaged game (.exe)'), false);
 });
 
+test('archived Build Windows package is discovered without mistaking tools for the game', async t => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.project, 'Game.uproject'), '{}');
+  const packageRoot = path.join(f.project, 'Build', 'Windows');
+  await fs.mkdir(path.join(packageRoot, 'Engine', 'Extras'), { recursive: true });
+  await fs.mkdir(path.join(f.project, 'Build', 'Tools'), { recursive: true });
+  await fs.writeFile(path.join(packageRoot, 'Engine', 'Extras', 'Game.exe'), 'runtime helper');
+  await fs.writeFile(path.join(f.project, 'Build', 'Tools', 'compiler.exe'), 'compiler');
+  assert.equal((await inspectProduction(f.project)).files.packageFile, undefined);
+  const packaged = path.join(packageRoot, 'Game.exe');
+  await fs.writeFile(packaged, 'packaged game entry');
+  assert.equal((await inspectProduction(f.project)).files.packageFile, packaged);
+});
+
 test('acceptance contract failures identify stale identity and missing proof fields', () => {
   const result = validateAcceptanceReport({ protocol: 1, status: 'ACCEPTED', pass: true, criteria: [{ status: 'PASS' }],
     taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old' },

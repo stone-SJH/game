@@ -6,11 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyIterationFailure, createIterationMonitor } from './iteration-monitor.mjs';
 import {
-  extractQualityCriteria, parseQualityAdvice, qualityAdviceSchema, qualityReviewInvocationArgs, qualityReviewPrompt,
+  extractQualityCriteria, parseQualityAdvice, qualitySchemaFor, qualityReviewInvocationArgs, qualityReviewPrompt,
   qualityReviewSettings,
 } from './quality-review.mjs';
 import { createModelingPipeline } from './modeling-pipeline.mjs';
-import { agentEnvironment } from './modeling-io.mjs';
+import { agentEnvironment, readJson, localPath } from './modeling-io.mjs';
+import { validateEngineeringAcceptance } from './modeling-engineering.mjs';
 import { validateUnrealModels } from './modeling-unreal.mjs';
 
 const STAGES = [
@@ -46,6 +47,8 @@ const PACKAGE_ROOTS = [
   ['Saved', 'StagedBuilds', 'Windows'],
   ['package', 'Win64'],
   ['Saved', 'StagedBuilds', 'Win64'],
+  ['Build', 'Windows'],
+  ['Build', 'Win64'],
 ];
 
 async function findPackagedExecutable(project, projectFile) {
@@ -67,12 +70,15 @@ async function findPackagedExecutable(project, projectFile) {
   return candidates[0]?.file;
 }
 
-async function collectQualityEvidence(project) {
+export async function collectQualityEvidence(project) {
   const files = await filesUnder(project);
   const selected = files.filter(file => {
     const relative = path.relative(project, file).split(path.sep).join('/');
     return /^(?:acceptance|plan|provenance|stages)\/.*\.json$/i.test(relative) || /^scene-preview\.(?:png|jpe?g|webp)$/i.test(relative);
-  }).sort();
+  });
+  const priority = file => /^scene-preview\./i.test(path.basename(file)) ? 0 : /[\\/]acceptance[\\/]/.test(file) ? 1 :
+    path.basename(file) === 'engineering-plan.json' ? 2 : 3;
+  selected.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b));
   const evidence = [];
   let totalBytes = 0;
   for (const file of selected.slice(0, 50)) {
@@ -288,6 +294,34 @@ async function removeCodexTempDirectory(directory) {
   await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
 }
 
+export async function initializeProductionPlans(project, job, context) {
+  const seeds = {
+    'production-plan.json': {
+      protocol: 1, taskId: job.taskId, runId: job.runId, objective: job.objective,
+      stages: STAGES.map((id, index) => ({ id, order: index + 1, status: 'PENDING', outputs: [] })),
+      acceptance: context.requiredOutputs, qualityAcceptance: context.qualityCriteria,
+    },
+    'stage-manifest.json': {
+      protocol: 1, taskId: job.taskId, runId: job.runId,
+      stages: STAGES.map(id => ({ id, status: 'PENDING', attempts: 0 })),
+    },
+  };
+  const writes = [];
+  for (const [name, seed] of Object.entries(seeds)) {
+    const file = await localPath(project, `plan/${name}`);
+    const previous = await readJson(file);
+    if (previous?.taskId === job.taskId) {
+      if (previous.protocol !== 1 || !Array.isArray(previous.stages) ||
+          previous.stages.length !== STAGES.length || previous.stages.some((entry, index) => entry.id !== STAGES[index])) {
+        throw new Error(`Cannot resume invalid production state: ${name}`);
+      }
+      // Update the run envelope only: accepted evidence and consumed attempts survive resumption.
+      writes.push([file, { ...previous, runId: job.runId }]);
+    } else writes.push([file, seed]);
+  }
+  for (const [file, value] of writes) await writeJson(file, value);
+}
+
 export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {}, onModelingReport = async () => {} }) {
   if ((job.payload?.references?.length || 0) !== (job.referenceFiles?.length || 0)) throw new Error('Reference files must be downloaded and verified before production starts.');
   await fs.mkdir(project, { recursive: true });
@@ -305,21 +339,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
     workspaceRoot: project,
     references: job.referenceFiles || [],
     stages: STAGES,
-    requiredOutputs: ['.uproject', 'scene-preview.png', 'packaged-game.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
+    requiredOutputs: ['.uproject', 'scene-preview.png', 'package/Windows/<ProjectName>.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
     qualityCriteria,
     qualityReview: { enabled: qualityCriteria.length > 0, maxAdditionalIterations: qualitySettings.maxIterations },
   };
   await writeJson(path.join(project, 'plan', 'production-context.json'), context);
-  await writeJson(path.join(project, 'plan', 'production-plan.json'), {
-    protocol: 1, taskId: job.taskId, runId: job.runId, objective: job.objective,
-    stages: STAGES.map((id, index) => ({ id, order: index + 1, status: 'PENDING', outputs: [] })),
-    acceptance: context.requiredOutputs,
-    qualityAcceptance: qualityCriteria,
-  });
-  await writeJson(path.join(project, 'plan', 'stage-manifest.json'), {
-    protocol: 1, taskId: job.taskId, runId: job.runId,
-    stages: STAGES.map(id => ({ id, status: 'PENDING', attempts: 0 })),
-  });
+  await initializeProductionPlans(project, job, context);
 
   const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
   const skillCandidates = [process.env.YAHAHA_PRODUCTION_SKILL, path.resolve(moduleRoot, '..', '..', 'skills', 'yahahagame-production', 'SKILL.md'), path.join(process.env.USERPROFILE || '', '.codex', 'skills', 'yahahagame-production', 'SKILL.md')].filter(Boolean);
@@ -353,17 +378,31 @@ export async function runProductionHarness({ job, project, output, signal, step,
     }
     const schemaFile = path.join(output, 'quality-review-schema.json');
     const responseFile = path.join(output, `quality-review-response-${attemptNumber}.json`);
-    await writeJson(schemaFile, qualityAdviceSchema);
+    await writeJson(schemaFile, qualitySchemaFor(qualityCriteria));
     await fs.rm(responseFile, { force: true });
     const evidence = await collectQualityEvidence(project);
+    const images = [];
+    for (const entry of evidence.filter(item => item.type === 'image' && item.bytes <= 10 * 1024 * 1024)) {
+      images.push(await localPath(project, entry.path, { existing: true }));
+    }
     const input = qualityReviewPrompt({ job, project, criteria: qualityCriteria, attempt: attemptNumber, evidence,
       previous: feedback?.kind === 'quality-review' ? feedback : null });
     await reportProgress({ phase: 'reviewing', status: 'running', goal: job.objective, iteration: attemptNumber,
       iterationTotal: qualityIterationTotal, tool: 'Quality reviewer', step: `quality review iteration ${attemptNumber}`, prompt: input });
-    const args = qualityReviewInvocationArgs(invocation, project, schemaFile, responseFile);
+    const args = qualityReviewInvocationArgs(invocation, project, schemaFile, responseFile, images);
     await step(`quality-review-${attemptNumber}`, invocation.command, args, qualitySettings.timeoutMs, project, undefined, { input });
     let advice;
-    try { advice = parseQualityAdvice(await fs.readFile(responseFile, 'utf8')); }
+    try {
+      advice = parseQualityAdvice(await fs.readFile(responseFile, 'utf8'), qualityCriteria);
+      for (const item of [...advice.criteria, ...Object.values(advice.dimensions)]) {
+        if (item.status !== 'PASS') continue;
+        for (const relative of item.evidence) {
+          const file = await localPath(project, relative, { existing: true });
+          const stat = await fs.stat(file);
+          if (!stat.isFile() || !stat.size) throw new Error('Quality evidence must be a nonempty actual file.');
+        }
+      }
+    }
     catch (error) { throw Object.assign(new Error(`Quality reviewer failed: ${error.message}`), { hardFailure: true, reviewed: true }); }
     if (advice.action === 'repair-project' && qualityRepairBudget === null) {
       qualityRepairBudget = Math.min(qualitySettings.maxIterations, advice.recommendedAdditionalIterations);
@@ -399,6 +438,9 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Execute the complete production loop: plan, create a real Unreal project, author assets and gameplay, build/package it, launch the packaged game for a bounded playtest, render a real scene preview, and write machine-readable evidence.',
       'Do not use the Blender factory-startup cube as a final preview. Do not claim success from tool exit codes alone.',
       'Before finishing, ensure these exact deliverables exist: one .uproject, scene-preview.png (or .jpg/.webp), a packaged playable .exe, workspace-manifest.json, provenance/asset-manifest.json, plan/stage-manifest.json, stage-report.json and evidence.json for every planned stage, acceptance/playtest-evidence.json, and acceptance/acceptance-report.json with passing gameplay evidence. Keep all paths relative to the workspace.',
+      'Place the complete Windows package under package/Windows/ with its root <ProjectName>.exe and all dependencies. Existing complete packages under Build/Windows/, Build/Win64/, package/Win64/ or Saved/StagedBuilds/Windows/ or Win64/ are also supported. Do not copy an executable alone or invent a root packaged-game.exe to satisfy a filename.',
+      'For every stages/<stageId>/evidence.json, use {protocol:1,stageId,status:"PASS",files:[{path,sha256}],checks:[{id,status:"PASS",evidence:[actual workspace-relative proof files]}]}. Checks must be a nonempty array of individually passing, actually verified checks. A files list or free-text validation array alone is insufficient. The matching stage-report.json needs stageId and status:"ACCEPTED". Do not mark an unexecuted check PASS.',
+      'Read/write task JSON and Chinese text as UTF-8 explicitly. On Windows PowerShell use Get-Content -Encoding UTF8; its legacy default encoding corrupts these files.',
       `The acceptance report must use protocol 1, identify taskId=${job.taskId}, workspaceId=${job.workspaceId}, and runId=${job.runId}, set status to ACCEPTED or PASS with an explicit true pass/accepted/passed flag, set packagedGameStatus, gameplayStatus, and visualStatus to PASS, and contain a non-empty criteria array whose items all have status PASS. The stage manifest must retain the same taskId and runId and list every planned stage as ACCEPTED.`,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
@@ -429,7 +471,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
         modelingResults = await modelingPipeline.prepare();
         await modelingPipeline.verify();
       }
+      const engineeringPlan = await modelingPipeline?.engineeringPlan() || null;
+      const engineeringHandoff = engineeringPlan ? [
+        'Read plan/engineering-plan.json before building gameplay. This host-frozen plan covers every original requirement and separates documented engineering choices from unresolved original-reference facts. Never edit it.',
+        'Implement the exact player capsule in meters from playerCapsule (Unreal values use centimeters), and use each asset contract, pivot and local traversal frame when placing geometry. Static sweeps do not prove jump/climb/swim/glide or puzzle reachability; execute the listed gameplay tests.',
+        'In acceptance/acceptance-report.json, include every engineering requirement ID exactly once in criteria with status PASS and evidence:[workspace-relative actual evidence files]. For a planned playerCapsule also include playerMetrics:{units:"meters",capsule:{radiusMeters,halfHeightMeters,axis:"Z"},evidence:[actual runtime measurement evidence]}.',
+        'Resolve each engineering unresolvedFacts item through reference research and record referenceResolutions:[{fact:exact original unresolved fact,evidence:[actual research/evidence files]}]. Planning decisions or the acceptance report itself are not proof. Preserve original fidelity targets; do not substitute invented measurements or unsupported claims.',
+      ].join('\n') : '';
       const prompt = modelingResults ? [basePrompt,
+        engineeringHandoff,
         'The host has now completed the modeling assessment for this iteration. Treat these results as the authoritative asset handoff.',
         `Modeling results: ${JSON.stringify(modelingResults)}`,
         ...(modelingResults.assets.some(asset => asset.contract?.runtime.engine === 'unreal') ? [
@@ -493,6 +543,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
         const details = acceptanceResult.details;
         throw Object.assign(new Error(acceptanceFailureMessage(details)), { acceptanceFailure: details });
       }
+      await validateEngineeringAcceptance(engineeringPlan, acceptance, project);
       stage = 'stage-manifest';
       let stageManifest;
       try { stageManifest = JSON.parse(await fs.readFile(deliverables.files.stageManifest, 'utf8')); } catch (error) { throw new Error(`Invalid stage manifest: ${error.message}`); }

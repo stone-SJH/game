@@ -47,24 +47,32 @@ export const qualityAdviceSchema = {
   required: ['action', 'reason', 'criteria', 'dimensions', 'repairInstructions', 'remainingGap', 'recommendedAdditionalIterations'],
 };
 
+export function qualitySchemaFor(criteria) {
+  const schema = structuredClone(qualityAdviceSchema);
+  schema.properties.criteria.minItems = criteria.length;
+  schema.properties.criteria.maxItems = criteria.length;
+  schema.properties.criteria.items.properties.id.enum = criteria.map(item => item.id);
+  return schema;
+}
+
 function clean(value, max = 2000) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
 
 function criterionList(value) {
   if (Array.isArray(value)) {
-    return value.flatMap((item, index) => {
+    return value.flatMap(item => {
       const description = typeof item === 'string' ? item : item && typeof item === 'object'
         ? item.description || item.text || item.name : '';
       const text = clean(description, 1200);
-      return text ? [{ id: clean(item?.id, 120) || `quality-${index + 1}`, description: text }] : [];
-    });
+      return text ? [{ id: clean(item?.id, 120), description: text }] : [];
+    }).map((item, index) => ({ ...item, id: item.id || `quality-${index + 1}` }));
   }
   if (typeof value !== 'string') return [];
-  return value.split(/\r?\n|[;；]+/).flatMap((line, index) => {
+  return value.split(/\r?\n|[;；]+/).flatMap(line => {
     const description = line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim();
-    return description ? [{ id: `quality-${index + 1}`, description: clean(description, 1200) }] : [];
-  });
+    return description ? [clean(description, 1200)] : [];
+  }).map((description, index) => ({ id: `quality-${index + 1}`, description }));
 }
 
 export function extractQualityCriteria(job = {}) {
@@ -75,7 +83,11 @@ export function extractQualityCriteria(job = {}) {
   }
   const objective = String(job.objective || '');
   const marker = objective.match(QUALITY_MARKER);
-  if (!marker) return [];
+  if (!marker) {
+    // Natural-language acceptance requests must not depend on an undocumented heading.
+    if (!/一比一|1\s*[:：]\s*1|复刻|验收|审核|手感|通关|必须|高保真|\b(?:polished|fidelity|quality|must|acceptance|responsive|replica)\b/i.test(objective)) return [];
+    return criterionList(objective.split(/(?<=[。！？!?])\s*|\r?\n/).filter(part => part.trim()));
+  }
   const section = objective.slice(marker.index + marker[0].length).split(/\n\s*\n/)[0];
   return criterionList(section);
 }
@@ -93,8 +105,10 @@ export function qualityReviewSettings() {
   };
 }
 
-export function qualityReviewInvocationArgs(invocation, project, schemaFile, responseFile) {
-  return monitorInvocationArgs(invocation, project, schemaFile, responseFile);
+export function qualityReviewInvocationArgs(invocation, project, schemaFile, responseFile, images = []) {
+  const args = monitorInvocationArgs(invocation, project, schemaFile, responseFile).slice(0, -1);
+  for (const image of images) args.push('--image', image);
+  return [...args, '-'];
 }
 
 export function qualityReviewPrompt({ job, project, criteria, attempt, evidence = null, previous = null }) {
@@ -102,6 +116,7 @@ export function qualityReviewPrompt({ job, project, criteria, attempt, evidence 
     'You are the independent quality acceptance reviewer for a game-production iteration.',
     'The hard production gates already passed. Use only the supplied machine-readable task evidence; do not edit files, run commands, start agents, or invent requirements.',
     'Evaluate the explicit quality acceptance criteria below and report evidence relative to the workspace.',
+    'Return every supplied criterion ID exactly once. Requested criteria cannot be marked NOT_APPLICABLE. Inspect attached scene images directly. Evidence entries must be actual workspace-relative file paths, without fragments or commentary.',
     'Always assess these dimensions: art precision (visual fidelity, asset integration, composition), level pacing (route rhythm, difficulty ramp, rest and challenge spacing), and interaction feel (input response, camera/control feedback, recovery and affordance). Mark a dimension NOT_APPLICABLE only when the objective truly does not cover it.',
     'A PASS requires concrete evidence. If evidence is missing or insufficient for an explicit criterion or applicable dimension, treat that as a GAP and request the smallest repair that can produce evidence. If all explicit criteria and applicable dimensions pass, choose complete.',
     'Do not request changes for personal taste, unmentioned features, or improvements unsupported by the objective. Do not weaken or rewrite hard acceptance gates.',
@@ -115,7 +130,7 @@ export function qualityReviewPrompt({ job, project, criteria, attempt, evidence 
   ].join('\n');
 }
 
-export function parseQualityAdvice(text) {
+export function parseQualityAdvice(text, expectedCriteria = []) {
   let value;
   try { value = JSON.parse(text); } catch { throw new Error('Invalid quality reviewer JSON.'); }
   if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('Invalid quality reviewer response.');
@@ -130,15 +145,23 @@ export function parseQualityAdvice(text) {
   const criteria = value.criteria.map((item, index) => {
     if (!item || typeof item !== 'object' || !clean(item.id, 120) || !clean(item.description, 1200) || !STATUS.includes(item.status) ||
         !Array.isArray(item.evidence) || item.evidence.some(entry => typeof entry !== 'string') || typeof item.gap !== 'string') throw new Error(`Invalid quality criterion at index ${index}.`);
-    return { id: clean(item.id, 120), description: clean(item.description, 1200), status: item.status,
+    return { id: clean(item.id, 120), description: expectedCriteria.find(row => row.id === item.id)?.description || clean(item.description, 1200), status: item.status,
       evidence: item.evidence.map(entry => clean(entry, 400)).filter(Boolean).slice(0, 12), gap: clean(item.gap, 1200) };
   });
+  if (new Set(criteria.map(item => item.id)).size !== criteria.length) throw new Error('Duplicate quality criterion.');
+  if (expectedCriteria.length && (criteria.length !== expectedCriteria.length ||
+      expectedCriteria.some(expected => !criteria.some(item => item.id === expected.id)))) {
+    throw new Error('Quality review must cover every original criterion exactly once.');
+  }
+  if (criteria.some(item => item.status === 'PASS' && !item.evidence.length)) throw new Error('Quality PASS requires evidence.');
+  if (expectedCriteria.length && criteria.some(item => item.status === 'NOT_APPLICABLE')) throw new Error('Requested quality criteria cannot be skipped.');
   const dimensions = {};
   for (const name of DIMENSIONS) {
     const item = value.dimensions[name];
     if (!item || typeof item !== 'object' || !STATUS.includes(item.status) || !clean(item.summary, 1200) || !Array.isArray(item.evidence) ||
         item.evidence.some(entry => typeof entry !== 'string') || typeof item.gap !== 'string') throw new Error(`Invalid quality dimension: ${name}.`);
     dimensions[name] = { status: item.status, summary: clean(item.summary, 1200), evidence: item.evidence.map(entry => clean(entry, 400)).filter(Boolean).slice(0, 12), gap: clean(item.gap, 1200) };
+    if (item.status === 'PASS' && !dimensions[name].evidence.length) throw new Error('Quality dimension PASS requires evidence.');
   }
   const gaps = criteria.some(item => item.status === 'GAP') || Object.values(dimensions).some(item => item.status === 'GAP');
   if (value.action === 'repair-project' && (!gaps || !clean(value.repairInstructions, 4000) || value.remainingGap <= 0 || value.recommendedAdditionalIterations < 1)) {
