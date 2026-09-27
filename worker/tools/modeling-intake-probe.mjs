@@ -10,12 +10,13 @@ import { atomicJson, readJson, hashFile, localPath } from '../agent/modeling-io.
 
 const argv = process.argv.slice(2), options = {};
 for (let i = 0; i < argv.length; i += 2) {
-  if (!['--context', '--objective', '--draft', '--out', '--mode'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --out NEW_DIRECTORY, --mode planning|production.');
+  if (!['--context', '--objective', '--draft', '--out', '--mode', '--seed-project'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --out NEW_DIRECTORY, --mode planning|production, --seed-project DIRECTORY.');
   options[argv[i].slice(2)] = argv[i + 1];
 }
 if (Boolean(options.context) === Boolean(options.objective)) throw new Error('Choose exactly one context file or natural-language objective.');
 const mode = options.mode || 'planning';
 if (!['planning', 'production'].includes(mode) || mode === 'production' && options.draft) throw new Error('Production probes require fresh intake, not a retained draft.');
+if (options['seed-project'] && mode !== 'production') throw new Error('A copied project is only supported by production probes.');
 const context = options.context ? await readJson(path.resolve(options.context)) : { objective: options.objective, references: [] };
 const originalHash = options.context ? await hashFile(path.resolve(options.context)) : null;
 const draft = options.draft ? await readJson(path.resolve(options.draft)) : null;
@@ -23,6 +24,17 @@ const root = options.out ? path.resolve(options.out) : await fs.mkdtemp(path.joi
 if (options.out) await fs.mkdir(root, { recursive: false });
 const project = path.join(root, 'project'), output = path.join(root, 'run');
 await fs.mkdir(project); await fs.mkdir(output);
+if (options['seed-project']) {
+  const source = path.resolve(options['seed-project']);
+  if (project.startsWith(source + path.sep)) throw new Error('Seed project cannot contain the probe output.');
+  await fs.cp(source, project, { recursive: true, force: false, errorOnExist: true,
+    filter: async file => {
+      const relative = path.relative(source, file);
+      if (['Intermediate', 'DerivedDataCache', 'Saved', '.git', '.codex'].includes(relative.split(path.sep)[0])) return false;
+      if ((await fs.lstat(file)).isSymbolicLink()) throw new Error('Seed project cannot contain links or junctions.');
+      return true;
+    } });
+}
 for (const reference of context.references || []) {
   const source = await localPath(context.workspaceRoot, reference.localPath, { existing: true });
   if (await hashFile(source) !== reference.sha256) throw new Error('Original reference changed.');
@@ -63,7 +75,7 @@ try {
 } catch (caught) { if (caught !== stop) error = caught; }
 const plan = await readJson(path.join(project, 'plan/modeling-specs.json'));
 const engineering = await readJson(path.join(project, 'plan/engineering-plan.json'));
-const report = { mode, sourceTaskId: context.taskId || null, root, durationMs: Date.now() - started, calls,
+const report = { mode, sourceTaskId: context.taskId || null, seedProject: options['seed-project'] || null, root, durationMs: Date.now() - started, calls,
   passed: !error && Boolean(plan) && Boolean(engineering) && (mode === 'planning' || Boolean(delivered)),
   delivered: delivered?.files,
   sourceUnchanged: !options.context || originalHash === await hashFile(path.resolve(options.context)),

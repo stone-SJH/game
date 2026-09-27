@@ -170,11 +170,15 @@ test('large asset plans cannot crowd out the actual scene image from quality rev
   assert.equal(evidence[0].type, 'image');
 });
 
-test('natural language reaches engineering, production handoff and final requirement acceptance', async t => {
+test('natural language repairs stage proof after first-launch trust registration without replanning', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engineering-production-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project'), output = path.join(root, 'run');
-  environment(t, { MODELING_ROUTING_ENABLED: '1', MODELING_HARNESS_V2_ENABLED: '1', CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '1' });
+  const codexConfig = path.join(root, 'codex-config');
+  await fs.mkdir(codexConfig);
+  await fs.writeFile(path.join(codexConfig, 'config.toml'), 'model = "fixture"\n');
+  environment(t, { MODELING_ROUTING_ENABLED: '1', MODELING_HARNESS_V2_ENABLED: '1', CODEX_CMD: process.execPath,
+    CODEX_MAX_ATTEMPTS: '2', CODEX_RETRY_DELAY_MS: '1', CODEX_HOME: codexConfig });
   const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality', objective: 'Repair existing input code.' };
   const calls = [];
   const step = async (name, command, args, timeout, cwd, accepts, options) => {
@@ -188,11 +192,18 @@ test('natural language reaches engineering, production handoff and final require
     if (name.startsWith('production-orchestrator')) {
       assert.match(options.input, /engineering-plan.json/);
       assert.match(options.input, /playerMetrics/);
+      assert.match(options.input, /checks:\[\{id,status:"PASS",evidence:/);
       await seedDeliverables(project);
       const file = path.join(project, 'acceptance/acceptance-report.json');
       const acceptance = JSON.parse(await fs.readFile(file, 'utf8'));
       acceptance.criteria = [{ id: 'requirement-1', status: 'PASS', evidence: ['acceptance/playtest-evidence.json'] }];
       await fs.writeFile(file, JSON.stringify(acceptance));
+      if (name.endsWith('-1')) {
+        await fs.appendFile(path.join(codexConfig, 'config.toml'), `\n[projects.'${project}']\ntrust_level = "trusted"\n`);
+        await fs.writeFile(path.join(project, 'stages/intake-and-contract/evidence.json'), JSON.stringify({
+          protocol: 1, status: 'PASS', files: [], validation: ['Claims without structured proof must fail.'],
+        }));
+      } else assert.match(options.input, /passing proof missing/);
     }
     const result = { exitCode: 0, stdout: '', stderr: '', timedOut: false, stopConfirmed: true };
     assert.ok(!accepts || await accepts(result)); return result;
@@ -201,4 +212,7 @@ test('natural language reaches engineering, production handoff and final require
   assert.ok(calls[0].startsWith('modeling-plan'));
   assert.ok(calls[1].startsWith('modeling-engineering'));
   assert.ok(calls.some(name => name.startsWith('packaged-game-playtest')));
+  assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
+  assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 1);
+  assert.equal(calls.filter(name => name.startsWith('production-orchestrator')).length, 2);
 });

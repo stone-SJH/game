@@ -26,6 +26,17 @@ The audit also corrected:
 - Restarting a task overwrote accepted stage records and attempt counts with PENDING entries.
   Resumption now retains stage history and updates only the run envelope.
 - Code-only V2 requests now retain objective coverage through engineering and final acceptance.
+- The live full-production test found that stage evidence instructions did not specify the
+  required structured checks. The prompt and skill now require nonempty passing checks with
+  actual evidence paths, and explicitly require UTF-8 for Chinese task data on PowerShell.
+- Codex automatically registered the current project as trusted on first production launch.
+  The old fingerprint hashed that bookkeeping change as a new toolchain and prevented a valid
+  repair iteration. Removing only the newly added registration reproduced the exact original
+  SHA-256. New task fingerprints ignore only the current project's standalone trusted entry
+  when there is no project `.codex` directory. Model/settings changes, untrusted entries,
+  project config directories/files, unrelated registrations and code changes remain fenced.
+  [Official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+  documents project trust and the project configuration it controls.
 
 ## Automated and engine checks
 
@@ -34,7 +45,7 @@ are outside Git. Evidence root: `D:/StoneWorker/modeling-v2-audit/engineering-20
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Full Node worker suite | 136/136 passed, including complete host handoff and reference propagation | `node-tests.log` |
+| Full Node worker suite | 138/138 passed, including trust-registration repair/resume and reference propagation | `node-tests-final.log` |
 | JavaScript syntax | 33 agent/tool modules passed | Console check |
 | Windows Git deployment tests | Passed | `deployment-tests.log` |
 | Python traversal geometry | 6/6 passed | `python -B worker/tests/modeling-traversal.py` |
@@ -69,6 +80,12 @@ the complete local harness without publishing to the controller.
   this development worktree changed during the probe. No packaged game was accepted. This
   is an invalid full-production verification run, retained as evidence, not counted as a pass.
   Further production verification must run from an immutable committed release.
+- Fixed-release UI-game run at `engineering-intake-live-pcQMKM` (`fa73b9a`): generated a
+  real Unreal 5.8.2 project and Windows package. Actual mouse interaction passed 16 standalone
+  and 20 packaged steps, including resized-window victory/restart. Archive file hashes matched,
+  and host Unreal loading plus packaged launch both passed. Final acceptance was blocked by
+  the stage-evidence format gap; repair exposed the exact automatic-trust fingerprint issue
+  above. This run is retained as a failed host acceptance, not relabeled as a complete pass.
 
 Probe directories above are under `C:/Users/stone/AppData/Local/Temp/`.
 

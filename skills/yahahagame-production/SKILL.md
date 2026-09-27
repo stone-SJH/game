@@ -80,6 +80,13 @@ Each stage report must contain: `stageId`, `revisionId`, `attempt`, `status`, `s
 `nextStage`. A stage is `ACCEPTED` only when its report and evidence manifest are written and
 all required outputs exist with hashes.
 
+Each `stages/<stageId>/evidence.json` must contain `protocol:1`, the matching `stageId`,
+`status:"PASS"`, a hashed `files` list, and a nonempty `checks` array. Each check must have
+an ID, `status:"PASS"`, and actual workspace-relative evidence paths after verification.
+A free-text `validation` array or an artifact inventory alone is not passing proof.
+Read and write task JSON/text as UTF-8 explicitly, including `Get-Content -Encoding UTF8`
+on Windows PowerShell.
+
 ## Skill routing
 
 Detect Unreal from `*.uproject` after bootstrap and use UE 5.8 skills for engine work. Route

@@ -232,6 +232,14 @@ node worker/tools/modeling-intake-probe.mjs --mode production --objective 'Creat
 `--mode production` runs the complete local harness, including generation, Unreal checks,
 packaged-executable launch and acceptance. It does not publish to the controller; it retains
 the isolated workspace and enforces a 45-minute overall probe deadline.
+`--seed-project DIRECTORY` copies an existing project into a new production probe identity,
+excluding caches and project Codex configuration. It never imports old execution budgets or
+alters the original project, and supports testing evidence repair against retained real builds.
+
+New runtime fingerprints ignore only Codex's automatic standalone trusted registration for
+the current task when no project `.codex` directory exists. Creating project configuration,
+revoking trust or changing model/settings/code remains a toolchain change. Old pinned task
+identities are not migrated or reset.
 
 Quality review recognizes ordinary Chinese/English acceptance requests, checks every original
 criterion ID, attaches the actual scene image and rejects PASS without existing nonempty evidence.
