@@ -23,7 +23,8 @@ const draft = options.draft ? await readJson(path.resolve(options.draft)) : null
 const root = options.out ? path.resolve(options.out) : await fs.mkdtemp(path.join(os.tmpdir(), 'engineering-intake-live-'));
 if (options.out) await fs.mkdir(root, { recursive: false });
 const project = path.join(root, 'project'), output = path.join(root, 'run');
-await fs.mkdir(project); await fs.mkdir(output);
+if (!options['seed-project']) await fs.mkdir(project);
+await fs.mkdir(output);
 if (options['seed-project']) {
   const source = path.resolve(options['seed-project']);
   if (project.startsWith(source + path.sep)) throw new Error('Seed project cannot contain the probe output.');
