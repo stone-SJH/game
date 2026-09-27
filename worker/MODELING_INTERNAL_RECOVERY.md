@@ -82,6 +82,20 @@ Windows regression results: 175 Node tests, syntax checks for all 37 agent/tool 
 loading and packaged launch passed on retained project copies at
 `C:/Users/stone/AppData/Local/Temp/engineering-intake-live-RVG7Yt`.
 
+Live verification on September 27, 2026:
+
+| Probe | Observed result |
+| --- | --- |
+| `engineering-intake-live-RAWwdo`, intermediate release `78d00d0` | Original six-asset intake repaired successfully with one real model call. Engineering still failed after two calls because the intermediate validator exposed one field at a time. The failed report remains failed. |
+| `engineering-handoff-repair-Na9s38`, final code `869c42b` | A retained real engineering candidate produced nine structured findings. One real repair call corrected them all in 200.7 seconds; all six assets and four requirements passed the final engineering validator. Original context hash unchanged. |
+| `engineering-final-replay-UCTk30`, final code `869c42b` | Full planning replay of those retained real agent responses passed: intake and engineering each used their original two-call allowance, all six assets/four requirements were saved, three assets received traversal contracts, and a second run resumed without any new calls. |
+
+These probes establish internal intake/engineering recovery, not completion of the original
+shrine game. The replay uses real retained responses rather than claiming a second fresh
+generation. The failed task's context, both original raw responses and execution record retain
+their hashes. Audit summaries and logs are outside Git at
+`D:/StoneWorker/modeling-v2-audit/engineering-20260927/internal-repair-*`.
+
 Use `node --test worker/tests/*.test.mjs` and the isolated intake probe to verify a retained
 failure. `--draft` supplies only the first response; any required internal repair uses a real
 model call. The source task stays unchanged and the probe uses a new execution identity.
