@@ -86,6 +86,9 @@ an ID, `status:"PASS"`, and actual workspace-relative evidence paths after verif
 A free-text `validation` array or an artifact inventory alone is not passing proof.
 Read and write task JSON/text as UTF-8 explicitly, including `Get-Content -Encoding UTF8`
 on Windows PowerShell.
+Keep the complete Windows package in `package/Windows/` with its root executable and runtime
+dependencies. Existing `Build/Windows/`, `Build/Win64/`, `package/Win64/` and
+`Saved/StagedBuilds/Windows/` or `Win64/` packages are accepted too; never deliver a lone EXE.
 
 ## Skill routing
 

@@ -26,6 +26,9 @@ The audit also corrected:
 - Restarting a task overwrote accepted stage records and attempt counts with PENDING entries.
   Resumption now retains stage history and updates only the run envelope.
 - Code-only V2 requests now retain objective coverage through engineering and final acceptance.
+- Host executable discovery omitted real packages archived under `Build/Windows` and `Build/Win64`.
+  Both locations are now recognized; compiler/runtime helpers remain excluded. Production
+  instructions explicitly request a complete `package/Windows` tree with its dependencies.
 - The live full-production test found that stage evidence instructions did not specify the
   required structured checks. The prompt and skill now require nonempty passing checks with
   actual evidence paths, and explicitly require UTF-8 for Chinese task data on PowerShell.
@@ -45,7 +48,7 @@ are outside Git. Evidence root: `D:/StoneWorker/modeling-v2-audit/engineering-20
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Full Node worker suite | 138/138 passed, including trust-registration repair/resume and reference propagation | `node-tests-final.log` |
+| Full Node worker suite | 139/139 passed, including trust-registration repair/resume, package discovery and reference propagation | `node-tests-final.log` |
 | JavaScript syntax | 33 agent/tool modules passed | Console check |
 | Windows Git deployment tests | Passed | `deployment-tests.log` |
 | Python traversal geometry | 6/6 passed | `python -B worker/tests/modeling-traversal.py` |
@@ -86,6 +89,22 @@ the complete local harness without publishing to the controller.
   and host Unreal loading plus packaged launch both passed. Final acceptance was blocked by
   the stage-evidence format gap; repair exposed the exact automatic-trust fingerprint issue
   above. This run is retained as a failed host acceptance, not relabeled as a complete pass.
+- Copied-project production repair at `engineering-intake-live-VKEoAT` (`a76b320`): real model
+  calls repaired all 10 stage reports with 20 structured checks, retained 4 objective requirements
+  and resolved 5 pending facts. Fresh actual-window tests passed 16 standalone and 20 packaged
+  states plus launch/restart. Failed input attempts (foreground/cursor interference) remain in
+  their own directories; bounded retests passed after adding input diagnostics. The task reached
+  a second production iteration without replanning or resetting budgets after automatic trust
+  registration. That iteration was triggered by the now-fixed `Build/Windows` discovery gap.
+- Final host acceptance at `engineering-intake-live-MSqOvS`: **passed** on a copy of those real
+  outputs. The final code found `Build/Windows/ClickThree.exe`, ran actual Unreal load and
+  packaged launch (both exit 0), validated all stage evidence and the frozen engineering
+  requirements. This mode invokes no author and is recorded separately from generation.
+
+The combined audit covers natural-language intake, engineering, real project generation,
+compilation, packaging, actual UI interaction, bounded repair and final host acceptance. It
+does not prove that the much larger original shrine recreation has been built or meets 1:1
+fidelity: the original 16-asset case was verified through engineering only.
 
 Probe directories above are under `C:/Users/stone/AppData/Local/Temp/`.
 

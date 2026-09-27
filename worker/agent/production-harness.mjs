@@ -47,6 +47,8 @@ const PACKAGE_ROOTS = [
   ['Saved', 'StagedBuilds', 'Windows'],
   ['package', 'Win64'],
   ['Saved', 'StagedBuilds', 'Win64'],
+  ['Build', 'Windows'],
+  ['Build', 'Win64'],
 ];
 
 async function findPackagedExecutable(project, projectFile) {
@@ -337,7 +339,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
     workspaceRoot: project,
     references: job.referenceFiles || [],
     stages: STAGES,
-    requiredOutputs: ['.uproject', 'scene-preview.png', 'packaged-game.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
+    requiredOutputs: ['.uproject', 'scene-preview.png', 'package/Windows/<ProjectName>.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
     qualityCriteria,
     qualityReview: { enabled: qualityCriteria.length > 0, maxAdditionalIterations: qualitySettings.maxIterations },
   };
@@ -436,6 +438,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Execute the complete production loop: plan, create a real Unreal project, author assets and gameplay, build/package it, launch the packaged game for a bounded playtest, render a real scene preview, and write machine-readable evidence.',
       'Do not use the Blender factory-startup cube as a final preview. Do not claim success from tool exit codes alone.',
       'Before finishing, ensure these exact deliverables exist: one .uproject, scene-preview.png (or .jpg/.webp), a packaged playable .exe, workspace-manifest.json, provenance/asset-manifest.json, plan/stage-manifest.json, stage-report.json and evidence.json for every planned stage, acceptance/playtest-evidence.json, and acceptance/acceptance-report.json with passing gameplay evidence. Keep all paths relative to the workspace.',
+      'Place the complete Windows package under package/Windows/ with its root <ProjectName>.exe and all dependencies. Existing complete packages under Build/Windows/, Build/Win64/, package/Win64/ or Saved/StagedBuilds/Windows/ or Win64/ are also supported. Do not copy an executable alone or invent a root packaged-game.exe to satisfy a filename.',
       'For every stages/<stageId>/evidence.json, use {protocol:1,stageId,status:"PASS",files:[{path,sha256}],checks:[{id,status:"PASS",evidence:[actual workspace-relative proof files]}]}. Checks must be a nonempty array of individually passing, actually verified checks. A files list or free-text validation array alone is insufficient. The matching stage-report.json needs stageId and status:"ACCEPTED". Do not mark an unexecuted check PASS.',
       'Read/write task JSON and Chinese text as UTF-8 explicitly. On Windows PowerShell use Get-Content -Encoding UTF8; its legacy default encoding corrupts these files.',
       `The acceptance report must use protocol 1, identify taskId=${job.taskId}, workspaceId=${job.workspaceId}, and runId=${job.runId}, set status to ACCEPTED or PASS with an explicit true pass/accepted/passed flag, set packagedGameStatus, gameplayStatus, and visualStatus to PASS, and contain a non-empty criteria array whose items all have status PASS. The stage manifest must retain the same taskId and runId and list every planned stage as ACCEPTED.`,

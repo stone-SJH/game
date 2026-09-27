@@ -235,6 +235,11 @@ the isolated workspace and enforces a 45-minute overall probe deadline.
 `--seed-project DIRECTORY` copies an existing project into a new production probe identity,
 excluding caches and project Codex configuration. It never imports old execution budgets or
 alters the original project, and supports testing evidence repair against retained real builds.
+`--mode acceptance --seed-project DIRECTORY` copies retained artifacts and executes the host
+engineering acceptance, Unreal load, packaged launch, stage and final evidence gates without
+calling a production author. Its report is acceptance verification, not a new generation run.
+Complete Windows packages are discovered in `package/Windows`, `package/Win64`,
+`Saved/StagedBuilds/Windows`, `Saved/StagedBuilds/Win64`, `Build/Windows` and `Build/Win64`.
 
 New runtime fingerprints ignore only Codex's automatic standalone trusted registration for
 the current task when no project `.codex` directory exists. Creating project configuration,

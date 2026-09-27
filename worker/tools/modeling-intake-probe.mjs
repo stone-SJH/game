@@ -1,4 +1,4 @@
-// Isolated natural-language probe: planning by default, optional complete local production.
+// Isolated planning/production, or host acceptance of a copied retained real project.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -7,16 +7,18 @@ import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { codexInvocation, runProductionHarness } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 import { atomicJson, readJson, hashFile, localPath } from '../agent/modeling-io.mjs';
+import { validateEngineeringAcceptance } from '../agent/modeling-engineering.mjs';
 
 const argv = process.argv.slice(2), options = {};
 for (let i = 0; i < argv.length; i += 2) {
-  if (!['--context', '--objective', '--draft', '--out', '--mode', '--seed-project'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --out NEW_DIRECTORY, --mode planning|production, --seed-project DIRECTORY.');
+  if (!['--context', '--objective', '--draft', '--out', '--mode', '--seed-project'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --out NEW_DIRECTORY, --mode planning|production|acceptance, --seed-project DIRECTORY.');
   options[argv[i].slice(2)] = argv[i + 1];
 }
 if (Boolean(options.context) === Boolean(options.objective)) throw new Error('Choose exactly one context file or natural-language objective.');
 const mode = options.mode || 'planning';
-if (!['planning', 'production'].includes(mode) || mode === 'production' && options.draft) throw new Error('Production probes require fresh intake, not a retained draft.');
-if (options['seed-project'] && mode !== 'production') throw new Error('A copied project is only supported by production probes.');
+if (!['planning', 'production', 'acceptance'].includes(mode) || mode !== 'planning' && options.draft) throw new Error('Production probes require fresh intake, not a retained draft.');
+if (options['seed-project'] && mode === 'planning') throw new Error('A copied project requires production or acceptance mode.');
+if (mode === 'acceptance' && !options['seed-project']) throw new Error('Acceptance requires a retained project copy.');
 const context = options.context ? await readJson(path.resolve(options.context)) : { objective: options.objective, references: [] };
 const originalHash = options.context ? await hashFile(path.resolve(options.context)) : null;
 const draft = options.draft ? await readJson(path.resolve(options.draft)) : null;
@@ -34,8 +36,10 @@ if (options['seed-project']) {
       if (['Intermediate', 'DerivedDataCache', 'Saved', '.git', '.codex'].includes(relative.split(path.sep)[0])) return false;
       if ((await fs.lstat(file)).isSymbolicLink()) throw new Error('Seed project cannot contain links or junctions.');
       return true;
-    } });
+  } });
 }
+const retainedContext = mode === 'acceptance' ? await readJson(path.join(project, 'plan/production-context.json')) : null;
+if (mode === 'acceptance' && !retainedContext?.taskId) throw new Error('Acceptance requires the retained production identity.');
 for (const reference of context.references || []) {
   const source = await localPath(context.workspaceRoot, reference.localPath, { existing: true });
   if (await hashFile(source) !== reference.sha256) throw new Error('Original reference changed.');
@@ -55,6 +59,9 @@ const pipelineOptions = { project, output, signal: abort.signal, invocation: cod
   evaluate: async ({ name }) => name === 'modeling-plan' && draft ? draft : undefined,
   probe: async () => { throw stop; },
   step: async (name, command, args, timeoutMs, cwd, accepts, extra = {}) => {
+    if (mode === 'acceptance' && name.startsWith('production-orchestrator')) {
+      return { exitCode: 0, stdout: '', stderr: '', stopConfirmed: true };
+    }
     timeoutMs = Math.min(timeoutMs, started + 45 * 60000 - Date.now());
     if (timeoutMs <= 0) throw new Error('Isolated probe deadline exhausted.');
     console.log(JSON.stringify({ event: 'call-started', name, timeoutMs }));
@@ -71,7 +78,13 @@ const pipelineOptions = { project, output, signal: abort.signal, invocation: cod
   } };
 let error, delivered;
 try {
-  if (mode === 'production') delivered = await runProductionHarness({ ...pipelineOptions, unreal: process.env.UNREAL_CMD });
+  if (mode === 'acceptance') {
+    process.env.MODELING_ROUTING_ENABLED = '0';
+    process.env.CODEX_MAX_ATTEMPTS = '1';
+    const engineering = await readJson(path.join(project, 'plan/engineering-plan.json'));
+    await validateEngineeringAcceptance(engineering, await readJson(path.join(project, 'acceptance/acceptance-report.json')), project);
+    delivered = await runProductionHarness({ ...pipelineOptions, job: { ...retainedContext, referenceFiles: [] }, unreal: process.env.UNREAL_CMD });
+  } else if (mode === 'production') delivered = await runProductionHarness({ ...pipelineOptions, unreal: process.env.UNREAL_CMD });
   else await createModelingPipeline(pipelineOptions).prepare();
 } catch (caught) { if (caught !== stop) error = caught; }
 const plan = await readJson(path.join(project, 'plan/modeling-specs.json'));
