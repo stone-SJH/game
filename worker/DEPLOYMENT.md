@@ -267,6 +267,10 @@ missing facts about an original game remain research/acceptance obligations. The
 player-metric and source-resolution evidence. A draft never passes the authoring contract gate.
 Intake and engineering have separate durable call budgets; neither is reset on continuation.
 Resuming the same task preserves accepted stage records and consumed stage attempts.
+Internal schema/contract repair retains the preceding response and all asset/field findings.
+Generated drafts normalize an exactly repeated LOD0 without changing triangle budgets; explicit
+and frozen contracts remain strict. See [V2 internal recovery](MODELING_INTERNAL_RECOVERY.md)
+for ownership, evidence and failure handling.
 
 The isolated planning probe runs live model calls without authoring, publishing or modifying
 the source task. It creates new task identities and writes `probe-report.json` with retained

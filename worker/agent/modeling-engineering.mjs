@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { atomicJson, hashFile, hashValue, localPath } from './modeling-io.mjs';
-import { generatedContractSchema, traversalSchema, validateContractSemantics } from './modeling-contract.mjs';
+import { generatedContractSchema, traversalSchema, contractIssues } from './modeling-contract.mjs';
 import { modelingPlanV2Schema, validateSchema, validateSpecs } from './modeling-evaluation.mjs';
 
 const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
@@ -19,14 +19,54 @@ export function objectiveRequirements(objective) {
 export function validateModelingDraft(value) {
   validateSchema(value, modelingPlanV2Schema);
   const ids = new Set();
+  const issues = [];
   for (const asset of value.assets) {
     if (ids.has(asset.assetId)) throw new Error('Duplicate modeling asset ID.');
     ids.add(asset.assetId);
     if (new Set(asset.requirements).size !== asset.requirements.length) throw new Error('Duplicate modeling requirement.');
-    try { validateContractSemantics(asset); }
-    catch (error) { if (error.kind !== 'CONTRACT_INCOMPLETE') throw error; }
+    issues.push(...contractIssues(asset, { allowIncompleteTraversal: true }));
   }
+  if (issues.length) throw Object.assign(new Error(issues.map(item => `${item.assetId}.${item.field}: ${item.message}`).join('\n')), { validationIssues: issues });
   return value;
+}
+
+// Only generated drafts use this adapter. Explicit specs and frozen contracts remain strict.
+// LOD0 was sometimes repeated in the list that represents LOD1 onward. No budget is invented.
+export function normalizeModelingDraft(raw) {
+  validateSchema(raw, modelingPlanV2Schema);
+  const value = structuredClone(raw), repairs = [];
+  for (const asset of value.assets) {
+    const lods = asset.contract.runtime.lodTriangles;
+    if (lods.length > 1 && lods[0] === asset.maxTriangles && lods.slice(1).every((n, i) => n < lods[i])) {
+      asset.contract.runtime.lodTriangles = lods.slice(1);
+      repairs.push({ assetId: asset.assetId, field: 'contract.runtime.lodTriangles', before: lods, after: lods.slice(1),
+        reason: 'LOD0 is already maxTriangles; retain its exact budget and all reduced LOD budgets, representing LOD1 onward once.' });
+    }
+  }
+  return { value, repairs };
+}
+
+export function validateModelingDraftRepair(previous, next) {
+  // A malformed response may have no usable contract. The schema repair still receives its raw evidence.
+  try { validateSchema(previous, modelingPlanV2Schema); } catch { return; }
+  const original = normalizeModelingDraft(previous).value;
+  if (next.assets.length !== original.assets.length) throw new Error('Internal repair cannot add or remove draft assets.');
+  for (const asset of original.assets) {
+    const revised = next.assets.find(item => item.assetId === asset.assetId);
+    if (!revised) throw new Error(`Internal repair must preserve asset ID ${asset.assetId}.`);
+    const { contract, ...requirements } = asset, { contract: repaired, ...revisedRequirements } = revised;
+    if (!isDeepStrictEqual(requirements, revisedRequirements)) throw new Error(`Internal repair must preserve ${asset.assetId} requirements and LOD0 budget.`);
+    const allowed = contractIssues(asset, { allowIncompleteTraversal: true }).map(item => item.field.replace(/\[\d+\]/g, ''));
+    function unchanged(before, after, field) {
+      if (isDeepStrictEqual(before, after)) return;
+      if (allowed.includes(field)) return;
+      if (before && after && !Array.isArray(before) && typeof before === 'object' && typeof after === 'object') {
+        for (const key of Object.keys(before)) unchanged(before[key], after[key], `${field}.${key}`);
+      } else throw new Error(`Internal repair changed valid field ${asset.assetId}.${field}.`);
+    }
+    unchanged(contract, repaired, 'contract');
+    if (repaired.runtime.lodTriangles.length < contract.runtime.lodTriangles.length) throw new Error('Internal repair cannot remove required reduced LOD levels.');
+  }
 }
 
 export async function modelingReferences(job, project) {

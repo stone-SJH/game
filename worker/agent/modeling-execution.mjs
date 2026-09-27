@@ -12,7 +12,9 @@ export function failureRecord(error, stage, signal) {
   const kind = error?.kind || (stopped === false ? 'STOP_UNCONFIRMED' : signal?.aborted || result.canceled ? 'CANCELED' :
     result.timedOut ? `${stage}_TIMEOUT` : result.exitCode != null && result.exitCode !== 0 ? `${stage}_PROCESS_ERROR` : `${stage}_UNKNOWN`);
   return { kind, message: String(error?.message || error).slice(0, 4000), exitCode: result.exitCode ?? null,
-    timedOut: Boolean(result.timedOut), canceled: Boolean(signal?.aborted || result.canceled), stopConfirmed: stopped };
+    timedOut: Boolean(result.timedOut), canceled: Boolean(signal?.aborted || result.canceled), stopConfirmed: stopped,
+    ...(error?.responseEvidence ? { responseEvidence: error.responseEvidence } : {}),
+    ...(error?.validationIssues ? { validationIssues: error.validationIssues } : {}) };
 }
 
 export function executionPolicy(invocation = {}) {

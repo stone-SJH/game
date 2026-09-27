@@ -52,11 +52,15 @@ process.on('SIGINT', () => abort.abort(new Error('Probe interrupted')));
 process.env.MODELING_HARNESS_V2_ENABLED = '1';
 const stop = new Error('Engineering complete; probe stops before authoring.');
 const calls = [];
+let retainedDraftUsed = false;
 console.log(JSON.stringify({ event: 'started', mode, root, sourceTaskId: context.taskId, retainedDraft: Boolean(draft) }));
 const pipelineOptions = { project, output, signal: abort.signal, invocation: codexInvocation([]),
   job: { taskId: `engineering-probe-${id}`, workspaceId: id, runId: 'probe', objective: context.objective,
     referenceFiles: context.references || [], qualityCriteria: context.qualityCriteria || [], deadlineAt: new Date(started + 45 * 60000).toISOString() },
-  evaluate: async ({ name }) => name === 'modeling-plan' && draft ? draft : undefined,
+  evaluate: async ({ name }) => {
+    if (name === 'modeling-plan' && draft && !retainedDraftUsed) { retainedDraftUsed = true; return draft; }
+    return undefined;
+  },
   probe: async () => { throw stop; },
   step: async (name, command, args, timeoutMs, cwd, accepts, extra = {}) => {
     if (mode === 'acceptance' && name.startsWith('production-orchestrator')) {

@@ -12,6 +12,17 @@ state; the production agent consumes accepted model evidence and integrates it i
   engineering planner before authoring: one player capsule, clearance, local center paths,
   dimensions and pivot. Unspecified measurements are documented project decisions, never
   asserted as measurements of a referenced game. Supplied constraints remain immutable.
+- Treat malformed agent JSON and inconsistent generated contracts as internal handoff repairs.
+  The host retains the preceding response and field-level findings for the responsible agent;
+  repair those findings without regenerating assets or asking the user for internal schema fields.
+  `maxTriangles` is LOD0; `runtime.lodTriangles` contains only strictly decreasing LOD1+ budgets.
+  The draft adapter records removal of an exactly repeated LOD0 when the remaining budgets are
+  already valid. Explicit/frozen contracts are never normalized. Missing traversal is deferred
+  to engineering, but it must not hide LOD, profile or other contract defects.
+- Internal repairs use the same durable stage budget, deadline and evidence. A valid visual GAP
+  requires an author repair; it is never resampled into PASS. Integrity/process-stop failures
+  stop immediately. Exhausted internal recovery is a diagnosed system failure, not missing user
+  requirements; retain the evidence and never bypass the technical gate.
 - The planner receives verified uploaded images/text and records every objective requirement,
   its implementation and verification, plus unresolved reference facts. Read-only research can
   inspect sources; unknown facts remain acceptance obligations. Code-only requests retain this

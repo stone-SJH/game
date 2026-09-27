@@ -26,7 +26,8 @@ export const contractSchema = obj({
   budgets: obj({ materials: { type: 'integer', minimum: 1, maximum: 128 }, maxTextureSize: { type: 'integer', minimum: 1, maximum: 16384 },
     textureBytes: { type: 'integer', minimum: 1, maximum: 2147483648 } }),
   runtime: obj({ engine: en(['none', 'unreal']), profile: en(['glb-static', 'fbx-static', 'fbx-skeletal']),
-    collision: en(['none', 'convex']), lodTriangles: list({ type: 'integer', minimum: 4, maximum: 2000000 }, 8),
+    collision: en(['none', 'convex']), lodTriangles: { ...list({ type: 'integer', minimum: 4, maximum: 2000000 }, 8),
+      description: 'LOD1 and later triangle limits only. LOD0 is maxTriangles; exclude it here. Each entry must be strictly smaller than the preceding limit. Example: maxTriangles=1000, lodTriangles=[500,250].' },
     sockets: list(name), animations: list(name), lightmapUV: { type: 'boolean' } }),
   referenceMatches: list(obj({ image: { ...name, maxLength: 1000 }, mask: { ...name, maxLength: 1000 },
     view: en(['front', 'side', 'back', 'top', 'perspective', 'other-side', 'bottom']),
@@ -45,31 +46,45 @@ export function defaultContract(overrides = {}) {
     referenceMatches: [], asymmetric: false, ...overrides };
 }
 
-export function validateContractSemantics(spec) {
+export function contractIssues(spec, { allowIncompleteTraversal = false } = {}) {
   const c = spec.contract;
-  if (!c) return;
+  if (!c) return [];
+  const issues = [];
+  const issue = (field, message, kind = 'CONTRACT_INVALID') => issues.push({ assetId: spec.assetId, field, message, kind });
   const traversal = c.traversal;
-  if (Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\btraversal\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
-    throw Object.assign(new Error('CONTRACT_INCOMPLETE: traversability requires explicit capsule dimensions and paths; do not invent defaults.'), { kind: 'CONTRACT_INCOMPLETE', hardFailure: true });
+  if (!allowIncompleteTraversal && Object.hasOwn(c, 'traversal') && !traversal && /\btraversable\b|\btraversal\b|(?:角色|玩家).{0,12}通行/i.test([spec.description, ...(spec.requirements || [])].join('\n'))) {
+    issue('contract.traversal', 'CONTRACT_INCOMPLETE: traversability requires explicit capsule dimensions and paths; do not invent defaults.', 'CONTRACT_INCOMPLETE');
   }
   if (traversal) {
-    if (c.runtime.collision !== 'convex' || c.runtime.profile !== 'fbx-static') throw new Error('Traversal requires the calibrated static FBX convex-collision profile.');
-    if (traversal.capsule.halfHeightMeters < traversal.capsule.radiusMeters) throw new Error('Capsule half-height includes its hemispheres and cannot be smaller than the radius.');
-    if (new Set(traversal.paths.map(p => p.id)).size !== traversal.paths.length) throw new Error('Duplicate traversal path id.');
-    if (traversal.paths.some(p => p.startMeters.every((v,i) => v === p.endMeters[i]))) throw new Error('Traversal requires a nonzero sweep path.');
+    if (c.runtime.collision !== 'convex' || c.runtime.profile !== 'fbx-static') issue('contract.runtime', 'Traversal requires the calibrated static FBX convex-collision profile.');
+    if (traversal.capsule.halfHeightMeters < traversal.capsule.radiusMeters) issue('contract.traversal.capsule', 'Capsule half-height includes its hemispheres and cannot be smaller than the radius.');
+    if (new Set(traversal.paths.map(p => p.id)).size !== traversal.paths.length) issue('contract.traversal.paths', 'Duplicate traversal path id.');
+    if (traversal.paths.some(p => p.startMeters.every((v,i) => v === p.endMeters[i]))) issue('contract.traversal.paths', 'Traversal requires a nonzero sweep path.');
   }
-  if (c.dimensions.meters?.some(n => n <= 0)) throw new Error('Measured dimensions must be positive.');
-  if (c.pivot.mode === 'custom' && !c.pivot.meters) throw new Error('Custom pivot requires a position.');
-  if (c.runtime.profile === 'fbx-skeletal' && !spec.requireRig) throw new Error('Skeletal export requires a rig.');
-  if (c.assetClass === 'skeletal-character' && !spec.requireRig) throw new Error('Skeletal character requires measured rig binding.');
-  if (c.runtime.profile === 'glb-static' && (spec.requireRig || c.runtime.collision !== 'none' || c.runtime.lodTriangles.length || c.runtime.sockets.length)) throw new Error('Static GLB profile cannot promise rig/collision/LOD/socket handoff; select the corresponding FBX profile.');
-  if (c.runtime.animations.length && !spec.requireRig) throw new Error('Animation requirements need a rig.');
-  if (c.runtime.lodTriangles.some((n, i, a) => n >= (i ? a[i - 1] : spec.maxTriangles))) throw new Error('LOD budgets must decrease from LOD0.');
-  if (new Set(c.runtime.sockets).size !== c.runtime.sockets.length || new Set(c.runtime.animations).size !== c.runtime.animations.length) throw new Error('Duplicate runtime requirement.');
+  if (c.dimensions.meters?.some(n => n <= 0)) issue('contract.dimensions.meters', 'Measured dimensions must be positive.');
+  if (c.pivot.mode === 'custom' && !c.pivot.meters) issue('contract.pivot', 'Custom pivot requires a position.');
+  if (c.runtime.profile === 'fbx-skeletal' && !spec.requireRig) issue('contract.runtime.profile', 'Skeletal export requires a rig.');
+  if (c.assetClass === 'skeletal-character' && !spec.requireRig) issue('contract.assetClass', 'Skeletal character requires measured rig binding.');
+  if (c.runtime.profile === 'glb-static' && (spec.requireRig || c.runtime.collision !== 'none' || c.runtime.lodTriangles.length || c.runtime.sockets.length)) issue('contract.runtime.profile', 'Static GLB profile cannot promise rig/collision/LOD/socket handoff; select the corresponding FBX profile. Preserve collision, LOD, socket and rig requirements.');
+  if (c.runtime.animations.length && !spec.requireRig) issue('contract.runtime.animations', 'Animation requirements need a rig.');
+  c.runtime.lodTriangles.forEach((n, i, a) => {
+    const previous = i ? a[i - 1] : spec.maxTriangles;
+    if (n >= previous) issue(`contract.runtime.lodTriangles[${i}]`, `LOD budgets must decrease from LOD0. LOD${i + 1}=${n} must be < ${previous}; maxTriangles=${spec.maxTriangles} already specifies LOD0. lodTriangles contains LOD1 and later only.`);
+  });
+  if (new Set(c.runtime.sockets).size !== c.runtime.sockets.length || new Set(c.runtime.animations).size !== c.runtime.animations.length) issue('contract.runtime', 'Duplicate runtime requirement.');
   for (const match of c.referenceMatches) {
-    if (!spec.referenceImages.includes(match.image)) throw new Error('Reference match must name a supplied reference.');
-    if (match.view === 'perspective') throw new Error('Exact reference matching requires a registered orthographic view.');
+    if (!spec.referenceImages.includes(match.image)) issue('contract.referenceMatches', 'Reference match must name a supplied reference.');
+    if (match.view === 'perspective') issue('contract.referenceMatches', 'Exact reference matching requires a registered orthographic view.');
   }
+  return issues;
+}
+
+export function validateContractSemantics(spec) {
+  const issues = contractIssues(spec);
+  if (!issues.length) return;
+  const error = Object.assign(new Error(issues.map(item => `${item.assetId}.${item.field}: ${item.message}`).join('\n')), { validationIssues: issues });
+  if (issues[0].kind === 'CONTRACT_INCOMPLETE') Object.assign(error, { kind: 'CONTRACT_INCOMPLETE', hardFailure: true });
+  throw error;
 }
 
 // A revision may add textual requirements, but must never silently alter its technical contract.
