@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { atomicJson, readJson, localPath, hashValue, hashFile, repositoryRoot, setting, agentEnvironment, throwIfStopped, recordAuthorRecipe } from './modeling-io.mjs';
+import { atomicJson, readJson, localPath, hashValue, hashFile, repositoryRoot, agentEnvironment, throwIfStopped, recordAuthorRecipe } from './modeling-io.mjs';
 import { buildAssetCatalog, registerModelingAsset } from './asset-catalog.mjs';
 import { blenderExecutable, blenderMcpArgs, discoverModelingCapabilities, callBlenderMcp } from './modeling-capabilities.mjs';
 import { modelingPlanSchema, modelingPlanV2Schema, decisionSchemaFor, visualSchemaFor, validateSpecs, modelingPrompt, selectModelingRoute, reviewPasses } from './modeling-evaluation.mjs';
@@ -14,6 +14,7 @@ import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
 import { authorEvidence, engineeringEvidence } from './modeling-evidence.mjs';
 import { prepareModelingReferences } from './modeling-research.mjs';
 import { assetQuality } from './iteration-quality.mjs';
+import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -24,12 +25,14 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   const taskState = path.join(stateRoot, 'tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }));
   const taskPlanFile = path.join(taskState, 'plan.json');
   const engineeringFile = path.join(taskState, 'engineering-plan.json');
+  const draftFile = path.join(taskState, 'intake-draft.json');
   const execution = createExecutionStore(taskState, { signal, deadlineAt: job.deadlineAt });
   const policy = executionPolicy(invocation);
   const runReview = createModelingReviewer({ execution, project, output, signal, step, invocation, evaluate,
     onRepair: ({ name }) => reportProgress({ phase: 'planning', tool: 'Internal modeling repair', step: `Repairing internal ${name} handoff with retained evidence` }) });
   let capabilities, sequence = 0, expectedPlanHash, expectedEngineeringHash, accepted = [], providerDisabledReason = null;
   let engineeringContext = null, referenceResearch = null;
+  let planningGap = null;
   let productionIteration = 1;
   const v2Enabled = process.env.MODELING_HARNESS_V2_ENABLED === '1';
   const skillPlans = new Map();
@@ -59,6 +62,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     const requestFile = await localPath(project, 'plan/modeling-request.json');
     const request = await readJson(requestFile);
     let current = await readJson(taskPlanFile) || await readJson(planFile);
+    if (!current) {
+      planningGap = await loadPlanningGap(project, taskState, productionIteration);
+      if (planningGap) return null;
+    }
     if (request) {
       validateSpecs(request);
       if (!current || current.revisions >= 4) throw Object.assign(new Error('Modeling revision budget exhausted or no base plan exists.'), { hardFailure: true });
@@ -81,6 +88,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       else {
         const candidates = await buildAssetCatalog(project);
         const references = await modelingReferences(job, project);
+        const previousGap = await loadPlanningGap(project, taskState, productionIteration - 1);
+        const { prompt: repairContext, previousValue: priorPlanningResponse } = await planningRepairContext(previousGap, project);
         const intakePrompt = [
           'You are the modeling intake evaluator. Split the requested game/model work into independently reviewable 3D assets before any model is authored. Do not write files, build assets or start child agents. If read tools are enabled, use them only to inspect supplied reference documents inside the workspace; never read credential/config files.',
           'Include models implied by a full game objective, not only explicit modeling keywords. Preserve existing accepted content; request only needed additions/changes. A code-only repair or objective with no model work may use assets=[] with a concrete reason.',
@@ -93,25 +102,29 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           `Existing registered candidates: ${JSON.stringify(candidates)}`,
         ].join('\n');
         try {
-          result = await reviewer('modeling-plan', v2Enabled ? modelingPlanV2Schema : modelingPlanSchema, intakePrompt, references.images,
-            { maxCalls: 2, timeoutMs: setting('MODELING_INTAKE_TIMEOUT_MS', 1200000, 1, 1800000),
+          const retainedDraft = v2Enabled ? await readJson(draftFile) : null;
+          if (retainedDraft) {
+            await verifyEvidence(retainedDraft.evidence);
+            result = await readJson(await localPath(project, retainedDraft.path, { existing: true }));
+            validateModelingDraft(result);
+          } else result = await reviewer('modeling-plan', v2Enabled ? modelingPlanV2Schema : modelingPlanSchema,
+            [intakePrompt, previousGap?.record.phase === 'modeling-plan' ? repairContext : ''].join('\n'), references.images,
+            { maxCalls: policy.intakeCalls, timeoutMs: policy.intakeMs,
+              identity: { productionIteration }, key: `modeling-plan:iteration-${productionIteration}`,
               referenceFiles: references.files, research: references.entries.some(item => item.requiresToolRead),
-              ...(v2Enabled ? { normalize: normalizeModelingDraft } : {}),
-              validate: v2Enabled ? (value, { previousValue }) => {
+              ...(v2Enabled ? { normalize: normalizeModelingDraft, preserveFirstResponse: true } : {}),
+              validate: v2Enabled ? (value, { baselineValue }) => {
                 validateModelingDraft(value);
-                if (previousValue) validateModelingDraftRepair(previousValue, value);
+                if (previousGap?.record.phase === 'modeling-plan' && priorPlanningResponse) validateModelingDraftRepair(priorPlanningResponse, value);
+                else if (baselineValue) validateModelingDraftRepair(baselineValue, value);
               } : validateSpecs });
         } catch (error) {
           throwIfStopped(error, signal);
           if (error.kind !== 'VALIDATION_INFRASTRUCTURE_EXHAUSTED') throw error;
           if (v2Enabled) {
-            const lastFailure = error.lastFailure;
-            throw modelingFailure(error.kind, [
-              'Internal modeling intake recovery exhausted; the objective and technical requirements are preserved. This is an internal generation/service failure, not a request for the user to supply contract fields.',
-              `Last failure: ${lastFailure?.kind || error.kind}.`,
-              `Execution evidence: ${error.executionFile}.`,
-              lastFailure?.message || error.message,
-            ].join(' '), { cause: error, executionFile: error.executionFile, lastFailure });
+            planningGap = await retainPlanningGap({ project, taskState, execution, job, iteration: productionIteration,
+              phase: 'modeling-plan', references, error, repairBaseline: priorPlanningResponse });
+            return null;
           }
         }
         if (!result && v2Enabled) throw Object.assign(new Error('V2 modeling intake unavailable; cannot discard technical requirements.'), { hardFailure: true });
@@ -123,12 +136,28 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           const requirements = objectiveRequirements(job.objective);
           await reportProgress({ phase: 'planning', tool: 'Engineering planner', step: 'Resolve player metrics, asset contracts and requirement coverage' });
           const draft = result;
-          const engineering = await reviewer('modeling-engineering', engineeringSchema(draft, requirements, references.entries),
-            engineeringPrompt(job, draft, requirements, references.entries), references.images, { maxCalls: 2,
-              timeoutMs: setting('MODELING_INTAKE_TIMEOUT_MS', 1200000, 1, 1800000), referenceFiles: references.files,
+          if (!await readJson(draftFile)) {
+            const relative = 'plan/modeling-intake-draft.json';
+            const file = await localPath(project, relative);
+            await atomicJson(file, draft);
+            await atomicJson(draftFile, { path: relative, evidence: await fileEvidence([file, ...references.files]) });
+          }
+          let engineering;
+          try {
+            engineering = await reviewer('modeling-engineering', engineeringSchema(draft, requirements, references.entries),
+            [engineeringPrompt(job, draft, requirements, references.entries), repairContext].join('\n'), references.images, { maxCalls: policy.intakeCalls,
+              identity: { productionIteration }, key: `modeling-engineering:iteration-${productionIteration}`,
+              timeoutMs: policy.intakeMs, referenceFiles: references.files,
               research: references.entries.some(item => item.requiresToolRead) || /研究|考据|原版|原游戏|复刻|\b(?:research|recreate|replica)\b/i.test(job.objective || ''),
               normalize: value => normalizeEngineeringResponse(value, draft, requirements, references.entries),
               validate: value => resolveEngineering(draft, value, { requirements, references: references.entries }) });
+          } catch (error) {
+            throwIfStopped(error, signal);
+            if (error.kind !== 'VALIDATION_INFRASTRUCTURE_EXHAUSTED') throw error;
+            planningGap = await retainPlanningGap({ project, taskState, execution, job, iteration: productionIteration,
+              phase: 'modeling-engineering', draft, references, error });
+            return null;
+          }
           result = resolveEngineering(draft, engineering, { requirements, references: references.entries });
           await writeEngineeringPlan(project, engineeringFile, job, draft, engineering, requirements, references.entries);
         }
@@ -656,6 +685,18 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(),
       });
       const current = await plan();
+      if (planningGap && !current) {
+        accepted = (planningGap.record.draft?.assets || []).map(spec => ({ assetId: spec.assetId, status: 'PLANNING_PROVISIONAL',
+          usable: false, files: [], spec, contract: spec.contract,
+          quality: { score: 0, accepted: false, gaps: planningGap.record.lastFailure?.validationIssues || [], repairInstructions: planningGap.record.repairInstructions } }));
+        const summary = { protocol: 1, taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId, iteration,
+          status: 'PLANNING_PROVISIONAL', assets: accepted, planning: { ...planningGap.record,
+            evidenceFile: path.relative(project, planningGap.visibleFile).replaceAll('\\', '/') } };
+        await report(summary, await localPath(project, 'plan/modeling-results.json'));
+        await reportProgress({ phase: 'planning', tool: 'Internal planning handoff', step: `Retain ${planningGap.record.phase} gap; continue playable production iteration ${iteration}` });
+        return summary;
+      }
+      planningGap = null;
       engineeringContext = await readJson(engineeringFile);
       const prepared = await prepareModelingReferences({ assets: current.assets, project, job, engineering: engineeringContext,
         review: reviewer, reportProgress });
@@ -684,6 +725,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     async hasRequest() { return Boolean(await readJson(await localPath(project, 'plan/modeling-request.json'))); },
     async engineeringPlan() { return expectedEngineeringHash ? readJson(engineeringFile) : null; },
     async verify() {
+      const retainedDraft = await readJson(draftFile);
+      if (retainedDraft) await verifyEvidence(retainedDraft.evidence);
+      if (planningGap) { await verifyEvidence(planningGap.evidence); return; }
       if (referenceResearch) await verifyEvidence(referenceResearch.evidence);
       if (expectedEngineeringHash && hashValue(await readJson(await localPath(project, 'plan/engineering-plan.json'))) !== expectedEngineeringHash) {
         throw modelingFailure('INTEGRITY_ERROR', 'Frozen engineering plan changed.');

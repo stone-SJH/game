@@ -481,6 +481,11 @@ export async function runProductionHarness({ job, project, output, signal, step,
         stage = 'modeling-assets';
         modelingResults = await modelingPipeline.prepare({ iteration });
         await modelingPipeline.verify();
+        if (modelingResults.status === 'PLANNING_PROVISIONAL') {
+          issues.push({ stage: 'modeling-planning', status: 'GAP', kind: modelingResults.planning.kind,
+            reason: modelingResults.planning.reason, evidenceFile: modelingResults.planning.evidenceFile });
+          stageScores.push({ stage: 'modeling-planning', score: 0 });
+        }
       }
       const engineeringPlan = await modelingPipeline?.engineeringPlan() || null;
       const engineeringHandoff = engineeringPlan ? [
@@ -493,13 +498,19 @@ export async function runProductionHarness({ job, project, output, signal, step,
         engineeringHandoff,
         'The host has now completed the modeling assessment for this iteration. Treat these results as the authoritative asset handoff.',
         `Modeling results: ${JSON.stringify(modelingResults)}`,
+        ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [
+          'Planning is unresolved. Read the retained planning evidence and intake draft when present. They preserve requirements but are NOT approved executable model contracts. Do not edit the host planning records, claim acceptance, or request a modeling revision inside this round.',
+          'Continue the whole playable iteration using explicitly documented temporary engine-native representations. Choose and record any necessary gameplay design metrics as provisional project decisions, never original-game measurements. Keep all contract/fidelity obligations as GAP until independently checked. The next complete iteration repairs planning internally.',
+        ] : []),
         'DCC_PROVISIONAL means technically usable but visually below target. Import it and finish this round; preserve its score and gaps for overall review. NO_USABLE_ARTIFACT requires a documented temporary engine-native representation so playable integration can proceed; do not claim it meets the final asset specification.',
         'Do not request a modeling revision merely to repair a provisional visual gap inside this round. Finish integration and delivery first; the next complete iteration owns those asset repairs.',
-        ...(modelingResults.assets.some(asset => asset.contract?.runtime.engine === 'unreal') ? [
+        ...(modelingResults.assets.some(asset => asset.usable !== false && asset.contract?.runtime.engine === 'unreal') ? [
           'V2 DCC_READY assets require independent Unreal verification. Import the accepted model.glb/model.fbx unchanged and place each asset at unit scale in a saved test map. Write plan/modeling-engine-imports.json as {"protocol":2,"assets":[{"assetId":"id","packagePath":"/Game/Models/SM_Name.SM_Name","mapPath":"/Game/Maps/AssetTest"}]}. Map all Unreal-target assets exactly once. The host verifies actual imported source identity and captures the map. Enable PythonScriptPlugin for host validation.',
           'For UE 5.8 FBX/Interchange custom collision, FbxImportUI.auto_generate_collision=false disables collision entirely in its converter. Keep that flag true, one_convex_hull_per_ucx=true, verify each authored UCX proxy becomes a convex hull, and import explicit LOD files with StaticMeshEditorSubsystem.import_lod. The host checks the exact hull count and LOD budgets. Use the saved test map for real material/orientation evidence.',
         ] : []),
-        'Do not author new models or change accepted model source/export files. Integrate them into the game and record existing evidence. For a new/changed model, write a full replacement plan/modeling-request.json using the exact modeling-specs.json schema and exit this call before authoring or validation. The host resumes at that boundary.',
+        ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [] : [
+          'Do not author new models or change accepted model source/export files. Integrate them into the game and record existing evidence. For a new/changed model, write a full replacement plan/modeling-request.json using the exact modeling-specs.json schema and exit this call before authoring or validation. The host resumes at that boundary.',
+        ]),
       ].join('\n') : basePrompt;
       codexTemp = await createCodexTempDirectory();
       stage = 'production-orchestrator';

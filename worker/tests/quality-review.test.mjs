@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { collectQualityEvidence, inspectProduction, runProductionHarness } from '../agent/production-harness.mjs';
 import { extractQualityCriteria, parseQualityAdvice, qualityReviewSettings } from '../agent/quality-review.mjs';
+import { defaultContract } from '../agent/modeling-contract.mjs';
 
 const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
   'level-blockout-and-traversal', 'gameplay-foundation-and-input', 'camera-combat-ai-and-feel',
@@ -220,4 +221,54 @@ test('natural language repairs stage proof after first-launch trust registration
   assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
   assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 1);
   assert.equal(calls.filter(name => name.startsWith('production-orchestrator')).length, 2);
+});
+
+test('planning exhaustion completes two playable rounds and delivers retained gaps without restarting same-round calls', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'planning-production-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project'), output = path.join(root, 'run');
+  environment(t, { MODELING_ROUTING_ENABLED: '1', MODELING_HARNESS_V2_ENABLED: '1', CODEX_CMD: process.execPath,
+    CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', QUALITY_REVIEW_MAX_ITERATIONS: '1', MODELING_INTAKE_MAX_CALLS: '4' });
+  const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality', objective: 'Build a traversable room.' };
+  const contract = defaultContract({ traversal: null, pivot: { mode: 'base-center', meters: null, toleranceMeters: .01 },
+    runtime: { engine: 'unreal', profile: 'fbx-static', collision: 'convex', lodTriangles: [500], sockets: [], animations: [], lightmapUV: false } });
+  const draft = { reason: 'Room required.', assets: [{ assetId: 'room', description: 'Traversable room', prompt: 'Build a room',
+    requirements: ['Keep player passage clear.'], maxTriangles: 1000, requireClosedMesh: true, requireRig: false, referenceImages: [], contract }] };
+  const calls = [], deliveries = [];
+  const step = async (name, command, args, timeout, cwd, accepts, options) => {
+    calls.push(name);
+    if (name.startsWith('modeling-plan')) await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify(draft));
+    else if (name.startsWith('modeling-engineering')) await fs.writeFile(args[args.indexOf('-o') + 1], JSON.stringify({
+      reason: 'Incomplete engineering response.', playerCapsule: null, playerDecision: 'Unresolved.',
+      assets: [{ assetId: 'room', needsTraversal: true, contract, designDecisions: [] }],
+      requirements: [{ id: 'requirement-1', owner: 'layout', implementation: 'Make a playable room.', verification: 'Playtest it.' }],
+      references: [], sources: [], unresolvedFacts: [],
+    }));
+    else if (name.startsWith('production-orchestrator')) {
+      assert.match(options.input, /PLANNING_PROVISIONAL/);
+      assert.match(options.input, /temporary engine-native representations/);
+      assert.doesNotMatch(options.input, /write a full replacement plan\/modeling-request/);
+      await seedDeliverables(project);
+    } else if (!name.startsWith('unreal-project-validation') && !name.startsWith('packaged-game-playtest')) {
+      throw new Error(`Unexpected operation: ${name}`);
+    }
+    return { exitCode: 0, stdout: '', stderr: '', stopConfirmed: true };
+  };
+  const options = { job, project, output, signal: new AbortController().signal, step, unreal: 'test-engine',
+    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } };
+  const result = await runProductionHarness(options);
+  assert.equal(result.qualityAccepted, false);
+  assert.equal(result.delivery.status, 'DELIVERED_WITH_GAPS');
+  assert.equal(deliveries.length, 2);
+  assert.ok(deliveries.every(row => row.score === 0 && row.issues.some(issue => issue.stage === 'modeling-planning')));
+  assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
+  assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 8);
+  assert.equal(calls.filter(name => name.startsWith('packaged-game-playtest')).length, 2);
+  assert.equal(await fs.readFile(result.files.packageFile, 'utf8'), 'game');
+  const retainedGap = JSON.parse(await fs.readFile(path.join(result.delivery.retainedProject, 'plan/modeling-planning/iteration-1/gap.json'), 'utf8'));
+  assert.deepEqual(retainedGap.draft, draft);
+  const callCount = calls.length;
+  const resumed = await runProductionHarness(options);
+  assert.equal(resumed.delivery.score, 0);
+  assert.equal(calls.length, callCount);
 });

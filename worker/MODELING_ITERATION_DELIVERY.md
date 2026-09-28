@@ -37,7 +37,8 @@ Default budgets for new tasks:
 
 | Stage | Timeout | Retry/iteration budget |
 | --- | --- | --- |
-| Intake / engineering / reference research | 20 min per call | 2 calls |
+| Intake / engineering | 20 min per call | 4 calls per production round |
+| Reference research | 20 min per call | 2 calls |
 | Modeling author, shared blockout and final | 60 min per attempt | 3 direct attempts per production round |
 | Generated-model cleanup | 15 min per attempt | 2 attempts per round |
 | Modeling visual review | 20 min per call | 4 schema/service repair calls; first valid review is final |
@@ -48,6 +49,53 @@ Existing task deadlines and pinned releases remain authoritative. These defaults
 old task budgets, silently migrate frozen toolchains or re-submit unknown provider requests.
 Provider generation remains optional, capability checked and subject to its durable submission
 ledger. A completed deficient round can re-evaluate generation using its actual quality history.
+
+Planning uses the same delivery rule before any authored model exists. Exhausted internal intake
+or engineering calls retain a `PLANNING_PROVISIONAL` handoff with the unchanged objective, any
+valid intake draft, raw failed responses and exact field findings. It never becomes an accepted
+contract or invents capsule/dimension defaults. Production completes the round using documented
+temporary engine-native representations, records the gap and actual measurements, then repairs
+planning in the next completed production round. Same-round resume makes no additional calls.
+Successful intake is hashed and reused while engineering is repaired. Cancellation, unconfirmed
+process termination, changed evidence and explicit invalid user specifications remain fenced.
+
+`MODELING_INTAKE_MAX_CALLS` configures 1–12 calls for new tasks (default 4), independently of the
+20-minute `MODELING_INTAKE_TIMEOUT_MS` (maximum 60 minutes). Both are pinned in task policy.
+
+## Engineering planning exhaustion on 2026-09-28
+
+Task `task-22fc67e2-2d8c-4db9-81d6-b22f1bc641d5`, workspace
+`workspace-cb5720c6-81f5-46c5-9f84-e3d03388baf6`, did not time out in a visual review. Intake
+repaired a pivot error and completed. Both engineering responses included the shared capsule
+and paths for the shrine kit and entrance door, but left `contract.dimensions.meters:null`.
+The planner confused immutable known pivots with unknown dimensions and original-game fidelity;
+its generic validation feedback did not identify the missing field. Two calls exhausted the
+old limit before any assets or playable package were created. This branch still threw globally.
+
+Validation now identifies the missing extent directly and asks the responsible agent to record
+project design extents without claiming original measurements. The known pivot stays unchanged.
+Even if internal repairs exhaust, the new planning handoff keeps the round progressing and
+retains the full failure evidence. Original task files and consumed budgets are not rewritten.
+
+Verification for this repair:
+
+- All 190 Node regressions passed, including planning exhaustion, same-round resume without
+  additional calls, next-round engineering repair, immutable evidence, and rejecting asset
+  removal across repeated intake repair rounds.
+- An isolated replay of the actual failed response followed by one real engineering-agent call
+  passed engineering validation. All seven assets, four objective requirements, original asset
+  requirements, LOD budgets and known pivots were retained. The agent supplied documented
+  project design extents; these are not verified original-game measurements. The subsequent
+  reference-research step completed with its actual blockers recorded. Total probe: 485.7 s.
+- An isolated real Windows project underwent eight injected engineering service failures across
+  two complete rounds. Both rounds delivered with recorded gaps (93/100), both Unreal loads
+  and package launches passed, and the retained best package also launched successfully.
+  Total probe: 77.9 s. This tests delivery under internal planning failure, not shrine acceptance.
+
+Evidence is under `D:/StoneWorker/modeling-v2-audit/planning-20260928/`: `node-tests-final.log`,
+`live-repair/engineering-repair-report.json`, `live-repair/probe-report.json`, and
+`windows-planning-gap/probe-report.json`. Both probe reports confirm the original production
+context was unchanged. The failed production task was not resumed under a changed toolchain.
 
 ## Retained shrine evidence
 

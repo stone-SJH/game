@@ -11,7 +11,7 @@ import { validateEngineeringAcceptance } from '../agent/modeling-engineering.mjs
 
 const argv = process.argv.slice(2), options = {};
 for (let i = 0; i < argv.length; i += 2) {
-  if (!['--context', '--objective', '--draft', '--out', '--mode', '--seed-project', '--inject-stage-gap'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --out NEW_DIRECTORY, --mode planning|production|acceptance, --seed-project DIRECTORY, --inject-stage-gap STAGE_ID.');
+  if (!['--context', '--objective', '--draft', '--engineering-response', '--out', '--mode', '--seed-project', '--inject-stage-gap', '--inject-planning-gap'].includes(argv[i]) || !argv[i + 1]) throw new Error('Use --context FILE or --objective TEXT, optionally --draft FILE, --engineering-response FILE, --out NEW_DIRECTORY, --mode planning|production|acceptance, --seed-project DIRECTORY, --inject-stage-gap STAGE_ID, --inject-planning-gap engineering.');
   options[argv[i].slice(2)] = argv[i + 1];
 }
 if (Boolean(options.context) === Boolean(options.objective)) throw new Error('Choose exactly one context file or natural-language objective.');
@@ -20,9 +20,12 @@ if (!['planning', 'production', 'acceptance'].includes(mode) || mode !== 'planni
 if (options['seed-project'] && mode === 'planning') throw new Error('A copied project requires production or acceptance mode.');
 if (mode === 'acceptance' && !options['seed-project']) throw new Error('Acceptance requires a retained project copy.');
 if (options['inject-stage-gap'] && mode !== 'acceptance') throw new Error('Stage fault injection requires an isolated acceptance copy.');
+if (options['engineering-response'] && mode !== 'planning') throw new Error('Retained engineering response replay requires planning mode.');
+if (options['inject-planning-gap'] && (mode !== 'acceptance' || options['inject-planning-gap'] !== 'engineering' || options['inject-stage-gap'])) throw new Error('Choose engineering planning-gap injection in acceptance mode, without a stage injection.');
 const context = options.context ? await readJson(path.resolve(options.context)) : { objective: options.objective, references: [] };
 const originalHash = options.context ? await hashFile(path.resolve(options.context)) : null;
 const draft = options.draft ? await readJson(path.resolve(options.draft)) : null;
+const engineeringResponse = options['engineering-response'] ? await readJson(path.resolve(options['engineering-response'])) : null;
 const root = options.out ? path.resolve(options.out) : await fs.mkdtemp(path.join(os.tmpdir(), 'engineering-intake-live-'));
 if (options.out) await fs.mkdir(root, { recursive: false });
 const project = path.join(root, 'project'), output = path.join(root, 'run');
@@ -56,16 +59,30 @@ const calls = [];
 const iterationDeliveries = [];
 let injectedEvidence;
 let retainedDraftUsed = false;
+let engineeringResponseUsed = false;
+let injectedPlanningCalls = 0;
 console.log(JSON.stringify({ event: 'started', mode, root, sourceTaskId: context.taskId, retainedDraft: Boolean(draft) }));
 const pipelineOptions = { project, output, signal: abort.signal, invocation: codexInvocation([]),
   job: { taskId: `engineering-probe-${id}`, workspaceId: id, runId: 'probe', objective: context.objective,
     referenceFiles: context.references || [], qualityCriteria: context.qualityCriteria || [], deadlineAt: new Date(started + 45 * 60000).toISOString() },
   evaluate: async ({ name }) => {
     if (name === 'modeling-plan' && draft && !retainedDraftUsed) { retainedDraftUsed = true; return draft; }
+    if (name === 'modeling-engineering' && engineeringResponse && !engineeringResponseUsed) { engineeringResponseUsed = true; return engineeringResponse; }
     return undefined;
   },
   probe: async () => { throw stop; },
   step: async (name, command, args, timeoutMs, cwd, accepts, extra = {}) => {
+    if (mode === 'acceptance' && options['inject-planning-gap']) {
+      if (name.startsWith('modeling-plan')) {
+        await atomicJson(args[args.indexOf('-o') + 1], { reason: 'Retained project; no new DCC assets for this recovery probe.', assets: [] });
+        return { exitCode: 0, stdout: '', stderr: '', stopConfirmed: true };
+      }
+      if (name.startsWith('modeling-engineering')) {
+        injectedPlanningCalls++;
+        // Keep the real game untouched and exercise a confirmed internal review outage.
+        throw Object.assign(new Error('Probe-injected engineering review service outage'), { result: { exitCode: 1, stopConfirmed: true } });
+      }
+    }
     if (mode === 'acceptance' && name.startsWith('production-orchestrator')) {
       if (options['inject-stage-gap']) {
         const file = await localPath(project, `stages/${options['inject-stage-gap']}/evidence.json`, { existing: true });
@@ -95,9 +112,18 @@ const pipelineOptions = { project, output, signal: abort.signal, invocation: cod
 let error, delivered;
 try {
   if (mode === 'acceptance') {
-    process.env.MODELING_ROUTING_ENABLED = '0';
-    process.env.CODEX_MAX_ATTEMPTS = options['inject-stage-gap'] ? '3' : '1';
+    process.env.MODELING_ROUTING_ENABLED = options['inject-planning-gap'] ? '1' : '0';
+    process.env.CODEX_MAX_ATTEMPTS = options['inject-stage-gap'] || options['inject-planning-gap'] ? '3' : '1';
     process.env.CODEX_RETRY_DELAY_MS = '1';
+    if (options['inject-planning-gap']) {
+      process.env.QUALITY_REVIEW_MAX_ITERATIONS = '1';
+      // Isolated copied plans are excluded so this probe exercises fresh intake. The original
+      // retained project is never edited, and package contents remain identical.
+      for (const relative of ['plan/modeling-specs.json', 'plan/engineering-plan.json']) {
+        const file = await localPath(project, relative);
+        if (await fs.stat(file).catch(() => null)) await fs.rename(file, `${file}.seed`);
+      }
+    }
     const engineering = await readJson(path.join(project, 'plan/engineering-plan.json'));
     await validateEngineeringAcceptance(engineering, await readJson(path.join(project, 'acceptance/acceptance-report.json')), project);
     delivered = await runProductionHarness({ ...pipelineOptions, job: { ...retainedContext, referenceFiles: [] }, unreal: process.env.UNREAL_CMD,
@@ -111,13 +137,18 @@ const plan = await readJson(path.join(project, 'plan/modeling-specs.json'));
 const engineering = await readJson(path.join(project, 'plan/engineering-plan.json'));
 const report = { mode, sourceTaskId: context.taskId || null, seedProject: options['seed-project'] || null, root, durationMs: Date.now() - started, calls,
   passed: !error && Boolean(plan) && Boolean(engineering) && (mode === 'planning' || Boolean(delivered)) &&
-    (mode !== 'acceptance' || delivered?.qualityAccepted !== false) &&
+    (mode !== 'acceptance' || options['inject-planning-gap'] || delivered?.qualityAccepted !== false) &&
     (!options['inject-stage-gap'] || iterationDeliveries.length === 2 && iterationDeliveries[0].status === 'DELIVERED_WITH_GAPS' && iterationDeliveries[1].status === 'ACCEPTED'),
   injectedStageGap: options['inject-stage-gap'] || null, iterationDeliveries,
   delivered: delivered?.files,
   sourceUnchanged: !options.context || originalHash === await hashFile(path.resolve(options.context)),
   assetCount: plan?.assets?.length, traversalAssets: plan?.assets?.filter(asset => asset.contract?.traversal).map(asset => asset.assetId),
   requirements: engineering?.requirements?.length, error: error?.message, kind: error?.kind, lastFailure: error?.lastFailure };
+if (options['inject-planning-gap']) {
+  report.injectedPlanningCalls = injectedPlanningCalls;
+  report.passed = !error && Boolean(delivered) && delivered.qualityAccepted === false && injectedPlanningCalls === 8 &&
+    iterationDeliveries.length === 2 && iterationDeliveries.every(row => row.status === 'DELIVERED_WITH_GAPS');
+}
 await atomicJson(path.join(root, 'probe-report.json'), report);
 console.log(JSON.stringify(report));
 process.exitCode = report.passed && report.sourceUnchanged ? 0 : 1;

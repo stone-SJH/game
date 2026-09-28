@@ -21,6 +21,7 @@ export function executionPolicy(invocation = {}) {
   return { version: EXECUTION_POLICY_VERSION, model: process.env.MODELING_AGENT_MODEL || 'inherited',
     invocation: { command: invocation.command || null, argsHash: hashValue(invocation.args || []) }, nodeVersion: process.version,
     reasoning: { author: 'inherited; pinned runtime config', review: 'medium' },
+    intakeMs: setting('MODELING_INTAKE_TIMEOUT_MS', 1200000, 1, 3600000), intakeCalls: setting('MODELING_INTAKE_MAX_CALLS', 4, 1, 12),
     buildMs: setting('MODELING_BUILD_TIMEOUT_MS', 3600000), cleanupMs: setting('MODELING_CLEANUP_TIMEOUT_MS', 900000),
     reviewMs: setting('MODELING_EVALUATION_TIMEOUT_MS', 1200000), reviewCalls: 4, technicalMs: 900000, technicalCalls: 3 };
 }
@@ -119,7 +120,8 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
         // Fault-injection/observation runs after the durable reservation, before any tool is launched.
         if (onReserved) await onReserved(call);
         try {
-          const value = await invoke({ ...call, previousError: group.calls.at(-2)?.error || null });
+          const value = await invoke({ ...call, previousError: group.calls.at(-2)?.error || null,
+            previousErrors: group.calls.slice(0, -1).map(item => item.error).filter(Boolean) });
           signal?.throwIfAborted();
           await verifyEvidence(evidence);
           call.status = 'COMPLETED'; call.finishedAt = now(); call.stopConfirmed = true;
@@ -137,7 +139,8 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
           if (!canRetry) throw error;
         }
       }
-      throw modelingFailure(exhaustedKind, `${stage} exhausted its durable call/time budget; retained evidence: ${file}`, {
+      const lastFailure = group.calls.at(-1)?.error || null;
+      throw modelingFailure(exhaustedKind, `${identity.name || stage} exhausted its durable call/time budget; retained evidence: ${file}${lastFailure ? `; last failure: ${lastFailure.kind}: ${lastFailure.message}` : ''}`, {
         executionFile: file, lastFailure: group.calls.at(-1)?.error || null });
     } finally { busy = false; }
   }

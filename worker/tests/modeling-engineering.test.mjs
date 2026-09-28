@@ -106,6 +106,56 @@ test('engineering repair receives all frozen field findings with original values
   });
 });
 
+test('missing passage extent identifies dimensions separately from a valid frozen pivot and sweep', () => {
+  const value = planFor();
+  value.assets[0].contract.dimensions.meters = null;
+  assert.throws(() => resolveEngineering(draft, value, { requirements }), error => {
+    assert.deepEqual(error.validationIssues.map(row => row.field), ['contract.dimensions.meters']);
+    assert.match(error.message, /does not require keeping dimensions null/);
+    return true;
+  });
+});
+
+test('engineering exhaustion retains all contracts and repairs in the next complete iteration without repeating intake', async t => {
+  v2(t);
+  const root = await temp(t), project = path.join(root, 'project'), output = path.join(root, 'run');
+  await fs.mkdir(project); await fs.mkdir(output);
+  let engineeringCalls = 0, intakeCalls = 0;
+  const stop = new Error('A valid contract has reached production authoring.');
+  const options = { project, output, job: { taskId: 'engineering-gap', workspaceId: 'workspace', runId: 'run', objective },
+    invocation: { command: process.execPath, args: [] }, signal: new AbortController().signal,
+    probe: async () => { throw stop; }, evaluate: async ({ name, prompt }) => {
+      if (name === 'modeling-plan') { intakeCalls++; return draft; }
+      engineeringCalls++;
+      const result = planFor();
+      if (engineeringCalls <= 4) result.assets[0].contract.dimensions.meters = null;
+      else {
+        assert.match(prompt, /previous whole production iteration/);
+        assert.match(prompt, /contract.dimensions.meters/);
+        assert.match(prompt, /Previous UNVALIDATED response/);
+      }
+      return result;
+    } };
+  const first = createModelingPipeline(options);
+  const handoff = await first.prepare();
+  assert.equal(handoff.status, 'PLANNING_PROVISIONAL');
+  assert.deepEqual(handoff.assets.map(row => row.spec), draft.assets);
+  assert.equal(await first.engineeringPlan(), null);
+  assert.equal(await readJson(path.join(project, 'plan/modeling-specs.json')), null);
+  await first.verify();
+  const before = await fs.readFile(path.join(root, 'modeling-state/tasks', hashValue({ taskId: options.job.taskId, workspaceId: 'workspace' }), 'execution.json'));
+  await createModelingPipeline(options).prepare();
+  assert.equal(engineeringCalls, 4);
+  assert.equal(intakeCalls, 1);
+  assert.deepEqual(await fs.readFile(path.join(root, 'modeling-state/tasks', hashValue({ taskId: options.job.taskId, workspaceId: 'workspace' }), 'execution.json')), before);
+  await assert.rejects(createModelingPipeline(options).prepare({ iteration: 2 }), error => error === stop);
+  assert.equal(engineeringCalls, 5);
+  assert.equal(intakeCalls, 1);
+  const result = await readJson(path.join(project, 'plan/modeling-specs.json'));
+  assert.deepEqual(result.assets[0].requirements, draft.assets[0].requirements);
+  assert.deepEqual(result.assets[0].contract.dimensions.meters, [4, 4, 3]);
+});
+
 test('reference intake carries text and images and rejects changed or unsafe files', async t => {
   const project = await temp(t);
   await fs.mkdir(path.join(project, 'references'));

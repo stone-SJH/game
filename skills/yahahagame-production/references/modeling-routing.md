@@ -28,6 +28,14 @@ state; the production agent consumes accepted or explicitly provisional model ev
   with a complete traversal path uses `fbx-static` plus convex collision, and a rigged player
   uses controller/gameplay traversal acceptance instead of a mesh sweep. It never invents a
   dimension, capsule, pivot coordinate or path. These repairs are written to validation evidence.
+- Exhausted intake or engineering reviews produce `PLANNING_PROVISIONAL`. The host retains the
+  complete objective, draft assets, raw responses and exact field findings under
+  `plan/modeling-planning/iteration-N/`. These are unresolved inputs, not approved contracts.
+  Finish the playable round with documented temporary engine-native representations and actual
+  measurements; record the planning gap without asking the user to repair agent JSON. Do not
+  create a modeling revision to reopen calls in the same round. The next whole production
+  iteration repairs the evidence internally; successful intake is reused. Never claim such a
+  provisional representation meets the original modeling contract.
 - The planner receives verified uploaded images/text and records every objective requirement,
   its implementation and verification, plus unresolved reference facts. Read-only research can
   inspect sources; unknown facts remain acceptance obligations. Code-only requests retain this
