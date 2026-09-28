@@ -23,8 +23,22 @@ async function resourceFiles(directory) {
   return result.sort();
 }
 
-export async function createSkillPlan({ spec, project, feedback, skillsRoot = path.join(repositoryRoot, 'skills') }) {
+export async function createSkillPlan({ spec, project, feedback, skillsRoot = path.join(repositoryRoot, 'skills'), pinnedLockHash }) {
   const { selected, repairDimensions } = selectSkills(spec, feedback);
+  if (pinnedLockHash) {
+    if (!/^[a-f0-9]{64}$/.test(pinnedLockHash)) throw modelingFailure('INTEGRITY_ERROR', 'Invalid pinned skill identity.');
+    const root = `tools/modeling-skills/${pinnedLockHash}`;
+    const plan = await readJson(await localPath(project, `${root}/skill-plan.json`));
+    if (!plan || plan.protocol !== 2 || plan.lockHash !== pinnedLockHash || hashValue(plan.resources) !== pinnedLockHash ||
+        hashValue(plan.selected) !== hashValue(selected) ||
+        hashValue(plan.entrypoints) !== hashValue(selected.map(name => `${root}/${name}/SKILL.md`)) ||
+        hashValue(plan.helperDirectories) !== hashValue(selected.filter(name => ['yahaha-blender-modeling', 'yahaha-blender-lowpoly'].includes(name)).map(name => `${root}/${name}/scripts`)) ||
+        hashValue(plan.stages) !== hashValue(['blockout', 'final'])) {
+      throw modelingFailure('INTEGRITY_ERROR', 'Pinned skill plan changed or is missing.');
+    }
+    await validateSkillPlan(project, plan);
+    return { ...plan, repairDimensions };
+  }
   const upstream = await readJson(path.join(skillsRoot, 'modeling-upstream-lock.json'));
   if (!upstream?.files?.length) throw new Error('Missing modeling upstream lock.');
   for (const entry of upstream.files.filter(f => selected.some(name => f.localPath.startsWith(`${name}/`)))) {

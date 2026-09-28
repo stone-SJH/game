@@ -309,14 +309,15 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           'blockout/preview-report.json', 'blockout/checkpoint.json'].map(n => `${context.directory}/${n}`).concat(images, checkpoint.file, blockoutExecution || []);
         const files = [];
         for (const relative of stageArtifacts) files.push(await localPath(project, relative, { existing: true }));
-        blockout = { images, checkpoint, stageArtifacts, evidence: await fileEvidence(files) };
+        blockout = { images, checkpoint, stageArtifacts, evidence: await fileEvidence(files), authorPromptVersion: 1 };
         blockout.snapshot = await preserveBlockoutEvidence({ project, stateRoot: taskState, attemptId: context.attemptId, evidence: blockout.evidence });
         await context.saveBlockout?.(blockout);
         }
         await verifyBlockoutEvidence({ project, stateRoot: taskState, ...blockout });
         context.stageArtifacts = [...blockout.stageArtifacts];
         await reportProgress({ phase: 'crafting', tool: 'Blender MCP', step: `${context.spec.assetId}: inspect blockout views and finish` });
-        const finalExecution = await author({ ...context, phase: 'final', sourceFile: blockout.checkpoint.file, stageImages: blockout.images });
+        const finalExecution = await author({ ...context, phase: 'final', sourceFile: blockout.checkpoint.file, stageImages: blockout.images,
+          preserveBlockoutPrompt: blockout.authorPromptVersion === 1 });
         const restored = await verifyBlockoutEvidence({ project, stateRoot: taskState, ...blockout });
         if (restored.length) await reportProgress({ phase: 'crafting', tool: 'Modeling evidence', step: `${context.spec.assetId}: restored ${restored.length} frozen blockout files from verified host backups` });
         context.stageArtifacts.push(...(finalExecution || []));
@@ -345,7 +346,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         `Mandatory additional LOD meshes in source.blend and asset-manifest.json: ${spec.contract.runtime.lodTriangles.map((n,i)=>`LOD${i+1}, role=lod, lod=${i+1}, maximum ${n} triangles`).join('; ')}. A low LOD0 triangle count does not waive these levels. Keep LOD meshes out of the LOD0 GLB export.`,
       ] : []),
       `Exact output directory (relative): ${directory}. Save files directly in this directory, without adding a stage-named subdirectory. ${context.phase === 'blockout' ? 'Save the primary volumes, proportions and required parts in source.blend, plus recipe.py and asset-manifest.json. Defer finishing, export and final QA to the next stage; the host now renders your blockout.' : `Required paths include ${directory}/source.blend with packed textures and ${directory}/model.glb (GLB 2.0).`}`,
-      ...(context.phase === 'final' ? [`The existing ${directory}/blockout directory, host previews, checkpoint files and recorded scripts are frozen evidence. Preserve them byte for byte; do not delete, move, overwrite or clean them. Write final outputs alongside the blockout, and save changes to ${directory}/source.blend without overwriting the supplied checkpoint.`] : []),
+      ...(context.phase === 'final' && context.preserveBlockoutPrompt ? [`The existing ${directory}/blockout directory, host previews, checkpoint files and recorded scripts are frozen evidence. Preserve them byte for byte; do not delete, move, overwrite or clean them. Write final outputs alongside the blockout, and save changes to ${directory}/source.blend without overwriting the supplied checkpoint.`] : []),
       sourceFile ? `Import/open the supplied source copy: ${sourceFile}. ${context.phase === 'final' ? `Continue the checkpoint and complete every original contract requirement, including declared LODs, collision, sockets and actions. Save the result directly to ${directory}/source.blend.` : 'Preserve source identity and implement the edit plan.'}` : 'Build the model directly in Blender using bpy. Keep all created files in the assigned output directory.',
       cleanup ? 'This is a limited cleanup attempt: transforms, local mesh fixes, materials, collision/LOD. If it needs silhouette reconstruction, global retopology or a new rig, write build-report.json with smallEditsOnly=false; do not perform a full rebuild of this generated source.' :
         context.phase === 'blockout' ? 'This call establishes rough proportions and essential parts. Save its three stage artifacts and return; the final stage completes materials, runtime preparation, exports and quality checks.' : 'Meet every original requirement. Do not substitute a default cube or silently reduce fidelity.',
@@ -500,7 +501,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   async function produce(spec, availability) {
     const referenceHashes = [];
     for (const image of referenceFiles(spec)) referenceHashes.push(await hashFile(await localPath(project, image, { existing: true })));
-    const skillPlan = spec.contract ? await createSkillPlan({ spec, project }) : null;
+    const pinnedToolchain = spec.contract ? await readJson(path.join(taskState, `toolchain-${spec.assetId}.json`)) : null;
+    const skillPlan = spec.contract ? await createSkillPlan({ spec, project, pinnedLockHash: pinnedToolchain?.skillLockHash }) : null;
     if (skillPlan) skillPlans.set(spec.assetId, skillPlan);
     const validatorHashes = spec.contract ? await Promise.all(['modeling-asset-check.py','modeling_scene.py','modeling_quality.py','modeling_reference.py','modeling-unreal-check.py'].map(f => hashFile(path.join(repositoryRoot,'worker/tools',f)))) : [];
     if (spec.contract) await pinToolchain(taskState, spec.assetId, {
