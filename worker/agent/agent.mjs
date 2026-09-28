@@ -9,6 +9,8 @@ import { artifactContentType, commandDiagnostic, runProductionHarness } from './
 import { tripoAvailability } from './providers/tripo.mjs';
 import { agentEnvironment } from './modeling-io.mjs';
 import { materializeReferences } from './references.mjs';
+import { createArtifactPublisher, awaitArtifactPublication } from './artifact-publication.mjs';
+import { throwIfExecutionFenced } from './stage-failure.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -55,8 +57,9 @@ export async function archivePackage(packageRoot, destination, signal) {
     timeoutMs: Number(process.env.PACKAGE_ARCHIVE_TIMEOUT_MS || 60 * 60 * 1000),
   });
   if (!result.stopConfirmed || result.error || result.exitCode !== 0 || result.timedOut) {
-    await fsp.rm(temporary, { force: true });
-    throw new Error(`Playable package archive failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`);
+    if (result.stopConfirmed) await fsp.rm(temporary, { force: true });
+    throw Object.assign(new Error(`Playable package archive failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`),
+      { result, stopConfirmed: result.stopConfirmed });
   }
   try { await fsp.rename(temporary, destination); }
   finally { await fsp.rm(temporary, { force: true }); }
@@ -142,10 +145,14 @@ function toolFromOutput(value) {
 }
 
 export async function executeJob(job, ctx) {
-  const { root, signal, uploadFile, reportProgress = () => {} } = ctx;
+  const { root, signal, uploadFile: rawUploadFile, reportProgress = () => {} } = ctx;
   const project = path.join(root, 'workspaces', job.workspaceId, 'project');
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
+  const publisher = typeof rawUploadFile === 'function' ? await createArtifactPublisher({
+    file: path.join(output, 'artifact-publication.json'), upload: rawUploadFile, signal,
+    ...(ctx.publicationRetryDelayMs === undefined ? {} : { retryDelayMs: ctx.publicationRetryDelayMs }) }) : null;
+  const uploadFile = publisher?.publish;
   const logs = [], artifactIds = [];
   const playablePackages = [];
   const iterationReviews = [];
@@ -188,7 +195,8 @@ export async function executeJob(job, ctx) {
         }
       }
       currentProgress = { ...currentProgress, ...patch, updatedAt: new Date().toISOString(), ...snapshot };
-      await reportProgress(currentProgress);
+      try { await reportProgress(currentProgress); }
+      catch (error) { if (signal.aborted || error.stopConfirmed === false) throw error; }
     });
     publishing = next.catch(() => {});
     return next;
@@ -251,7 +259,8 @@ export async function executeJob(job, ctx) {
     await publish({ phase: 'preparing', step: 'Preparing reference files' });
     job = { ...job, referenceFiles: await materializeReferences({ references: job.payload?.references, project,
       downloadReference: ctx.downloadReference, signal }) };
-    production = await runProductionHarness({ job, project, output, signal, step, unreal, reportProgress: publish,
+    production = await (ctx.productionHarness || runProductionHarness)({ job, project, output, signal, step, unreal, reportProgress: publish,
+      requirePublishableResult: ctx.requirePublishableResult === true,
       onModelingReport: async ({ file, record }) => {
         if (typeof uploadFile !== 'function') return;
         try {
@@ -259,7 +268,7 @@ export async function executeJob(job, ctx) {
           const artifactId = await uploadFile(name, file, artifactContentType(file), { timeoutMs: 30000 });
           artifactIds.push(artifactId);
         } catch (error) {
-          if (signal.aborted || error.stopConfirmed === false) throw error;
+          throwIfExecutionFenced(error, signal);
           await publish({ phase: 'publishing', status: 'running', step: 'Modeling evidence upload failed', error: error.message });
         }
       },
@@ -274,6 +283,7 @@ export async function executeJob(job, ctx) {
         iterationReviews.push(review);
         if (record.kind === 'iteration-delivery') Object.assign(review, { score: record.score, threshold: record.threshold,
           qualityAccepted: record.qualityAccepted, status: record.status, issues: record.issues });
+        if (typeof uploadFile !== 'function') return;
         try {
           review.artifactId = await uploadFile(path.basename(file), file, 'application/json', { timeoutMs: 10000 });
           artifactIds.push(review.artifactId);
@@ -293,10 +303,32 @@ export async function executeJob(job, ctx) {
           playablePackages.push({ iteration: attempt, name, path: name, artifactId });
           await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifact: name });
         } catch (error) {
+          throwIfExecutionFenced(error, signal);
           await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifactError: error.message });
+          throw error;
         }
       } });
-    for (const file of Object.values(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file)));
+    if (publisher) {
+      for (const [role, file] of Object.entries(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file),
+        { required: ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport', 'iterationResult'].includes(role) }));
+      let retainedPackage = playablePackages.find(item => item.iteration === production.delivery?.iteration);
+      while (ctx.requirePublishableResult && !retainedPackage) {
+        signal.throwIfAborted();
+        const name = playablePackageName(production.delivery.iteration);
+        try {
+          await (ctx.archivePackage || archivePackage)(path.dirname(production.files.packageFile), path.join(output, name), signal);
+          retainedPackage = { iteration: production.delivery.iteration, name, path: name };
+          playablePackages.push(retainedPackage);
+        } catch (error) {
+          throwIfExecutionFenced(error, signal);
+          await publish({ phase: 'publishing', status: 'running', step: 'Retained playable result; retrying complete package archive', packageArtifactError: error.message });
+          await delay(ctx.publicationRetryDelayMs ?? 10000, undefined, { signal });
+        }
+      }
+      if (retainedPackage) artifactIds.push(await uploadFile(retainedPackage.name, path.join(output, retainedPackage.path),
+        artifactContentType(retainedPackage.path), { required: true }));
+      await publisher.flush();
+    }
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
     failure = error.message;
@@ -305,24 +337,31 @@ export async function executeJob(job, ctx) {
     clearInterval(snapshotTimer);
     await publishing;
   }
-  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective,
-    ...(production?.delivery ? { step: `Delivered iteration ${production.delivery.iteration}: ${production.delivery.score}/100 (target ${production.delivery.threshold})` } : {}) });
   const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
     deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null,
-    playablePackages, iterationReviews, qualityAccepted: production?.qualityAccepted ?? false, delivery: production?.delivery || null };
+    playablePackages, iterationReviews, publication: publisher?.summary(), qualityAccepted: production?.qualityAccepted ?? false, delivery: production?.delivery || null };
   const reportName = 'production-report.json';
   const file = path.join(output, reportName);
   await atomicJson(file, report);
-  artifactIds.push(await uploadFile(reportName, file, 'application/json'));
+  if (publisher) artifactIds.push(await uploadFile(reportName, file, 'application/json', { required: true }));
+  if (publisher && ctx.requirePublishableResult && !failure) {
+    await awaitArtifactPublication(publisher, { signal, retryDelayMs: ctx.publicationRetryDelayMs ?? 10000,
+      onPending: publication => publish({ phase: 'publishing', status: 'running', publication,
+        step: 'Production result retained; retrying pending artifact publication' }) });
+  }
+  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective,
+    ...(production?.delivery ? { step: `${production.delivery.playable === false ? 'Retained incomplete' : 'Delivered'} iteration ${production.delivery.iteration}: ${production.delivery.score}/100 (target ${production.delivery.threshold})`, publication: publisher?.summary() } : {}) });
   // Full tool output lives in the streamed report artifact, not the bounded control request.
   const summary = { protocol: 2, production: true, passed: report.passed, failure, deliverables: report.deliverables,
-    qualityAccepted: report.qualityAccepted, delivery: report.delivery ? {
+    qualityAccepted: report.qualityAccepted, publication: publisher?.summary(), delivery: report.delivery ? {
       iteration: report.delivery.iteration, status: report.delivery.status, score: report.delivery.score,
       threshold: report.delivery.threshold, qualityAccepted: report.delivery.qualityAccepted,
       stoppedReason: report.delivery.stoppedReason,
+      playable: report.delivery.playable,
     } : null,
     steps: logs.map(({ name, passed, exitCode, timedOut }) => ({ name, passed, exitCode, timedOut })) };
-  return { status: failure ? 'FAIL' : 'PASS', reason: failure || (production?.qualityAccepted === false ? `Playable iteration delivered with recorded gaps (${production.delivery?.score ?? 0}/100).` : 'Tool pipeline passed.'), report: summary, artifactIds, stopConfirmed: true };
+  return { status: failure ? 'FAIL' : 'PASS', reason: failure || (production?.delivery?.playable === false ? 'Iteration artifacts retained; playable package remains a recorded gap.' : production?.qualityAccepted === false ? `Playable iteration delivered with recorded gaps (${production.delivery?.score ?? 0}/100).` : 'Tool pipeline passed.'), report: summary,
+    artifactIds: [...new Set([...artifactIds, ...(publisher?.artifactIds() || [])].filter(Boolean))], stopConfirmed: true };
 }
 
 export async function runAgent({ control, workerId, token, root, signal, once = false, intervalMs = 2000, execute = executeJob }) {
@@ -350,9 +389,14 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
         await fsp.rm(journal, { force: true });
         return accepted;
       } catch (error) {
-        if (error.status === 422) { result = { ...result, status: 'FAIL', reason: error.message }; await atomicJson(journal, { phase: 'RESULT', bootId, job, result }); }
-        else if (signal?.aborted || [400, 401, 403, 409].includes(error.status)) throw error;
-        await delay(intervalMs);
+        signal?.throwIfAborted();
+        if (error.status === 422) {
+          result = { ...result, publicationError: error.message,
+            progress: { ...result.progress, phase: 'publishing', status: 'running', step: 'Retained result awaiting publication acceptance', error: error.message } };
+          await atomicJson(journal, { phase: 'RESULT', bootId, job, result });
+        }
+        else if ([400, 401, 403, 409].includes(error.status)) throw error;
+        await delay(intervalMs, undefined, { signal });
       }
     }
   }
@@ -381,7 +425,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     await atomicJson(journal, { phase: 'RUNNING', bootId, job });
     let result;
     try {
-      result = await execute(job, { root, signal: controller.signal, reportProgress,
+      result = await execute(job, { root, signal: controller.signal, reportProgress, requirePublishableResult: true,
         downloadReference: reference => fetch(`${control}/v1/worker/references/${encodeURIComponent(job.taskId)}/${encodeURIComponent(reference.referenceId)}`, {
           headers: { ...headers, 'x-boot-id': bootId, 'x-job-id': job.jobId, 'x-lease-token': job.leaseToken }, redirect: 'error',
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60000)]) }),

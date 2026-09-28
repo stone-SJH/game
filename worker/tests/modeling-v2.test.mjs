@@ -49,7 +49,7 @@ test('skill routing pins and copies only relevant resources; modified task helpe
   await validateSkillPlan(f.project,plan);
   await fs.appendFile(path.join(f.project,plan.helperDirectories.find(d=>d.includes('yahaha-blender-lowpoly')),'yahaha_lpm.py'),'\n# altered');
   await assert.rejects(validateSkillPlan(f.project,plan),/changed/);
-  await assert.rejects(createSkillPlan({...f,spec:low}),/modified/);
+  await assert.rejects(createSkillPlan({...f,spec:low}),error=>error.kind==='INTEGRITY_ERROR');
 });
 
 test('online preflight suppresses third-party routing and caches one balance request per pipeline',async t=>{
@@ -66,7 +66,10 @@ test('online preflight suppresses third-party routing and caches one balance req
   await atomicJson(path.join(f.project,'plan/modeling-request.json'),{reason:'Add observable detail',assets:[{...spec,requirements:[...spec.requirements,'A black dial is visible']}]});
   const revised=await pipeline.prepare();assert.equal(builds,2);assert.equal(revised.assets[0].spec.requirements.length,2);
   await atomicJson(path.join(f.project,'plan/modeling-request.json'),{reason:'looser',assets:[{...spec,contract:defaultContract({budgets:{materials:100,maxTextureSize:8192,textureBytes:999999999}})}]});
-  await assert.rejects(pipeline.prepare(),/weaken/);
+  const retained = await pipeline.prepare({ iteration: 2 });
+  assert.ok(retained.issues.some(issue => issue.stage === 'modeling-revision'));
+  assert.deepEqual(retained.assets[0].spec, revised.assets[0].spec);
+  assert.equal(builds,2);
 });
 
 test('unknown provider region cannot poll a legacy task or submit a second generation',async t=>{

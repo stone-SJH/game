@@ -192,8 +192,9 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   const result = await executeJob(job, { root, signal: new AbortController().signal,
     uploadFile: async (name, file, contentType, options) => { uploads.push({ name, options }); return name; } });
   // The fixture only checks transport; it deliberately supplies no game deliverables.
-  assert.equal(result.status, 'FAIL');
-  assert.match(result.reason, /Production deliverables missing/);
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.report.delivery.playable, false);
+  assert.equal(result.report.delivery.status, 'RETAINED_INCOMPLETE');
   const project = path.join(root, 'workspaces', job.workspaceId, 'project');
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   const step = JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.json'), 'utf8'));
@@ -206,10 +207,10 @@ test('production executeJob sends stdin, closes it, and persists step diagnostic
   assert.equal(received.args.some(arg => arg.includes(objective)), false);
   assert.equal(await fs.readFile(path.join(output, 'codex-production-session-1.txt'), 'utf8'), received.input);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'production-orchestrator-1.stdout.jsonl'), 'utf8')), received);
-  assert.deepEqual(uploads.find(item => item.name === 'iteration-monitor-1.json')?.options, { timeoutMs: 10000 });
+  assert.deepEqual(uploads.find(item => item.name === 'iteration-result.json')?.options, { timeoutMs: 10000 });
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
-  assert.equal(report.iterationReviews[0].action, 'stop');
-  assert.ok(result.artifactIds.includes('iteration-monitor-1.json'));
+  assert.ok(report.delivery.issues.some(issue => /Production deliverables missing/.test(issue.reason)));
+  assert.ok(result.artifactIds.includes('iteration-result.json'));
 });
 
 test('production Codex attempts use an isolated temporary directory', async t => {
@@ -226,24 +227,23 @@ test('production Codex attempts use an isolated temporary directory', async t =>
   assert.notEqual(record.temp, process.env.TEMP);
 });
 
-test('service failures with cleanup warnings use bounded retries and publish the actual cause', async t => {
+test('service failures retain scored rounds and publish the actual cause', async t => {
   const root = await fixture(t), { entrypoint } = await fakeCli(root, {
     exitCode: 1,
     stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)\nHTTP 503 Service Unavailable',
     recordEnvironment: true,
   });
-  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000',
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '3', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000',
     ITERATION_SAME_FAILURE_LIMIT: '3', ITERATION_FAILURE_LIMIT: '8' });
   const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
   const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
-  assert.equal(result.status, 'FAIL');
-  assert.match(result.reason, /Iteration monitor stopped at execution attempt 3/);
-  assert.match(result.reason, /503 Service Unavailable/);
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.report.delivery.playable, false);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 3);
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
-  assert.deepEqual(report.iterationReviews.map(review => [review.category, review.action, review.aiInvoked]),
-    [['service', 'retry', false], ['service', 'retry', false], ['service', 'stop', false]]);
+  assert.ok(report.delivery.issues.some(issue => /503 Service Unavailable/.test(issue.reason)));
+  assert.equal(report.iterationReviews.filter(review => review.kind === 'iteration-delivery').length, 3);
   const temps = new Set();
   for (let attempt = 1; attempt <= 3; attempt++) {
     const record = JSON.parse(await fs.readFile(path.join(output, `production-orchestrator-${attempt}.stdout.jsonl`), 'utf8'));
@@ -277,9 +277,9 @@ test('telemetry includes the newest workspace files beyond the first directory e
   assert.equal(await fs.readFile(latest, 'utf8'), 'latest scene');
 });
 
-test('CLI usage failure exits immediately with diagnostics even when retries are unlimited', async t => {
+test('CLI usage failure retains its diagnostics without claiming a playable package', async t => {
   const root = await fixture(t), { entrypoint } = await fakeCli(root, { exitCode: 2 });
-  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000' });
+  environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '1', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000' });
   const job = { taskId: 'bad-cli-task', workspaceId: 'bad-cli-workspace', runId: 'run', objective };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
@@ -287,13 +287,13 @@ test('CLI usage failure exits immediately with diagnostics even when retries are
   try { result = await executeJob(job, { root, signal: controller.signal, uploadFile: async name => name }); }
   finally { clearTimeout(timeout); }
   assert.equal(controller.signal.aborted, false);
-  assert.equal(result.status, 'FAIL');
-  assert.match(result.reason, /unexpected argument 'are'/);
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.report.delivery.playable, false);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
   assert.equal(report.logs.length, 1);
   assert.equal(report.logs[0].exitCode, 2);
-  assert.equal(JSON.parse(await fs.readFile(path.join(output, 'codex-production-attempt-1.json'), 'utf8')).exitCode, 2);
+  assert.ok(report.delivery.issues.some(issue => /unexpected argument 'are'/.test(issue.reason)));
 });
 
 test('commands with no input receive EOF instead of waiting on an open pipe', async t => {

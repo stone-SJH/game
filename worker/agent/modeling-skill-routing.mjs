@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJson, hashFile, hashValue, localPath, readJson, repositoryRoot } from './modeling-io.mjs';
+import { modelingFailure, verifyEvidence } from './modeling-execution.mjs';
 
 export function selectSkills(spec, feedback) {
   const selected = ['yahaha-blender-modeling'];
@@ -13,7 +14,7 @@ export function selectSkills(spec, feedback) {
 async function resourceFiles(directory) {
   const result = [];
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) throw new Error('Skill resources cannot be symbolic links.');
+    if (entry.isSymbolicLink()) throw modelingFailure('INTEGRITY_ERROR', 'Skill resources cannot be symbolic links.');
     if (entry.name === '__pycache__') continue;
     const file = path.join(directory, entry.name);
     if (entry.isDirectory()) result.push(...await resourceFiles(file));
@@ -27,7 +28,7 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
   const upstream = await readJson(path.join(skillsRoot, 'modeling-upstream-lock.json'));
   if (!upstream?.files?.length) throw new Error('Missing modeling upstream lock.');
   for (const entry of upstream.files.filter(f => selected.some(name => f.localPath.startsWith(`${name}/`)))) {
-    if (await hashFile(await localPath(skillsRoot, entry.localPath, { existing: true })) !== entry.sha256) throw new Error(`Pinned upstream changed: ${entry.localPath}`);
+    await verifyEvidence([{ file: await localPath(skillsRoot, entry.localPath), sha256: entry.sha256 }]);
   }
   const resources = [];
   for (const name of selected) for (const file of await resourceFiles(path.join(skillsRoot, name))) {
@@ -41,7 +42,7 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
     try {
       await fs.copyFile(path.join(skillsRoot, resource.path), destination, fs.constants.COPYFILE_EXCL);
     } catch (error) { if (error.code !== 'EEXIST') throw error; }
-    if (await hashFile(destination) !== resource.sha256) throw new Error('Task skill resource was modified.');
+    await verifyEvidence([{ file: destination, sha256: resource.sha256 }]);
   }
   const plan = { protocol: 2, lockHash, selected, repairDimensions, resources,
     entrypoints: selected.map(name => `${root}/${name}/SKILL.md`),
@@ -53,7 +54,7 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
 
 export async function validateSkillPlan(project, plan) {
   for (const resource of plan.resources) {
-    if (await hashFile(await localPath(project, `tools/modeling-skills/${plan.lockHash}/${resource.path}`, { existing: true })) !== resource.sha256) throw new Error('Pinned task skill changed.');
+    await verifyEvidence([{ file: await localPath(project, `tools/modeling-skills/${plan.lockHash}/${resource.path}`), sha256: resource.sha256 }]);
   }
 }
 
@@ -63,13 +64,13 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
   try { await fs.writeFile(file, JSON.stringify(toolchain), { flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
   if (hashValue(await readJson(file)) !== hashValue(toolchain)) {
-    throw Object.assign(new Error('Active modeling task toolchain changed. Restore its pinned release or stop with evidence; budgets cannot restart under another toolchain.'), { hardFailure: true });
+    throw Object.assign(new Error('Active modeling task toolchain changed. Restore its pinned release or stop with evidence; budgets cannot restart under another toolchain.'), { hardFailure: true, kind: 'TOOLCHAIN_CHANGED' });
   }
 }
 
 export async function modelingToolHashes() {
   const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
-    'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs',
+    'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs', 'agent/stage-failure.mjs', 'agent/artifact-publication.mjs',
     'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs'];
   for (const directory of ['agent', 'tools']) {
     for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {

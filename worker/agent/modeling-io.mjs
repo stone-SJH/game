@@ -22,7 +22,7 @@ export async function localPath(root, relative, { existing = false } = {}) {
   let current = base;
   for (const component of [null, ...tail.split(path.sep)]) {
     if (component !== null) current = path.join(current, component);
-    try { if ((await fs.lstat(current)).isSymbolicLink()) throw new Error('Modeling paths cannot traverse links or junctions.'); }
+    try { if ((await fs.lstat(current)).isSymbolicLink()) throw Object.assign(new Error('Modeling paths cannot traverse links or junctions.'), { executionFence: true }); }
     catch (error) { if (error.code !== 'ENOENT' || existing) throw error; }
   }
   return target;

@@ -53,15 +53,17 @@ export async function callBlenderMcp({ project, blender = blenderExecutable(), t
   });
 }
 
-export async function discoverModelingCapabilities({ project, output, signal, blender = blenderExecutable() }) {
+export async function discoverModelingCapabilities({ project, output, signal, blender = blenderExecutable(), timeoutMs = 120000 }) {
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, Math.min(60000, deadline - Date.now()));
   const snapshot = { protocol: 1, blenderCliAvailable: false, blenderMcpAvailable: false, blenderVersion: 'unverified',
     transport: 'mcp-stdio', tools: [], advancedModeling: 'unverified', agentModel: process.env.MODELING_AGENT_MODEL || 'inherited Codex configuration' };
   try {
-    const response = await callBlenderMcp({ project, blender, signal });
+    const response = await callBlenderMcp({ project, blender, signal, timeoutMs: remaining() });
     const result = JSON.parse(response.content[0].text);
     snapshot.blenderVersion = result.stdout.split(/\r?\n/)[0];
     snapshot.blenderCliAvailable = true; snapshot.blenderMcpAvailable = true;
-    const listed = await callBlenderMcp({ project, blender, signal, tool: '__tools_list' });
+    const listed = await callBlenderMcp({ project, blender, signal, tool: '__tools_list', timeoutMs: remaining() });
     snapshot.tools = listed.tools.map(t => t.name);
     if (!['blender_health','blender_run_python','blender_inspect','blender_render_views','blender_checkpoint'].every(t=>snapshot.tools.includes(t))) throw new Error('Incomplete Blender MCP tool list.');
     snapshot.validation = { processStartup: 'PASS', bpyAuthoring: 'unverified', engineImport: 'unverified', complexAssets: 'unverified' };

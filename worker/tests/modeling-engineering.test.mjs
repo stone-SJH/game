@@ -148,7 +148,7 @@ test('engineering exhaustion retains all contracts and repairs in the next compl
   assert.equal(engineeringCalls, 4);
   assert.equal(intakeCalls, 1);
   assert.deepEqual(await fs.readFile(path.join(root, 'modeling-state/tasks', hashValue({ taskId: options.job.taskId, workspaceId: 'workspace' }), 'execution.json')), before);
-  await assert.rejects(createModelingPipeline(options).prepare({ iteration: 2 }), error => error === stop);
+  assert.equal((await createModelingPipeline(options).prepare({ iteration: 2 })).status, 'ASSETS_PROVISIONAL');
   assert.equal(engineeringCalls, 5);
   assert.equal(intakeCalls, 1);
   const result = await readJson(path.join(project, 'plan/modeling-specs.json'));
@@ -209,12 +209,12 @@ test('pipeline resolves the reported failure, freezes engineering and preserves 
     probe: async () => { throw stop; }, evaluate: async ({ name }) => {
       calls.push(name); return name === 'modeling-plan' ? draft : planFor();
     } };
-  await assert.rejects(createModelingPipeline(options).prepare(), error => error === stop);
+  assert.equal((await createModelingPipeline(options).prepare()).status, 'ASSETS_PROVISIONAL');
   assert.deepEqual(calls, ['modeling-plan', 'modeling-engineering']);
   const saved = await readJson(path.join(project, 'plan/engineering-plan.json'));
   assert.deepEqual(saved.requirements.map(row => row.description), requirements.map(row => row.description));
   assert.equal(saved.assets[0].contract.traversal.paths.length, 1);
-  await assert.rejects(createModelingPipeline({ ...options, job: { ...options.job, runId: 'resumed' } }).prepare(), error => error === stop);
+  assert.equal((await createModelingPipeline({ ...options, job: { ...options.job, runId: 'resumed' } }).prepare()).status, 'ASSETS_PROVISIONAL');
   assert.equal(calls.length, 2, 'Resume must reuse frozen plans, not create new budgets.');
   saved.playerCapsule.radiusMeters += 1;
   await atomicJson(path.join(project, 'plan/engineering-plan.json'), saved);

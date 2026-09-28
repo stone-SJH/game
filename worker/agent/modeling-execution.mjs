@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { isExecutionFence } from './stage-failure.mjs';
 import { atomicJson, hashFile, hashValue, readJson, localPath, setting, throwIfStopped } from './modeling-io.mjs';
 
 export const EXECUTION_POLICY_VERSION = 2;
@@ -13,6 +15,7 @@ export function failureRecord(error, stage, signal) {
     result.timedOut ? `${stage}_TIMEOUT` : result.exitCode != null && result.exitCode !== 0 ? `${stage}_PROCESS_ERROR` : `${stage}_UNKNOWN`);
   return { kind, message: String(error?.message || error).slice(0, 4000), exitCode: result.exitCode ?? null,
     timedOut: Boolean(result.timedOut), canceled: Boolean(signal?.aborted || result.canceled), stopConfirmed: stopped,
+    ...(error?.executionFence ? { executionFence: true } : {}),
     ...(error?.responseEvidence ? { responseEvidence: error.responseEvidence } : {}),
     ...(error?.validationIssues ? { validationIssues: error.validationIssues } : {}) };
 }
@@ -32,10 +35,17 @@ export async function fileEvidence(files) {
   return rows;
 }
 
-export async function verifyEvidence(rows) {
+export async function verifyEvidence(rows, { readHash = hashFile, retryDelayMs = 100 } = {}) {
   for (const row of rows || []) {
     let actual;
-    try { actual = await hashFile(row.file); } catch { /* Missing evidence is an integrity failure, too. */ }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { actual = await readHash(row.file); break; }
+      catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes(error.code)) throw modelingFailure('INTEGRITY_ERROR', `Frozen modeling evidence missing: ${row.file}`, { cause: error });
+        if (attempt === 2) throw modelingFailure('EVIDENCE_UNAVAILABLE', `Cannot read frozen modeling evidence: ${row.file}`, { hardFailure: false, cause: error });
+        await delay(retryDelayMs);
+      }
+    }
     if (actual !== row.sha256) throw modelingFailure('INTEGRITY_ERROR', `Frozen modeling evidence changed: ${row.file}`);
   }
 }
@@ -100,15 +110,15 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
       if (group.terminalError) {
         const failure = group.terminalError;
         if (failure.kind === 'CANCELED' && failure.stopConfirmed === true) {
-          if (stage === 'AUTHOR') throw modelingFailure('AUTHOR_INTERRUPTED', 'Previously canceled author stopped; its attempt remains consumed.',
+          if (['AUTHOR', 'PREVIEW', 'CHECKPOINT'].includes(stage)) throw modelingFailure('AUTHOR_INTERRUPTED', 'Previously canceled author stage stopped; its attempt remains consumed.',
             { hardFailure: false, stopConfirmed: true, executionFile: file });
           if (['REVIEW', 'TECHNICAL', 'SOURCE_PREVIEW'].includes(stage)) {
             group.cancellationResumes ||= [];
             group.cancellationResumes.push({ at: now(), consumedCalls: group.calls.length, deadlineAt: group.deadlineAt });
             delete group.terminalError;
             await save(state);
-          } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
-        } else throw modelingFailure(failure.kind, failure.message, { executionFile: file });
+          } else throw modelingFailure(failure.kind, failure.message, { executionFile: file, hardFailure: isExecutionFence(failure), executionFence: failure.executionFence, stopConfirmed: failure.stopConfirmed });
+        } else throw modelingFailure(failure.kind, failure.message, { executionFile: file, hardFailure: isExecutionFence(failure), executionFence: failure.executionFence, stopConfirmed: failure.stopConfirmed });
       }
       while (group.calls.length < maxCalls && now() < Math.min(group.deadlineAt, taskDeadline)) {
         signal?.throwIfAborted();
@@ -132,7 +142,7 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
           delete group.completed;delete group.result;delete group.resultEvidence;
           call.status = 'FAILED'; call.finishedAt = now(); call.error = failureRecord(error, stage, signal);
           const canRetry = !signal?.aborted && !call.error.canceled && call.error.stopConfirmed !== false &&
-            !['INTEGRITY_ERROR', 'ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO'].includes(error.kind || error.code) && retry(error);
+            !isExecutionFence(error) && !['ENOSPC', 'EROFS', 'EIO'].includes(error.code) && retry(error);
           if (!canRetry) group.terminalError = call.error;
           await save(state);
           throwIfStopped(error, signal);

@@ -44,9 +44,9 @@ test('failure classification distinguishes Help probe, service outage and cleanu
   assert.equal(classifyIterationFailure(failed('cleanup warning', { stderr: 'os error 145' }), 'production-orchestrator').category, 'project-or-unknown');
   for (const commandlet of ['Help', 'LoadPackage']) {
     const error = failed('Validation failed', { stdout: `LogInit: Error: ${commandlet}Commandlet looked like a commandlet, but we could not find the class.` });
-    assert.equal(classifyIterationFailure(error, 'unreal-project-validation').action, commandlet === 'Help' ? 'replace-validator' : 'stop');
+    assert.equal(classifyIterationFailure(error, 'unreal-project-validation').action, commandlet === 'Help' ? 'replace-validator' : 'repair-project');
   }
-  assert.equal(classifyIterationFailure(failed('usage', { exitCode: 2 }), 'production-orchestrator').action, 'stop');
+  assert.equal(classifyIterationFailure(failed('usage', { exitCode: 2 }), 'production-orchestrator').action, 'repair-project');
   assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true }), 'production-orchestrator').action, 'retry');
   assert.equal(classifyIterationFailure(failed('timeout', { timedOut: true, stopConfirmed: false }), 'production-orchestrator').action, 'stop');
 });
@@ -222,7 +222,7 @@ test('monitor cannot authorize worker repairs and cannot swallow uncertain proce
   };
   const review = createIterationMonitor(f);
   await review({ attempt: 1, stage: 'validation', error: failed('harness bug') });
-  assert.equal((await review({ attempt: 2, stage: 'validation', error: failed('harness bug') })).action, 'stop');
+  assert.equal((await review({ attempt: 2, stage: 'validation', error: failed('harness bug') })).action, 'repair-project');
   const controller = new AbortController();
   const canceled = createIterationMonitor({ ...f, signal: controller.signal, step: async () => { controller.abort(); throw new Error('Canceled'); } });
   await canceled({ attempt: 1, stage: 'validation', error: failed('bug') });
@@ -288,28 +288,122 @@ test('known invalid Help validation is replaced once on existing deliverables, r
   assert.equal(steps.filter(name => name.startsWith('production-orchestrator')).length, 1);
 });
 
-test('unavailable LoadPackage stops immediately instead of regenerating the game', async t => {
+test('unavailable LoadPackage records a gap, launches the package and completes its round', async t => {
   const f = await fixture(t);
+  process.env.CODEX_MAX_ATTEMPTS = '1';
   let iterations = 0;
   f.step = async name => {
     if (name.startsWith('production-orchestrator')) { iterations++; await seedDeliverables(f.project); }
     if (name.startsWith('unreal-project-validation')) throw failed('Validation failed', { stdout: 'LoadPackageCommandlet looked like a commandlet, but we could not find the class.' });
     return success();
   };
-  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at execution attempt 1/);
+  const result = await runProductionHarness(f);
+  assert.equal(result.delivery.status, 'DELIVERED_WITH_GAPS');
+  assert.equal(result.delivery.playable, true);
+  assert.equal(result.qualityAccepted, false);
+  assert.ok(result.delivery.issues.some(issue => issue.stage === 'unreal-project-validation'));
   assert.equal(iterations, 1);
 });
 
-test('harness passes failure diagnosis to the next production prompt and stops repeated failures', async t => {
+test('harness scores incomplete rounds and passes their gaps to subsequent iterations', async t => {
   const f = await fixture(t), prompts = [];
+  process.env.CODEX_MAX_ATTEMPTS = '3';
   const originalStep = f.step;
   f.step = async (...args) => {
     if (args[0].startsWith('production-orchestrator')) prompts.push(args[6].input);
     return originalStep(...args);
   };
-  await assert.rejects(runProductionHarness(f), /Iteration monitor stopped at execution attempt 3/);
+  const result = await runProductionHarness(f);
+  assert.equal(result.delivery.status, 'RETAINED_INCOMPLETE');
+  assert.equal(result.delivery.playable, false);
+  assert.equal(result.delivery.score, 0);
   assert.equal(prompts.length, 3);
   assert.match(prompts[1], /Production deliverables missing/);
-  assert.match(prompts[2], /Restore the existing default map reference/);
-  assert.equal(f.calls.filter(call => call.name.startsWith('iteration-diagnosis')).length, 1);
+  assert.match(prompts[2], /Production deliverables missing/);
+  assert.equal(f.calls.filter(call => call.name.startsWith('iteration-diagnosis')).length, 0);
+});
+
+test('agent hard-failure markers are retained and a second completed round can recover', async t => {
+  const f = await fixture(t), deliveries = [], launches = [];
+  process.env.CODEX_MAX_ATTEMPTS = '2';
+  f.step = async (name, command, args, timeout, cwd, accepts, options) => {
+    if (name.startsWith('production-orchestrator')) {
+      await seedDeliverables(f.project);
+      if (name.endsWith('-1')) {
+        await fs.writeFile(path.join(f.project, 'acceptance/hard-failure.json'), JSON.stringify({ reason: 'Internal tool unavailable' }));
+        return { ...success(), stdout: 'HARD_FAILURE: Internal tool unavailable' };
+      }
+      assert.match(options.input, /production-blocker/);
+      await fs.rm(path.join(f.project, 'acceptance/hard-failure.json'));
+    }
+    if (name.startsWith('packaged-game-playtest')) launches.push(name);
+    return success();
+  };
+  const result = await runProductionHarness({ ...f, onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
+  assert.equal(deliveries.length, 2); assert.equal(launches.length, 2);
+  assert.equal(deliveries[0].status, 'DELIVERED_WITH_GAPS');
+  assert.ok(deliveries[0].issues.some(issue => issue.stage === 'production-blocker'));
+  assert.equal(result.delivery.iteration, 2); assert.equal(result.qualityAccepted, true);
+  const saved = JSON.parse(await fs.readFile(path.join(deliveries[0].retainedProject, 'acceptance/hard-failure.json')));
+  assert.equal(saved.reason, 'Internal tool unavailable');
+});
+
+test('orchestrator outage still assesses existing files and next round produces a playable result', async t => {
+  const f = await fixture(t), deliveries = [];
+  process.env.CODEX_MAX_ATTEMPTS = '2';
+  f.step = async (name, command, args, timeout, cwd, accepts, options) => {
+    if (name === 'production-orchestrator-1') {
+      await fs.writeFile(path.join(f.project, 'draft.txt'), 'Retained work');
+      throw failed('HTTP 503 Service Unavailable');
+    }
+    if (name === 'production-orchestrator-2') {
+      assert.match(options.input, /503 Service Unavailable/);
+      assert.equal(await fs.readFile(path.join(f.project, 'draft.txt'), 'utf8'), 'Retained work');
+      await seedDeliverables(f.project);
+    }
+    return success();
+  };
+  const result = await runProductionHarness({ ...f, onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[0].status, 'RETAINED_INCOMPLETE');
+  assert.equal(deliveries[0].score, 0); assert.equal(deliveries[0].playable, false);
+  assert.ok(deliveries[0].issues.some(issue => issue.stage === 'stage-manifest'));
+  assert.equal(result.delivery.iteration, 2); assert.equal(result.delivery.playable, true);
+  assert.equal(await fs.readFile(path.join(deliveries[0].retainedProject, 'draft.txt'), 'utf8'), 'Retained work');
+});
+
+test('publication callback failure cannot discard a finished round', async t => {
+  const f = await fixture(t); process.env.CODEX_MAX_ATTEMPTS = '1';
+  f.step = async name => { if (name.startsWith('production-orchestrator')) await seedDeliverables(f.project); return success(); };
+  const result = await runProductionHarness({ ...f,
+    onIterationPackage: async () => { throw new Error('Publication service offline'); },
+    onIterationReview: async () => { throw new Error('Report service offline'); } });
+  assert.equal(result.delivery.playable, true);
+  assert.ok(result.delivery.issues.some(issue => issue.stage === 'package-publication'));
+  assert.equal(await fs.readFile(result.files.packageFile, 'utf8'), 'game');
+});
+
+test('continuation preserves integrity and uncertain-stop fences before any later stage', async t => {
+  for (const error of [Object.assign(new Error('frozen source changed'), { kind: 'INTEGRITY_ERROR' }),
+    Object.assign(new Error('toolchain changed'), { kind: 'TOOLCHAIN_CHANGED' }),
+    Object.assign(new Error('process alive'), { result: { stopConfirmed: false } })]) {
+    const f = await fixture(t); let calls = 0;
+    f.step = async () => { calls++; throw error; };
+    await assert.rejects(runProductionHarness(f), actual => actual === error);
+    assert.equal(calls, 1);
+  }
+});
+
+test('live delivery keeps iterating past a quality cap until an actual publishable result exists', async t => {
+  const f = await fixture(t), deliveries = [];
+  process.env.CODEX_MAX_ATTEMPTS = '1';
+  f.step = async name => {
+    if (name === 'production-orchestrator-2') await seedDeliverables(f.project);
+    return success();
+  };
+  const result = await runProductionHarness({ ...f, requirePublishableResult: true,
+    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[0].playable, false); assert.equal(deliveries[0].score, 0);
+  assert.equal(result.delivery.iteration, 2); assert.equal(result.delivery.publishable, true);
 });

@@ -20,22 +20,22 @@ export async function createProductionIterations({ job, project, policy }) {
       return { missing: [], files: state.best.files, qualityAccepted: state.best.qualityAccepted,
         delivery: { ...state.best.delivery, ...(reason ? { stoppedReason: reason } : {}) } };
     },
-    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling }) {
+    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling, playable = true }) {
       const iteration = state.iteration;
       const directory = path.join(root, 'deliveries', `iteration-${iteration}`);
       await fs.mkdir(directory, { recursive: true });
       // UE still loads some third-party DLLs through Windows APIs with MAX_PATH limits.
       // Keep executable snapshots close to the original project's path depth.
-      const packageRoot = path.dirname(deliverables.files.packageFile);
+      const packageRoot = deliverables.files.packageFile ? path.dirname(deliverables.files.packageFile) : null;
       const snapshotRoot = path.join(path.dirname(project), 'rounds', identity.slice(0, 20), String(iteration));
       const sourceFiles = [];
       const included = source => {
         const relative = path.relative(project, source);
-        if (source === packageRoot || source.startsWith(packageRoot + path.sep)) {
+        if (packageRoot && (source === packageRoot || source.startsWith(packageRoot + path.sep))) {
           const parts = path.relative(packageRoot, source).split(path.sep);
           return parts[0] !== 'Saved' && parts[1] !== 'Saved'; // Runtime writes, not package dependencies.
         }
-        if (relative.split(path.sep)[0] === 'Saved') return packageRoot.startsWith(source + path.sep);
+        if (relative.split(path.sep)[0] === 'Saved') return Boolean(packageRoot?.startsWith(source + path.sep));
         return !relative.split(path.sep).some(part => ['Intermediate', 'DerivedDataCache', '.git', '.codex', '__pycache__'].includes(part));
       };
       async function collect(current) {
@@ -56,14 +56,19 @@ export async function createProductionIterations({ job, project, policy }) {
         files[role] = path.join(snapshotRoot, relative);
       }
       const record = { protocol: 1, kind: 'iteration-delivery', taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId,
-        iteration, status: qualityAccepted ? 'ACCEPTED' : 'DELIVERED_WITH_GAPS', score, threshold,
+        iteration, status: !playable ? 'RETAINED_INCOMPLETE' : qualityAccepted ? 'ACCEPTED' : 'DELIVERED_WITH_GAPS', score, threshold, playable,
+        publishable: playable && ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].every(role => files[role]),
         qualityAccepted, issues, quality, modeling, sourceWorkspace: project, retainedProject: snapshotRoot, createdAt: new Date().toISOString() };
       const reportFile = path.join(directory, 'iteration-result.json');
       await atomicJson(reportFile, record); files.iterationResult = reportFile;
       const evidence = await fileEvidence([...Object.values(files), ...sourceFiles.map(source => path.join(snapshotRoot, path.relative(project, source)))]);
       const retained = { files, evidence, qualityAccepted, delivery: record };
       state.rounds.push({ iteration, score, qualityAccepted, reportFile, files, evidence });
-      if (!state.best || score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted) state.best = retained;
+      const priorPlayable = state.best?.delivery.playable !== false;
+      const priorPublishable = state.best?.delivery.publishable === true;
+      if (!state.best || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
+        (playable && !priorPlayable || playable === priorPlayable &&
+        (score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted))) state.best = retained;
       state.iteration++;
       await atomicJson(file, state);
       return { record, file: reportFile, retained: { ...deliverables, files, qualityAccepted, delivery: record } };

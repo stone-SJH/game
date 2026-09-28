@@ -54,7 +54,7 @@ for (const reference of context.references || []) {
 const abort = new AbortController(), started = Date.now(), id = crypto.randomUUID();
 process.on('SIGINT', () => abort.abort(new Error('Probe interrupted')));
 process.env.MODELING_HARNESS_V2_ENABLED = '1';
-const stop = new Error('Engineering complete; probe stops before authoring.');
+const stop = Object.assign(new Error('Engineering complete; probe stops before authoring.'), { executionFence: true });
 const calls = [];
 const iterationDeliveries = [];
 let injectedEvidence;

@@ -47,3 +47,20 @@ test('score describes retained evidence coverage without relabeling gaps as acce
   assert.equal(iterationScore({ quality: { criteria }, modeling: { assets: [{ quality: { score: 25 } }, { quality: { score: 75 } }] } }), 50);
   assert.equal(criteria[1].status, 'GAP');
 });
+
+test('best result prefers a publishable package over higher-scoring incomplete evidence', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'production-best-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project'); await fs.mkdir(project);
+  const files = Object.fromEntries(['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].map(role => [role, path.join(project, role)]));
+  for (const file of Object.values(files)) await fs.writeFile(file, 'retained content');
+  const ledger = await createProductionIterations({ job: { taskId: 'task', workspaceId: 'w', objective: 'game' }, project, policy: { maxIterations: 10 } });
+  const complete = (deliveryFiles, score, playable) => ledger.complete({ deliverables: { files: deliveryFiles },
+    score, threshold: 85, qualityAccepted: false, issues: [], playable });
+  await complete({ projectFile: files.projectFile }, 95, true);
+  await complete(files, 55, true);
+  await complete(files, 0, false);
+  const best = await ledger.best();
+  assert.equal(best.delivery.iteration, 2); assert.equal(best.delivery.score, 55);
+  assert.equal(best.delivery.publishable, true); assert.equal(best.delivery.playable, true);
+});

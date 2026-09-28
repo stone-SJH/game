@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createExecutionStore, fileEvidence, modelingFailure } from '../agent/modeling-execution.mjs';
+import { createExecutionStore, fileEvidence, modelingFailure, verifyEvidence } from '../agent/modeling-execution.mjs';
 import { atomicJson, hashValue } from '../agent/modeling-io.mjs';
 
 async function fixture(t) {
@@ -12,6 +12,40 @@ async function fixture(t) {
   return root;
 }
 const options = { key: 'visual/asset-1', stage: 'REVIEW', timeoutMs: 100, maxCalls: 3, retry: () => true };
+
+test('confirmed canceled preview and checkpoint consume their attempt without becoming global failure', async t => {
+  for (const stage of ['PREVIEW', 'CHECKPOINT']) {
+    const root = await fixture(t);
+    const settings = { key: stage, stage, timeoutMs: 1000 };
+    const canceled = Object.assign(new Error('canceled and stopped'), { result: { canceled: true, stopConfirmed: true } });
+    await assert.rejects(createExecutionStore(root).run(settings, () => { throw canceled; }));
+    let replayed = false;
+    await assert.rejects(createExecutionStore(root).run(settings, () => { replayed = true; }),
+      error => error.kind === 'AUTHOR_INTERRUPTED' && error.hardFailure === false && error.stopConfirmed === true);
+    assert.equal(replayed, false);
+  }
+});
+
+test('temporary evidence read errors retry without weakening missing or modified evidence fences', async () => {
+  let calls = 0;
+  const rows = [{ file: 'fixture', sha256: 'expected' }];
+  await verifyEvidence(rows, { retryDelayMs: 0, readHash: async () => {
+    if (++calls < 3) throw Object.assign(new Error('locked'), { code: 'EBUSY' }); return 'expected';
+  } });
+  assert.equal(calls, 3);
+  await assert.rejects(verifyEvidence(rows, { retryDelayMs: 0, readHash: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } }),
+    error => error.kind === 'EVIDENCE_UNAVAILABLE' && !error.hardFailure);
+  await assert.rejects(verifyEvidence(rows, { readHash: async () => 'changed' }), error => error.kind === 'INTEGRITY_ERROR');
+  await assert.rejects(verifyEvidence(rows, { readHash: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } }), error => error.kind === 'INTEGRITY_ERROR');
+});
+
+test('explicit execution fences retain their authority after process resumption', async t => {
+  const root = await fixture(t); let calls = 0;
+  const invoke = () => { calls++; throw Object.assign(new Error('unsafe workspace link'), { executionFence: true }); };
+  await assert.rejects(createExecutionStore(root).run(options, invoke), error => error.executionFence === true);
+  await assert.rejects(createExecutionStore(root).run(options, invoke), error => error.executionFence === true);
+  assert.equal(calls, 1);
+});
 
 test('reserved call after crash fences recovery, without reusing its id or budget', async t => {
   const root = await fixture(t); let invoked = 0;
