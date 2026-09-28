@@ -8,6 +8,7 @@ import { createTripoProvider } from './providers/tripo.mjs';
 import { preservesContract, modelViews, referenceFiles } from './modeling-contract.mjs';
 import { createSkillPlan, validateSkillPlan, pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
 import { createExecutionStore, executionPolicy, failureRecord, modelingFailure, fileEvidence, verifyEvidence } from './modeling-execution.mjs';
+import { preserveBlockoutEvidence, verifyBlockoutEvidence } from './modeling-blockout-evidence.mjs';
 import { createModelingReviewer } from './modeling-review.mjs';
 import { RUBRIC_VERSION, visualRubric, visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
 import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
@@ -19,7 +20,7 @@ import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './mod
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
-  provider = createTripoProvider(), probe = discoverModelingCapabilities, build, check, checkBase, evaluate,
+  provider = createTripoProvider(), probe = discoverModelingCapabilities, build, check, checkBase, evaluate, blenderMcp = callBlenderMcp,
 }) {
   const stateRoot = path.join(path.dirname(project), 'modeling-state');
   const planFile = path.join(output, 'modeling-plan.json');
@@ -292,7 +293,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         for (const name of ['recipe.py', 'source.blend', 'asset-manifest.json']) blockoutFiles.push(await localPath(project, `${blockoutDirectory}/${name}`, { existing: true }));
         const blockoutEvidence = await fileEvidence(blockoutFiles);
         const result = await execution.run({ key: `preview:${context.attemptId}`, stage: 'PREVIEW', input: { views: modelViews(context.spec) },
-          evidence: blockoutEvidence, timeoutMs: 300000 }, ({ timeoutMs }) => callBlenderMcp({ project, tool: 'blender_render_views', signal: bounded, timeoutMs: Math.min(timeoutMs, remaining()),
+          evidence: blockoutEvidence, timeoutMs: 300000 }, ({ timeoutMs }) => blenderMcp({ project, tool: 'blender_render_views', signal: bounded, timeoutMs: Math.min(timeoutMs, remaining()),
           receiptFile: `${context.receiptFile}.preview.json`, input: { source: `${blockoutDirectory}/source.blend`, manifest: `${blockoutDirectory}/asset-manifest.json`, views: modelViews(context.spec) } }));
         const preview = JSON.parse(result.content[0].text);
         if (preview.sourceHash !== await hashFile(await localPath(project, `${blockoutDirectory}/source.blend`))) throw new Error('Blockout preview source changed.');
@@ -300,7 +301,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         await imagesFor(images);
         await atomicJson(await localPath(project, `${blockoutDirectory}/preview-report.json`), preview);
         const checkpointResult = await execution.run({ key: `checkpoint:${context.attemptId}`, stage: 'CHECKPOINT', evidence: blockoutEvidence, timeoutMs: 60000 },
-          ({ timeoutMs }) => callBlenderMcp({ project, tool: 'blender_checkpoint', signal: bounded, timeoutMs: Math.min(timeoutMs, remaining()),
+          ({ timeoutMs }) => blenderMcp({ project, tool: 'blender_checkpoint', signal: bounded, timeoutMs: Math.min(timeoutMs, remaining()),
           input: { source: `${blockoutDirectory}/source.blend`, expectedHash: preview.sourceHash, stage: 'blockout' } }));
         const checkpoint = JSON.parse(checkpointResult.content[0].text);
         await atomicJson(await localPath(project, `${blockoutDirectory}/checkpoint.json`), checkpoint);
@@ -309,13 +310,15 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         const files = [];
         for (const relative of stageArtifacts) files.push(await localPath(project, relative, { existing: true }));
         blockout = { images, checkpoint, stageArtifacts, evidence: await fileEvidence(files) };
+        blockout.snapshot = await preserveBlockoutEvidence({ project, stateRoot: taskState, attemptId: context.attemptId, evidence: blockout.evidence });
         await context.saveBlockout?.(blockout);
         }
-        await verifyEvidence(blockout.evidence);
+        await verifyBlockoutEvidence({ project, stateRoot: taskState, ...blockout });
         context.stageArtifacts = [...blockout.stageArtifacts];
         await reportProgress({ phase: 'crafting', tool: 'Blender MCP', step: `${context.spec.assetId}: inspect blockout views and finish` });
         const finalExecution = await author({ ...context, phase: 'final', sourceFile: blockout.checkpoint.file, stageImages: blockout.images });
-        await verifyEvidence(blockout.evidence);
+        const restored = await verifyBlockoutEvidence({ project, stateRoot: taskState, ...blockout });
+        if (restored.length) await reportProgress({ phase: 'crafting', tool: 'Modeling evidence', step: `${context.spec.assetId}: restored ${restored.length} frozen blockout files from verified host backups` });
         context.stageArtifacts.push(...(finalExecution || []));
       } finally { clearTimeout(timer); }
       return;
@@ -342,6 +345,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         `Mandatory additional LOD meshes in source.blend and asset-manifest.json: ${spec.contract.runtime.lodTriangles.map((n,i)=>`LOD${i+1}, role=lod, lod=${i+1}, maximum ${n} triangles`).join('; ')}. A low LOD0 triangle count does not waive these levels. Keep LOD meshes out of the LOD0 GLB export.`,
       ] : []),
       `Exact output directory (relative): ${directory}. Save files directly in this directory, without adding a stage-named subdirectory. ${context.phase === 'blockout' ? 'Save the primary volumes, proportions and required parts in source.blend, plus recipe.py and asset-manifest.json. Defer finishing, export and final QA to the next stage; the host now renders your blockout.' : `Required paths include ${directory}/source.blend with packed textures and ${directory}/model.glb (GLB 2.0).`}`,
+      ...(context.phase === 'final' ? [`The existing ${directory}/blockout directory, host previews, checkpoint files and recorded scripts are frozen evidence. Preserve them byte for byte; do not delete, move, overwrite or clean them. Write final outputs alongside the blockout, and save changes to ${directory}/source.blend without overwriting the supplied checkpoint.`] : []),
       sourceFile ? `Import/open the supplied source copy: ${sourceFile}. ${context.phase === 'final' ? `Continue the checkpoint and complete every original contract requirement, including declared LODs, collision, sockets and actions. Save the result directly to ${directory}/source.blend.` : 'Preserve source identity and implement the edit plan.'}` : 'Build the model directly in Blender using bpy. Keep all created files in the assigned output directory.',
       cleanup ? 'This is a limited cleanup attempt: transforms, local mesh fixes, materials, collision/LOD. If it needs silhouette reconstruction, global retopology or a new rig, write build-report.json with smallEditsOnly=false; do not perform a full rebuild of this generated source.' :
         context.phase === 'blockout' ? 'This call establishes rough proportions and essential parts. Save its three stage artifacts and return; the final stage completes materials, runtime preparation, exports and quality checks.' : 'Meet every original requirement. Do not substitute a default cube or silently reduce fidelity.',

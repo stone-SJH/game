@@ -20,6 +20,9 @@ brief calls for continuous anatomy. Report a quality gap when the required struc
 The host requests a `blockout` or `final` stage. Blockout must save `source.blend`, `recipe.py`
 and `asset-manifest.json`; final must also export `model.glb`, the required FBX if specified,
 and `build-report.json`. The host renders and passes the blockout views to the next stage.
+The previous `blockout/` directory, its recipes/manifests, host previews, executed scripts
+and checkpoints are frozen evidence. Preserve their bytes and paths during final cleanup.
+Save final outputs alongside `blockout/`; never overwrite the supplied checkpoint.
 For a necessary bounded self-review call `blender_render_views`; inspect its image content, not just its path.
 Use `blender_checkpoint` before a substantial revision. Never repair an accepted source in place.
 
