@@ -137,12 +137,12 @@ test('internal LOD correction flows through engineering once and never changes a
         requirements: [{ id: 'requirement-1', owner: 'modeling', implementation: 'Create the ice pillar.', verification: 'Inspect the authored asset.' }],
         references: [], sources: [], unresolvedFacts: [] };
     } };
-  await assert.rejects(createModelingPipeline(options).prepare(), error => error === stop);
+  assert.equal((await createModelingPipeline(options).prepare()).status, 'ASSETS_PROVISIONAL');
   const plan = await readJson(path.join(f.project, 'plan/modeling-specs.json'));
   validateSpecs(plan);
   const engineering = await readJson(path.join(f.project, 'plan/engineering-plan.json'));
   assert.equal(engineering.draftHash, hashValue(normalizeModelingDraft(raw).value));
-  await assert.rejects(createModelingPipeline({ ...options, job: { ...options.job, runId: 'resumed' } }).prepare(), error => error === stop);
+  assert.equal((await createModelingPipeline({ ...options, job: { ...options.job, runId: 'resumed' } }).prepare()).status, 'ASSETS_PROVISIONAL');
   assert.deepEqual(calls, ['modeling-plan', 'modeling-engineering']);
   const explicitProject = path.join(f.root, 'explicit'); await fs.mkdir(explicitProject);
   const explicitOutput = path.join(f.root, 'explicit-run'); await fs.mkdir(explicitOutput);

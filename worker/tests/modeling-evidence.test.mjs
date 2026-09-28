@@ -27,7 +27,7 @@ function researchOptions(f, review) {
   return { project: f.project, assets: [spec], job: { objective: '复刻神庙' }, engineering: null, review, reportProgress: async () => {} };
 }
 async function referenceResponse(f, prompt, bytes = pixel) {
-  const relative = prompt.match(/plan\/modeling-references\/[a-f0-9]+\/images\//)[0] + 'shrine.png';
+  const relative = prompt.match(/plan\/modeling-references\/[a-f0-9]+\/iteration-\d+\/images\//)[0] + 'shrine.png';
   const file = path.join(f.project, relative);
   await fs.writeFile(file, bytes);
   return { references: [{ assetId: 'shrine', file: relative, sha256: await hashFile(file),
@@ -94,4 +94,28 @@ test('author supplements and limitations reach review but cannot replace indepen
   const malformed = await authorEvidence(f.project, 'asset');
   assert.match(malformed.reports['self-check.json'].unavailable, /internal repair/);
   assert.equal(malformed.files.length, 3);
+});
+
+test('research service exhaustion is provisional and retries only in a subsequent round', async t => {
+  const f = await fixture(t); let calls = 0;
+  const reviewer = createModelingReviewer({ ...f, evaluate: async () => { calls++; throw new Error('upstream 503'); } });
+  const options = researchOptions(f, (name, schema, prompt, images, options) => reviewer({ name, schema, prompt, images, ...options }));
+  for (let n = 0; n < 2; n++) {
+    const result = await prepareModelingReferences(options);
+    assert.equal(result.record.issue.kind, 'VALIDATION_INFRASTRUCTURE_EXHAUSTED');
+    assert.equal(result.record.blocked[0].assetId, 'shrine');
+  }
+  assert.equal(calls, 2);
+  await prepareModelingReferences({ ...options, iteration: 2 });
+  assert.equal(calls, 4);
+});
+
+test('oversized optional image does not invalidate other author evidence', async t => {
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.project, 'asset/evidence'), { recursive: true });
+  await fs.writeFile(path.join(f.project, 'asset/evidence/large.png'), Buffer.alloc(10 * 1024 * 1024 + 1));
+  await fs.writeFile(path.join(f.project, 'asset/evidence/valid.png'), pixel);
+  const result = await authorEvidence(f.project, 'asset');
+  assert.deepEqual(result.images, ['asset/evidence/valid.png']);
+  assert.equal(result.reports.invalidImages.length, 1);
 });

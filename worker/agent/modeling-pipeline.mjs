@@ -14,6 +14,7 @@ import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
 import { authorEvidence, engineeringEvidence } from './modeling-evidence.mjs';
 import { prepareModelingReferences } from './modeling-research.mjs';
 import { assetQuality } from './iteration-quality.mjs';
+import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
 import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
@@ -37,6 +38,13 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   const v2Enabled = process.env.MODELING_HARNESS_V2_ENABLED === '1';
   const skillPlans = new Map();
   let providerPreflight;
+  let pipelineIssues = [];
+
+  function unavailableAsset(spec, issue) {
+    return { assetId: spec.assetId, status: 'NO_USABLE_ARTIFACT', usable: false, files: [], spec, contract: spec.contract,
+      quality: { score: 0, accepted: false, gaps: [issue], repairInstructions: 'Retain this stage failure; finish the round using a documented temporary engine-native representation. Retry this stage in the next completed iteration.' },
+      executionFile: execution.file };
+  }
 
   async function report(record, file) {
     await atomicJson(file, record);
@@ -60,26 +68,91 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
 
   async function plan() {
     const requestFile = await localPath(project, 'plan/modeling-request.json');
-    const request = await readJson(requestFile);
     let current = await readJson(taskPlanFile) || await readJson(planFile);
     if (!current) {
       planningGap = await loadPlanningGap(project, taskState, productionIteration);
       if (planningGap) return null;
     }
-    if (request) {
-      validateSpecs(request);
-      if (!current || current.revisions >= 4) throw Object.assign(new Error('Modeling revision budget exhausted or no base plan exists.'), { hardFailure: true });
-      for (const original of current.assets) {
-        const revised = request.assets.find(asset => asset.assetId === original.assetId);
-        if (!revised || original.requirements.some(criterion => !revised.requirements.includes(criterion)) ||
-            revised.maxTriangles > original.maxTriangles || (original.requireRig && !revised.requireRig) ||
-            (original.requireClosedMesh && !revised.requireClosedMesh) || !preservesContract(original, revised) || original.referenceImages.some(image => !revised.referenceImages.includes(image))) {
-          throw new Error('Modeling revisions cannot remove assets or weaken original acceptance requirements.');
-        }
+    const revisionFile = path.join(taskState, `revision-outcome-${productionIteration}.json`);
+    const priorRevision = await readJson(revisionFile);
+    const pendingRevision = await readJson(path.join(taskState, 'revision-pending.json'));
+    const deferred = pendingRevision && pendingRevision.iteration < productionIteration ? pendingRevision : null;
+    let fileRequestRaw = null;
+    try { fileRequestRaw = await fs.readFile(requestFile, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const requestRaw = deferred ? deferred.rawRequest ?? await fs.readFile(await localPath(project, deferred.path, { existing: true }), 'utf8') : fileRequestRaw;
+    async function settleRevision(outcome) {
+      const pendingFile = path.join(taskState, 'revision-pending.json');
+      const pending = await readJson(pendingFile);
+      const settledFile = path.join(taskState, `revision-settled-${productionIteration}.json`);
+      if (!await readJson(settledFile) && pending?.settledAtIteration !== productionIteration) {
+        const queue = pending?.queue || [];
+        if (outcome.issue) await atomicJson(pendingFile, { iteration: productionIteration, rawRequest: outcome.rawRequest,
+          issue: outcome.issue, queue, settledAtIteration: productionIteration });
+        else if (queue.length) await atomicJson(pendingFile, { ...queue[0], iteration: productionIteration,
+          queue: queue.slice(1), settledAtIteration: productionIteration });
+        else await fs.rm(pendingFile, { force: true });
       }
-      current = { ...request, revisions: current.revisions + 1 };
-      await atomicJson(planFile, current);
-      await fs.rename(requestFile, await localPath(project, `plan/modeling-request-consumed-${hashValue(request).slice(0, 16)}-${sequence++}.json`));
+      await atomicJson(settledFile, { iteration: productionIteration });
+      if (fileRequestRaw === outcome.rawRequest) {
+        try { await fs.rename(requestFile, await localPath(project, `plan/modeling-request-consumed-${productionIteration}-${sequence++}.json`)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+    }
+    if (priorRevision?.issue) pipelineIssues.push(priorRevision.issue);
+    if (requestRaw !== null && !priorRevision) {
+      let requested;
+      try { requested = JSON.parse(requestRaw); } catch { /* Raw malformed input is retained for repair. */ }
+      const validateRevision = request => {
+        validateSpecs(request);
+        if (!current) throw new Error('Internal revision has no approved base plan.');
+        for (const original of current.assets) {
+          const revised = request.assets.find(asset => asset.assetId === original.assetId);
+          if (!revised || original.requirements.some(criterion => !revised.requirements.includes(criterion)) ||
+              revised.maxTriangles > original.maxTriangles || (original.requireRig && !revised.requireRig) ||
+              (original.requireClosedMesh && !revised.requireClosedMesh) || !preservesContract(original, revised) || original.referenceImages.some(image => !revised.referenceImages.includes(image))) {
+            throw new Error('Modeling revisions cannot remove assets or weaken original acceptance requirements.');
+          }
+        }
+        for (const submitted of Array.isArray(requested?.assets) ? requested.assets : []) {
+          if (!submitted?.assetId) continue;
+          const repaired = request.assets.find(asset => asset.assetId === submitted.assetId);
+          if (!repaired || (Array.isArray(submitted.requirements) ? submitted.requirements : []).some(requirement => typeof requirement === 'string' && !repaired.requirements.includes(requirement))) {
+            throw new Error('Internal revision repair cannot discard requested assets or requirements.');
+          }
+          if (Number.isFinite(submitted.maxTriangles) && submitted.maxTriangles > 0 && repaired.maxTriangles > submitted.maxTriangles ||
+              submitted.requireRig === true && !repaired.requireRig || submitted.requireClosedMesh === true && !repaired.requireClosedMesh ||
+              (Array.isArray(submitted.referenceImages) ? submitted.referenceImages : []).some(image => !repaired.referenceImages.includes(image))) {
+            throw new Error('Internal revision repair cannot weaken supplied technical limits or references.');
+          }
+          if (submitted.contract) validateModelingDraftRepair({ reason: 'Revision asset', assets: [submitted] }, { reason: 'Revision asset', assets: [repaired] });
+        }
+      };
+      let request, issue;
+      try {
+        try { request = JSON.parse(requestRaw); validateRevision(request); }
+        catch (error) {
+          throwIfExecutionFenced(error, signal);
+          request = await reviewer('modeling-revision', current?.assets.some(asset => asset.contract) ? modelingPlanV2Schema : modelingPlanSchema,
+            `Repair this internal revision request. Preserve all original assets and obligations. Do not invent missing measurements or remove requested additions. If it cannot be resolved, keep the unresolved constraints. Original plan: ${JSON.stringify(current)}\nRaw request: ${requestRaw}\nFindings: ${error.message}`, [],
+            { key: `modeling-revision:iteration-${productionIteration}`, maxCalls: 2, timeoutMs: policy.intakeMs, validate: validateRevision });
+        }
+        current = { ...request, revisions: (current.revisions || 0) + 1 };
+      } catch (error) {
+        throwIfExecutionFenced(error, signal);
+        issue = stageIssue('modeling-revision', error); pipelineIssues.push(issue);
+      }
+      // Commit the outcome before changing the base plan. Resume applies this result
+      // without constructing a different prompt under the original durable review key.
+      await report({ iteration: productionIteration, rawRequest: requestRaw, issue, status: issue ? 'GAP' : 'APPLIED', appliedPlan: current }, revisionFile);
+      if (current) {
+        await atomicJson(planFile, current);
+        await atomicJson(taskPlanFile, current);
+      }
+      await settleRevision({ rawRequest: requestRaw, issue });
+    }
+    if (priorRevision) {
+      if (priorRevision.appliedPlan) current = priorRevision.appliedPlan;
+      await settleRevision(priorRevision);
     }
     if (!current) {
       const explicit = job.modelingSpecs || job.payload?.modelingSpecs;
@@ -438,13 +511,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     let state = await readJson(stateFile);
     if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
     if (state?.accepted && state.requirementsHash === requirementsHash) {
-      try {
-        let valid = true;
-        for (const artifact of state.accepted.files) if (await hashFile(await localPath(project, artifact.path, { existing: true })) !== artifact.sha256) valid = false;
-        if (valid) return { ...state.accepted, reused: true };
-      } catch (error) { if (error.stopConfirmed === false) throw error; }
-      state.accepted = null;
-      await atomicJson(stateFile, state);
+      const evidence = [];
+      for (const artifact of state.accepted.files) evidence.push({ file: await localPath(project, artifact.path), sha256: artifact.sha256 });
+      await verifyEvidence(evidence);
+      return { ...state.accepted, reused: true };
     }
     const candidates = await candidatesFor(spec);
     if (!state) {
@@ -457,6 +527,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     state.rounds ||= {};
     state.rounds[productionIteration] ||= { attempts: {}, startedAt: new Date().toISOString() };
     const round = state.rounds[productionIteration];
+    if (round.stageGap) {
+      await verifyEvidence(round.stageGap.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
+      return round.stageGap;
+    }
     if (round.delivered && state.bestCandidate) {
       await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       return { ...state.bestCandidate, reused: true };
@@ -663,9 +737,23 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         const stage = ['AUTHORING', 'FINAL_PENDING'].includes(state.pending?.phase) ? 'AUTHOR' : 'VALIDATION';
         state.failures.push({ attemptId, route, phase: state.pending?.phase, at: new Date().toISOString(), ...failureRecord(error, stage, signal) });
         await atomicJson(stateFile, state);
-        throwIfStopped(error, signal);
-        if (error.hardFailure || stage === 'VALIDATION') throw Object.assign(error, { hardFailure: true });
-        if (['ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO'].includes(error.code)) throw error;
+        throwIfExecutionFenced(error, signal);
+        if (stage === 'VALIDATION') {
+          const issue = stageIssue(`modeling-validation:${spec.assetId}`, error);
+          let retained = state.bestCandidate;
+          if (retained) {
+            try { await verifyEvidence(retained.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 }))); }
+            catch (verificationError) { throwIfExecutionFenced(verificationError, signal); retained = null; }
+          }
+          round.stageGap = retained ? { ...retained, status: 'DCC_PROVISIONAL',
+            quality: { ...retained.quality, accepted: false, gaps: [...(retained.quality.gaps || []), issue] } } : unavailableAsset(spec, issue);
+          state.pending = null;
+          state.previousAttemptDirectory = directory;
+          state.feedback = issue;
+          await atomicJson(stateFile, state);
+          await report(round.stageGap, await localPath(project, `plan/modeling/${spec.assetId}/${short}/iteration-${productionIteration}-gap.json`));
+          return round.stageGap;
+        }
         state.pending = null; state.lastQualityGap = null;
         state.feedback = String(error.message).slice(0, 2000);
         state.previousAttemptDirectory = directory;
@@ -680,6 +768,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     async prepare({ iteration = 1 } = {}) {
       if (!Number.isSafeInteger(iteration) || iteration < 1) throw new Error('Invalid production iteration.');
       productionIteration = iteration;
+      pipelineIssues = [];
       await execution.assertSettled();
       await pinToolchain(path.join(taskState, 'execution-policy'), 'runtime', {
         policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(),
@@ -699,30 +788,78 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       planningGap = null;
       engineeringContext = await readJson(engineeringFile);
       const prepared = await prepareModelingReferences({ assets: current.assets, project, job, engineering: engineeringContext,
-        review: reviewer, reportProgress });
+        review: reviewer, reportProgress, signal, iteration });
       referenceResearch = prepared.record;
+      if (referenceResearch?.blocked?.length) pipelineIssues.push(referenceResearch.issue || { stage: 'modeling-reference-research', status: 'GAP', reason: JSON.stringify(referenceResearch.blocked) });
       accepted = [];
       if (current.assets.length) {
-        capabilities ||= await probe({ project, output, signal });
-        if (!capabilities.blenderMcpAvailable) throw Object.assign(new Error('Blender MCP probe failed; modeling cannot start.'), { hardFailure: true });
-        let availability = await provider.availability();
-        if (current.assets.some(s => s.contract) && availability.enabled) {
-          providerPreflight ||= await provider.balance({ signal });
-          availability = { ...availability, enabled: providerPreflight.status === 'ready', reasonCode: providerPreflight.reasonCode || null };
-          await report({ protocol: 2, region: 'cn', ...providerPreflight }, path.join(output, 'modeling-provider-preflight.json'));
+        const probeRecord = await readJson(path.join(taskState, `capabilities-${iteration}.json`));
+        if (probeRecord) capabilities = probeRecord;
+        else {
+          try {
+            capabilities = await execution.run({ key: `capabilities:iteration-${iteration}`, stage: 'CAPABILITIES',
+              maxCalls: 2, timeoutMs: 120000, retry: () => true }, async ({ callId, timeoutMs }) => {
+              const snapshot = await probe({ project, output, signal, timeoutMs });
+              await report(snapshot, path.join(output, `modeling-capabilities-${iteration}-${callId}.json`));
+              if (!snapshot.blenderMcpAvailable) throw new Error('Blender MCP capability discovery unavailable.');
+              return snapshot;
+            });
+          } catch (error) {
+            throwIfExecutionFenced(error, signal);
+            capabilities = { blenderMcpAvailable: false, issue: stageIssue('modeling-capabilities', error) };
+          }
+          await atomicJson(path.join(taskState, `capabilities-${iteration}.json`), capabilities);
         }
-        const ledger = await readJson(path.join(output, 'tripo-ledger.json'));
-        if (ledger?.disabled) providerDisabledReason = ledger.reasonCode;
-        for (const spec of prepared.assets) accepted.push(await produce(spec, availability));
+        if (!capabilities.blenderMcpAvailable) {
+          const issue = capabilities.issue || stageIssue('modeling-capabilities', new Error('Blender MCP probe unavailable after local retries.'));
+          pipelineIssues.push(issue);
+          accepted = prepared.assets.map(spec => unavailableAsset(spec, issue));
+        } else {
+          let availability = await provider.availability();
+          if (current.assets.some(s => s.contract) && availability.enabled) {
+            providerPreflight ||= await provider.balance({ signal });
+            availability = { ...availability, enabled: providerPreflight.status === 'ready', reasonCode: providerPreflight.reasonCode || null };
+            await report({ protocol: 2, region: 'cn', ...providerPreflight }, path.join(output, 'modeling-provider-preflight.json'));
+          }
+          const ledger = await readJson(path.join(output, 'tripo-ledger.json'));
+          if (ledger?.disabled) providerDisabledReason = ledger.reasonCode;
+          for (const spec of prepared.assets) {
+            const gapFile = path.join(taskState, `asset-gap-${iteration}-${hashValue(spec)}.json`);
+            const priorGap = await readJson(gapFile);
+            if (priorGap) { accepted.push(priorGap); continue; }
+            try { accepted.push(await produce(spec, availability)); }
+            catch (error) {
+              throwIfExecutionFenced(error, signal);
+              const gap = unavailableAsset(spec, stageIssue(`modeling-asset:${spec.assetId}`, error));
+              await report(gap, gapFile); accepted.push(gap);
+            }
+          }
+        }
       }
       const summary = { protocol: 1, taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId, iteration,
-        status: accepted.some(asset => asset.status !== 'DCC_READY') ? 'ASSETS_PROVISIONAL' : current.assets.length ? 'ASSETS_VALIDATED' : 'NOT_APPLICABLE',
-        reason: current.reason, assets: accepted, referenceResearch };
+        status: pipelineIssues.length || accepted.some(asset => asset.status !== 'DCC_READY') ? 'ASSETS_PROVISIONAL' : current.assets.length ? 'ASSETS_VALIDATED' : 'NOT_APPLICABLE',
+        reason: current.reason, assets: accepted, referenceResearch, issues: pipelineIssues };
       const summaryFile = await localPath(project, 'plan/modeling-results.json');
       await report(summary, summaryFile);
       return summary;
     },
-    async hasRequest() { return Boolean(await readJson(await localPath(project, 'plan/modeling-request.json'))); },
+    async deferRequest() {
+      const requestFile = await localPath(project, 'plan/modeling-request.json');
+      let raw;
+      try { raw = await fs.readFile(requestFile, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+      const relative = `plan/modeling-request-deferred-${productionIteration}-${hashValue(raw).slice(0, 16)}.json`;
+      const pendingFile = path.join(taskState, 'revision-pending.json');
+      const pending = await readJson(pendingFile);
+      const deferred = { iteration: productionIteration, path: relative, rawRequest: raw };
+      if (pending) {
+        pending.queue ||= [];
+        if (pending.rawRequest !== raw && pending.path !== relative && !pending.queue.some(item => item.path === relative)) pending.queue.push(deferred);
+        await atomicJson(pendingFile, pending);
+      } else await atomicJson(pendingFile, deferred);
+      await fs.rename(requestFile, await localPath(project, relative));
+      return { stage: 'modeling-revision', status: 'GAP', reason: 'Internal revision retained for the next complete production iteration.', evidenceFile: relative };
+    },
+    async hasRequest() { try { await fs.stat(await localPath(project, 'plan/modeling-request.json')); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } },
     async engineeringPlan() { return expectedEngineeringHash ? readJson(engineeringFile) : null; },
     async verify() {
       const retainedDraft = await readJson(draftFile);
@@ -733,9 +870,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         throw modelingFailure('INTEGRITY_ERROR', 'Frozen engineering plan changed.');
       }
       for (const skillPlan of skillPlans.values()) await validateSkillPlan(project, skillPlan);
-      if (hashValue(await readJson(await localPath(project, 'plan/modeling-specs.json'))) !== expectedPlanHash) throw new Error('Modeling specifications changed outside a revision request.');
+      if (expectedPlanHash && hashValue(await readJson(await localPath(project, 'plan/modeling-specs.json'))) !== expectedPlanHash) throw modelingFailure('INTEGRITY_ERROR', 'Modeling specifications changed outside a revision request.');
       for (const asset of accepted) for (const file of asset.files) {
-        if (await hashFile(await localPath(project, file.path, { existing: true })) !== file.sha256) throw new Error(`Accepted modeling artifact changed: ${asset.assetId}. Submit a modeling revision request.`);
+        await verifyEvidence([{ file: await localPath(project, file.path), sha256: file.sha256 }]);
       }
     },
   };

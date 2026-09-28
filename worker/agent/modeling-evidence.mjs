@@ -30,7 +30,10 @@ export async function authorEvidence(project, directory) {
   for (const entry of selected.slice(0, 12)) {
     const relative = `${directory}/evidence/${entry.name}`;
     const file = await localPath(project, relative, { existing: true });
-    if (!entry.isFile() || (await fs.stat(file)).size > 10 * 1024 * 1024) throw new Error('Invalid supplemental modeling image.');
+    if (!entry.isFile() || (await fs.stat(file)).size > 10 * 1024 * 1024) {
+      (reports.invalidImages ||= []).push({ path: relative, reason: 'Optional image is not a regular file or exceeds 10 MiB; omitted from review.' });
+      continue;
+    }
     images.push(relative); files.push(file);
   }
   return { reports, images, files };

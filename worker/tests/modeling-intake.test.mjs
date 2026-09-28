@@ -48,7 +48,9 @@ async function fixture(t) {
 
 test('multi-asset intake gets twenty minutes and retains every V2 contract', async t => {
   const f = await fixture(t);
-  await assert.rejects(createModelingPipeline(f.options).prepare(), error => error === f.intakeComplete);
+  const result = await createModelingPipeline(f.options).prepare();
+  assert.equal(result.assets.length, 16);
+  assert.ok(result.assets.every(asset => asset.status === 'NO_USABLE_ARTIFACT'));
   assert.equal(f.calls.length, 2);
   assert.ok(f.calls[0].timeoutMs > 1190000 && f.calls[0].timeoutMs <= 1200000);
   assert.deepEqual(await readJson(path.join(f.project, 'plan/modeling-specs.json')), plan);
@@ -62,7 +64,7 @@ test('intake timeout can be configured independently and is capped by the task d
   process.env.MODELING_INTAKE_TIMEOUT_MS = '300000';
   process.env.MODELING_EVALUATION_TIMEOUT_MS = '150000';
   f.options.job.deadlineAt = new Date(Date.now() + 45000).toISOString();
-  await assert.rejects(createModelingPipeline(f.options).prepare(), error => error === f.intakeComplete);
+  assert.equal((await createModelingPipeline(f.options).prepare()).status, 'ASSETS_PROVISIONAL');
   assert.ok(f.calls[0].timeoutMs > 0 && f.calls[0].timeoutMs <= 45000);
   const group = Object.values((await readJson(path.join(f.state, 'execution.json'))).groups)[0];
   assert.deepEqual(group.limits, { maxCalls: 4, timeoutMs: 300000, totalMs: 1200000 });

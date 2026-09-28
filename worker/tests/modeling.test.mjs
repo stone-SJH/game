@@ -355,13 +355,15 @@ test('cancellation during provider call stops, and acceptance artifacts cannot b
   const other = await pipelineFixture(t, { enabled: false });
   const result = await other.pipeline.prepare();
   await fs.appendFile(path.join(other.project, result.assets[0].files[0].path), 'changed');
-  await assert.rejects(other.pipeline.verify(), /artifact changed/);
+  await assert.rejects(other.pipeline.verify(), error => error.kind === 'INTEGRITY_ERROR');
 });
 
 test('revision cannot delete or weaken the original modeling requirements', async t => {
   const f = await pipelineFixture(t, { enabled: false }); await f.pipeline.prepare();
   await atomicJson(path.join(f.project, 'plan/modeling-request.json'), { reason: 'Weaken', assets: [{ ...spec, requirements: ['Round red body'] }] });
-  await assert.rejects(f.pipeline.prepare(), /weaken original/);
+  const retained = await f.pipeline.prepare();
+  assert.ok(retained.issues.some(issue => issue.stage === 'modeling-revision'));
+  assert.deepEqual((await readJson(path.join(f.project, 'plan/modeling-specs.json'))).assets[0].requirements, spec.requirements);
 });
 
 test('catalog requires provenance and excludes workspace escapes and hash mismatches', async t => {
@@ -381,7 +383,7 @@ test('default harness runs modeling intake before main production; no-model task
   const saved = { CODEX_CMD: process.env.CODEX_CMD, CODEX_MAX_ATTEMPTS: process.env.CODEX_MAX_ATTEMPTS, MODELING_ROUTING_ENABLED: process.env.MODELING_ROUTING_ENABLED };
   process.env.CODEX_CMD = process.execPath; process.env.CODEX_MAX_ATTEMPTS = '1'; delete process.env.MODELING_ROUTING_ENABLED;
   t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
-  await assert.rejects(runProductionHarness({ job: { taskId: 'task', workspaceId: 'workspace', runId: 'run', objective: 'Fix game code only' },
+  const result = await runProductionHarness({ job: { taskId: 'task', workspaceId: 'workspace', runId: 'run', objective: 'Fix game code only' },
     project: f.project, output: f.output, signal: new AbortController().signal, unreal: 'unused',
     step: async (name, command, args, timeout, cwd, accepts, options) => {
       calls.push(name);
@@ -394,7 +396,9 @@ test('default harness runs modeling intake before main production; no-model task
       if (name.startsWith('production-orchestrator')) assert.match(options.input, /NOT_APPLICABLE/);
       return success;
     },
-  }), /deliverables missing/);
+  });
+  assert.equal(result.delivery.status, 'RETAINED_INCOMPLETE');
+  assert.equal(result.delivery.playable, false);
   assert.ok(calls[0].startsWith('modeling-plan'));
   assert.ok(calls.at(-1).startsWith('production-orchestrator'));
 });

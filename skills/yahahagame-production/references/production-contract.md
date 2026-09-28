@@ -97,6 +97,32 @@ reused. Review/service errors are recorded as unverified quality, not fabricated
 measurements. Budgets and completed rounds survive resume. Cancellation, process-stop
 uncertainty and modified frozen evidence still fence execution.
 
+### Internal stage failures and publication
+
+Internal schema/service failures, missing technical reports, capability discovery outages,
+invalid optional evidence, and a production agent's hard-failure marker are stage gaps.
+Retain the diagnostics, consume only the stage's original local retries, and finish every
+independent stage in the round. Never label an unverified model technically usable. Reuse a
+verified previous model when possible; otherwise use an explicit temporary engine-native
+representation. The complete round is scored before another round repairs these gaps.
+
+Write a model revision request without stopping integration. The host preserves the request,
+repairs it internally at the next complete iteration, and keeps the approved base contract
+until the replacement validates. Failed repair cannot delete either original requirements or
+requested additions. Same-round resume never refreshes the durable budget.
+
+When no package can be launched, the host retains the project and diagnostic snapshot as
+`RETAINED_INCOMPLETE`, `playable:false`, score 0. This is not a playable delivery. The live
+worker continues essential-delivery rounds beyond the quality-iteration cap until a publishable
+result exists, subject to the existing task deadline, cancellation and integrity fences.
+
+Publication has its own durable `artifact-publication.json` and immutable local outbox.
+Upload outages leave items `PENDING`; they cannot change a production result to `FAIL`.
+The live worker renews its lease while retrying required uploads before announcing completion.
+Optional evidence outages are recorded separately and do not block required delivery. An HTTP
+422 completion response is retained for internal publication recovery, never converted to a
+content failure. No task budgets, toolchain locks or active journals are migrated implicitly.
+
 ## Controller/API additions
 
 The current task API needs these authenticated routes:

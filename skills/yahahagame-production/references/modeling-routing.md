@@ -72,6 +72,8 @@ Provider resumable state lives outside the project in the workspace's `modeling-
 The main production agent must keep accepted source
 and GLB files unchanged. A new asset or changed specification is requested through
 `plan/modeling-request.json`; the host re-evaluates it on a bounded next iteration.
+Continue integration and packaging after recording that request. Its repair/application happens
+after this whole round has been assessed and retained; do not exit early to obtain fresh budgets.
 
 The Tripo adapter uses `https://openapi.tripo3d.com/v3` with the worker's China-region key;
 it does not fail over to the international `.ai` endpoint. It reads the Git repository root's

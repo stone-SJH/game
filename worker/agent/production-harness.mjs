@@ -15,6 +15,7 @@ import { validateEngineeringAcceptance } from './modeling-engineering.mjs';
 import { validateUnrealModels } from './modeling-unreal.mjs';
 import { criterionScore, iterationScore } from './iteration-quality.mjs';
 import { createProductionIterations } from './production-iterations.mjs';
+import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -324,7 +325,7 @@ export async function initializeProductionPlans(project, job, context) {
   for (const [file, value] of writes) await writeJson(file, value);
 }
 
-export async function runProductionHarness({ job, project, output, signal, step, unreal, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {}, onModelingReport = async () => {} }) {
+export async function runProductionHarness({ job, project, output, signal, step, unreal, requirePublishableResult = false, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {}, onModelingReport = async () => {} }) {
   if ((job.payload?.references?.length || 0) !== (job.referenceFiles?.length || 0)) throw new Error('Reference files must be downloaded and verified before production starts.');
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
@@ -364,6 +365,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
   const retainedFeedback = await readJson(path.join(project, 'plan/iteration-feedback.json'));
   let feedback = retainedFeedback?.taskId === job.taskId ? retainedFeedback : null;
   let attempt = 0;
+  const publishable = result => result && result.delivery.playable !== false &&
+    ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].every(role => result.files[role]);
 
   async function runQualityReview(attemptNumber) {
     const file = path.join(output, `quality-review-${attemptNumber}.json`);
@@ -419,7 +422,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
   while (true) {
     const completed = await iterations.best();
     if (completed && (completed.qualityAccepted || completed.delivery.score >= qualitySettings.scoreThreshold && !completed.delivery.issues.length)) return completed;
-    if (iterations.rounds.length > qualitySettings.maxIterations) return await iterations.best('Iteration budget reached; retained the best delivered result with its actual score and gaps.');
+    if (iterations.rounds.length > qualitySettings.maxIterations && (!requirePublishableResult || publishable(completed))) return await iterations.best('Iteration budget reached; retained the best delivered result with its actual score and gaps.');
     const iteration = iterations.iteration;
     attempt = await iterations.reserveAttempt();
     const issues = [];
@@ -427,7 +430,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
     async function observe(name, operation) {
       try { const result = await operation(); stageScores.push({ stage: name, score: 100 }); return result; }
       catch (error) {
-        if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false || /INTEGRITY|POLICY_CHANGED|VERSION_CHANGED/.test(error.kind || '')) throw error;
+        throwIfExecutionFenced(error, signal);
         const issue = { stage: name, status: 'GAP', reason: error.message, kind: error.kind, acceptanceFailure: error.acceptanceFailure };
         issues.push(issue);
         stageScores.push({ stage: name, score: error.qualityScore ?? 0 });
@@ -454,7 +457,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Read/write task JSON and Chinese text as UTF-8 explicitly. On Windows PowerShell use Get-Content -Encoding UTF8; its legacy default encoding corrupts these files.',
       `The acceptance report must use protocol 1 and taskId=${job.taskId}, workspaceId=${job.workspaceId}, runId=${job.runId}. Report actual packagedGameStatus, gameplayStatus, visualStatus and every original criterion as PASS or GAP with evidence. Use ACCEPTED and passed:true only when everything passes; otherwise use PROVISIONAL and passed:false. Preserve every planned stage and criterion. The host will publish, score and iterate this result.`,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
-      'If the objective is truly impossible with the installed tools or constraints, write acceptance/hard-failure.json with a concrete reason and stop. Do not use that marker for transient service, network, rate-limit, or build errors that can be repaired.',
+      'Record stage blockers and concrete reasons in acceptance/hard-failure.json when necessary, but continue every independent stage and finish the best package possible. This file is internal gap evidence, never authority to abort the whole task. Do not claim unavailable validation passed.',
       ...(feedback ? feedback.kind === 'quality-review' ? [
         'The previous iteration delivered a playable result with recorded gaps. Improve the recorded gaps while preserving passing functionality and evidence.',
         `Quality review decision: ${feedback.action}. Remaining gap: ${feedback.remainingGap}.`,
@@ -479,15 +482,19 @@ export async function runProductionHarness({ job, project, output, signal, step,
     try {
       if (modelingPipeline) {
         stage = 'modeling-assets';
-        modelingResults = await modelingPipeline.prepare({ iteration });
-        await modelingPipeline.verify();
+        modelingResults = await observe(stage, () => modelingPipeline.prepare({ iteration })) || {
+          status: 'PLANNING_PROVISIONAL', assets: [], planning: { kind: 'STAGE_UNAVAILABLE',
+            reason: 'Internal modeling stage unavailable; preserve the original objective and all retained specifications. Finish this round with provisional engine-native representations.',
+            executionEvidenceFile: path.join(output, `iteration-${iteration}-modeling-assets-gap.json`) } };
+        await observe('modeling-verification', () => modelingPipeline.verify());
+        for (const issue of modelingResults.issues || []) { issues.push(issue); stageScores.push({ stage: issue.stage, score: 0 }); }
         if (modelingResults.status === 'PLANNING_PROVISIONAL') {
           issues.push({ stage: 'modeling-planning', status: 'GAP', kind: modelingResults.planning.kind,
             reason: modelingResults.planning.reason, evidenceFile: modelingResults.planning.evidenceFile });
           stageScores.push({ stage: 'modeling-planning', score: 0 });
         }
       }
-      const engineeringPlan = await modelingPipeline?.engineeringPlan() || null;
+      const engineeringPlan = modelingPipeline ? await observe('engineering-handoff', () => modelingPipeline.engineeringPlan()) : null;
       const engineeringHandoff = engineeringPlan ? [
         'Read plan/engineering-plan.json before building gameplay. This host-frozen plan covers every original requirement and separates documented engineering choices from unresolved original-reference facts. Never edit it.',
         'Implement the exact player capsule in meters from playerCapsule (Unreal values use centimeters), and use each asset contract, pivot and local traversal frame when placing geometry. Static sweeps do not prove jump/climb/swim/glide or puzzle reachability; execute the listed gameplay tests.',
@@ -509,57 +516,64 @@ export async function runProductionHarness({ job, project, output, signal, step,
           'For UE 5.8 FBX/Interchange custom collision, FbxImportUI.auto_generate_collision=false disables collision entirely in its converter. Keep that flag true, one_convex_hull_per_ucx=true, verify each authored UCX proxy becomes a convex hull, and import explicit LOD files with StaticMeshEditorSubsystem.import_lod. The host checks the exact hull count and LOD budgets. Use the saved test map for real material/orientation evidence.',
         ] : []),
         ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [] : [
-          'Do not author new models or change accepted model source/export files. Integrate them into the game and record existing evidence. For a new/changed model, write a full replacement plan/modeling-request.json using the exact modeling-specs.json schema and exit this call before authoring or validation. The host resumes at that boundary.',
+          'Do not change accepted model source/export files. For a new/changed model, write a full replacement plan/modeling-request.json using the modeling-specs.json schema. Continue this round with accepted assets or documented temporary engine-native representations; the host repairs and applies the revision at the next complete iteration.',
         ]),
       ].join('\n') : basePrompt;
       codexTemp = await createCodexTempDirectory();
       stage = 'production-orchestrator';
       const args = [...invocation.args, 'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--cd', project, '-o', sessionOutput, '-'];
-      const orchestration = await step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, {
+      const orchestration = await observe(stage, () => step(`production-orchestrator-${attempt}`, invocation.command, args, Number(process.env.CODEX_TIMEOUT_MS || 4 * 60 * 60 * 1000), project, undefined, {
         input: prompt,
         env: { ...agentEnvironment(), TEMP: codexTemp, TMP: codexTemp, TMPDIR: codexTemp },
-      });
-      if (hasHardFailureMarker(`${orchestration.stdout}\n${orchestration.stderr}`)) {
-        throw Object.assign(new Error('Production worker reported a hard failure.'), { hardFailure: true });
+      }));
+      if (hasHardFailureMarker(`${orchestration?.stdout}\n${orchestration?.stderr}`) || await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) {
+        await observe('production-blocker', async () => { throw new Error('Production agent reported a blocker; preserve its evidence and complete assessment of this round.'); });
       }
-      if (await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) throw Object.assign(new Error('Production marked as impossible by the worker.'), { hardFailure: true });
       if (modelingPipeline) {
         stage = 'modeling-assets-post-production';
-        await modelingPipeline.verify();
-        if (await modelingPipeline.hasRequest()) {
-          await reportProgress({ phase: 'planning', step: 'Evaluating requested model revision' });
-          continue;
-        }
+        await observe(stage, () => modelingPipeline.verify());
+        const revision = await observe('modeling-revision-handoff', () => modelingPipeline.deferRequest());
+        if (revision) { issues.push(revision); stageScores.push({ stage: revision.stage, score: 0 }); }
       }
 
       stage = 'deliverables';
       const deliverables = await inspectProduction(project);
-      if (!await isFile(deliverables.files.projectFile) || !await isFile(deliverables.files.packageFile)) throw new Error(`Production deliverables missing (launchable project/package unavailable): ${deliverables.missing.join(', ')}.`);
+      const hasPackage = await isFile(deliverables.files.projectFile) && await isFile(deliverables.files.packageFile);
+      if (!hasPackage) await observe(stage, async () => { throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}. Preserve the project draft and repair packaging next iteration; no playable delivery is claimed.`); });
       if (deliverables.missing.length) issues.push({ stage: 'deliverables', status: 'GAP', reason: `Missing supporting evidence: ${deliverables.missing.join(', ')}` });
       stage = 'modeling-unreal-validation';
       await observe(stage, async () => {
-        const result = await validateUnrealModels({ summary: modelingResults, project, output, unreal, projectFile: deliverables.files.projectFile, step, signal, invocation, attempt, job, allowProvisional: true });
+        if (!hasPackage) throw new Error('Engine validation unavailable: project or package missing.');
+        const result = await validateUnrealModels({ summary: modelingResults, project, output, unreal, projectFile: deliverables.files.projectFile, step, signal, invocation, attempt, iteration, job, allowProvisional: true });
         if (result.status === 'ENGINE_PROVISIONAL') throw Object.assign(new Error(`Engine assets retain quality gaps: ${JSON.stringify(result.assets)}`), { qualityScore: result.score });
         return result;
       });
       stage = 'unreal-project-validation';
-      try {
-        await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
-          result => !result.error && result.exitCode === 0 && !result.timedOut);
-      } catch (error) {
-        if (signal.aborted || classifyIterationFailure(error, stage).action !== 'replace-validator') throw error;
-        const decision = await review({ attempt, stage, error });
-        if (decision.action === 'stop') throw Object.assign(new Error(decision.reason), { hardFailure: true, reviewed: true });
-        // Only an obsolete Help invocation can take this recovery path, once per iteration.
-        stage = 'unreal-project-validation-repair';
-        await step(`unreal-project-validation-repair-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
-          result => !result.error && result.exitCode === 0 && !result.timedOut);
-      }
+      await observe(stage, async () => {
+        if (!hasPackage) throw new Error('Project validation unavailable: project or package missing.');
+        try {
+          await step(`unreal-project-validation-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
+            result => !result.error && result.exitCode === 0 && !result.timedOut);
+        } catch (error) {
+          if (signal.aborted || classifyIterationFailure(error, stage).action !== 'replace-validator') throw error;
+          const decision = await review({ attempt, stage, error });
+          if (decision.action === 'stop') throw Object.assign(new Error(decision.reason), { hardFailure: true, reviewed: true });
+          // Only an obsolete Help invocation can take this recovery path, once per iteration.
+          stage = 'unreal-project-validation-repair';
+          await step(`unreal-project-validation-repair-${attempt}`, unreal, projectValidationArgs(deliverables.files.projectFile), 180000, project,
+            result => !result.error && result.exitCode === 0 && !result.timedOut);
+        }
+      });
       stage = 'packaged-game-playtest';
-      await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
-        result => !result.error && result.exitCode === 0 && !result.timedOut);
+      let playable = false;
+      await observe(stage, async () => {
+        if (!hasPackage) throw new Error('Package launch unavailable: project or package missing.');
+        await step(`packaged-game-playtest-${attempt}`, deliverables.files.packageFile, ['-unattended', '-nullrhi', '-ExecCmds=Quit'], 60000, project,
+          result => !result.error && result.exitCode === 0 && !result.timedOut);
+        playable = true;
+      });
       stage = 'package-publication';
-      await onIterationPackage({ attempt: iteration, project, packageRoot: path.dirname(deliverables.files.packageFile), packageFile: deliverables.files.packageFile });
+      if (playable) await observe(stage, () => onIterationPackage({ attempt: iteration, project, packageRoot: path.dirname(deliverables.files.packageFile), packageFile: deliverables.files.packageFile }));
       stage = 'acceptance-report';
       await observe(stage, async () => {
         let acceptance;
@@ -606,20 +620,22 @@ export async function runProductionHarness({ job, project, output, signal, step,
       const quality = await observe(stage, () => runQualityReview(iteration)) || {
         kind: 'quality-review', action: 'repair-project', reason: 'Quality review unavailable; keep the delivered iteration and retry review.',
         criteria: [], dimensions: null, remainingGap: 1, repairInstructions: 'Retry the independent review with retained evidence.' };
-      const score = iterationScore({ quality, modeling: modelingResults, stages: stageScores, issues });
-      const qualityAccepted = !issues.length && ['skip', 'complete'].includes(quality.action) &&
+      const score = playable ? iterationScore({ quality, modeling: modelingResults, stages: stageScores, issues }) : 0;
+      const qualityAccepted = playable && !issues.length && ['skip', 'complete'].includes(quality.action) &&
         !(modelingResults?.assets || []).some(asset => !asset.quality?.accepted);
       const existingFiles = {};
       for (const [role, file] of Object.entries(deliverables.files)) if (await isFile(file)) existingFiles[role] = file;
       const delivered = await iterations.complete({ deliverables: { ...deliverables, files: existingFiles }, score,
-        threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults });
-      await onIterationReview({ file: delivered.file, record: delivered.record });
-      if (score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
-      if (iterations.rounds.length > qualitySettings.maxIterations || (maxAttempts > 0 && attempt >= maxAttempts)) {
-        return await iterations.best('Quality target remains unmet; retained and delivered the best scored playable iteration.');
+        threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults, playable });
+      try { await onIterationReview({ file: delivered.file, record: delivered.record }); }
+      catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `iteration-${iteration}-publication-gap.json`), stageIssue('iteration-publication', error)); }
+      if (playable && score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
+      if ((iterations.rounds.length > qualitySettings.maxIterations || (maxAttempts > 0 && attempt >= maxAttempts)) &&
+          (!requirePublishableResult || publishable(await iterations.best()))) {
+        return await iterations.best('Iteration budget reached; retained the best available result with its measured score, playability and gaps.');
       }
       feedback = { ...quality, kind: 'quality-review', action: 'repair-project', score, remainingGap: 1-score/100,
-        reason: `Iteration ${iteration} delivered at ${score}/100; target ${qualitySettings.scoreThreshold}.`,
+        reason: `Iteration ${iteration} ${playable ? 'delivered' : 'retained incomplete'} at ${score}/100; target ${qualitySettings.scoreThreshold}.`,
         repairInstructions: `${quality.repairInstructions || ''}\nStage gaps: ${JSON.stringify(issues)}\nAsset gaps: ${JSON.stringify(modelingResults?.assets?.filter(asset => !asset.quality?.accepted).map(asset => ({ assetId: asset.assetId, quality: asset.quality })))}` };
       await writeJson(path.join(project, 'plan', 'iteration-feedback.json'), feedback);
       await reportProgress({ phase: 'retrying', status: 'running', goal: job.objective, iteration,
@@ -632,17 +648,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
         acceptanceFailure: error.acceptanceFailure, qualityFailure: error.qualityFailure,
       });
-      if (signal.aborted || error.stopConfirmed === false || error.result?.stopConfirmed === false) throw error;
-      if (error.reviewed || (error.kind && error.hardFailure)) {
-        const retained = await iterations.best(error.message);
-        if (retained) return retained;
-        throw error;
-      }
+      throwIfExecutionFenced(error, signal);
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });
       if (feedback.action === 'stop') {
         const retained = await iterations.best(feedback.reason);
-        if (retained) return retained;
-        throw new Error(`Iteration monitor stopped at execution attempt ${attempt}: ${feedback.reason}`);
+        if (retained && (!requirePublishableResult || publishable(retained))) return retained;
+        // A monitor budget can end local repair, but cannot discard an undelivered
+        // task. Keep its counters/evidence and retry retention/essential delivery.
+        feedback = { ...feedback, action: 'retry',
+          repairInstructions: 'Internal stage remains unavailable. Preserve all work and budgets; restore evidence retention or essential delivery without weakening acceptance.' };
       }
       const waitMs = feedback.category === 'service' ? Math.min(300000, retryDelayMs * 2 ** Math.min(feedback.occurrences - 1, 5)) : retryDelayMs;
       await reportProgress({ phase: 'retrying', step: `Retry after iteration ${attempt} (${Math.ceil(waitMs / 1000)}s)`, error: feedback.reason });

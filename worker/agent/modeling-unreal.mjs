@@ -8,8 +8,9 @@ import { visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
 import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
 import { pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
 import { assetQuality } from './iteration-quality.mjs';
+import { stageIssue, throwIfExecutionFenced } from './stage-failure.mjs';
 
-export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, job = {}, evaluate, allowProvisional = false }) {
+export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, iteration = 1, job = {}, evaluate, allowProvisional = false }) {
   const assets = summary?.assets?.filter(a => a.usable !== false && a.contract?.runtime.engine === 'unreal') || [];
   if (!assets.length) return { status: 'NOT_APPLICABLE', assets: [] };
   const entries = await readJson(await localPath(project, 'plan/modeling-engine-imports.json'));
@@ -19,7 +20,8 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
     const found = entries.assets.filter(e => e.assetId === asset.assetId);
     if (found.length !== 1 || !/^\/Game\/[A-Za-z0-9_/.]+$/.test(found[0].packagePath) || !/^\/Game\/[A-Za-z0-9_/]+$/.test(found[0].mapPath)) throw new Error('Invalid engine asset mapping.');
     const source = asset.files.find(f => f.path.endsWith(asset.contract.runtime.profile === 'glb-static' ? '/model.glb' : '/model.fbx'));
-    if (!source || await hashFile(await localPath(project,source.path,{existing:true})) !== source.sha256) throw new Error('Engine source export changed.');
+    if (!source) throw modelingFailure('INTEGRITY_ERROR', 'Engine source export missing.');
+    await verifyEvidence([{ file: await localPath(project, source.path), sha256: source.sha256 }]);
     const geometryFile = asset.files.find(f => f.path.endsWith('/geometry-report.json'));
     if (!geometryFile) throw new Error('Missing accepted geometry report.');
     const geometry = await readJson(await localPath(project, geometryFile.path, {existing:true}));
@@ -47,7 +49,7 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
   await contentFiles(path.join(path.dirname(projectFile), 'Content'));
   const evidence = await fileEvidence(engineFiles.sort());
   const evidenceKey = hashValue({ request, evidence });
-  const inspected = await execution.run({ key: `engine-technical:${evidenceKey}`, stage: 'TECHNICAL', input: { request, policy }, evidence,
+  const inspected = await execution.run({ key: `engine-technical:${evidenceKey}:iteration-${iteration}`, stage: 'TECHNICAL', input: { request, policy }, evidence,
     maxCalls: policy.technicalCalls, timeoutMs: policy.technicalMs, retry: () => true }, async ({ callId, timeoutMs }) => {
     const directory = path.join(output, `modeling-unreal-${attempt}-${callId}`);
     await fs.mkdir(directory,{recursive:true});
@@ -67,27 +69,37 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
   const { directory, reportFile, report } = inspected;
   await verifyEvidence(inspected.evidence);
   signal.throwIfAborted();
-  if (!report.passed) throw Object.assign(new Error(`Unreal modeling gates failed: ${JSON.stringify(report.assets).slice(0,5000)}`), { kind: 'TECHNICAL_GAP' });
+  if (!report.passed && !allowProvisional) throw Object.assign(new Error(`Unreal modeling gates failed: ${JSON.stringify(report.assets).slice(0,5000)}`), { kind: 'TECHNICAL_GAP' });
   const review = createModelingReviewer({ execution, project, output, signal, step, invocation, evaluate });
   const qualities = [];
   for (const asset of assets) {
-    const row=report.assets.find(r=>r.assetId===asset.assetId && r.requirementsHash===asset.requirementsHash);
-    if (!row?.passed || !row.views?.length) throw new Error('Missing current engine asset evidence.');
-    const images=[];
-    for (const file of asset.spec.referenceImages || []) images.push(await localPath(project, file, { existing: true }));
-    for (const view of row.views) {
-      const file=await localPath(directory,path.relative(directory,view.file),{existing:true});
-      if (await hashFile(file)!==view.sha256 || (await fs.stat(file)).size>10*1024*1024) throw new Error('Invalid UE screenshot evidence.');
-      images.push(file);
+    try {
+      const row=report.assets.find(r=>r.assetId===asset.assetId && r.requirementsHash===asset.requirementsHash);
+      if (!row?.passed || !row.views?.length) throw Object.assign(new Error(`Engine technical evidence unavailable or failed for ${asset.assetId}.`), { kind: 'TECHNICAL_GAP' });
+      const images=[];
+      for (const file of asset.spec.referenceImages || []) images.push(await localPath(project, file, { existing: true }));
+      for (const view of row.views) {
+        const file=await localPath(directory,path.relative(directory,view.file),{existing:true});
+        await verifyEvidence([{ file, sha256: view.sha256 }]);
+        if ((await fs.stat(file)).size>10*1024*1024) throw new Error('Oversized UE screenshot evidence.');
+        images.push(file);
+      }
+      const visual = visualEvidence(images, asset.spec.referenceImages?.length || 0);
+      const prompt = visualReviewPrompt({ spec: asset.spec, evidence: visual, metrics: row, phase: 'unreal-capture' });
+      const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
+        key: `engine-visual:${evidenceKey}:${asset.assetId}:iteration-${iteration}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) });
+      await atomicJson(path.join(directory,`${asset.assetId}-visual.json`), result);
+      const passed = reviewPasses(result,asset.spec,visual);
+      qualities.push({ assetId: asset.assetId, ...assetQuality(result, passed), reportFile: path.join(directory,`${asset.assetId}-visual.json`) });
+      if (!passed && !allowProvisional) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
+    } catch (error) {
+      throwIfExecutionFenced(error, signal);
+      if (!allowProvisional) throw error;
+      const gap = { assetId: asset.assetId, score: 0, accepted: false, gaps: [stageIssue(error.kind === 'TECHNICAL_GAP' ? 'modeling-engine-technical' : 'modeling-engine-visual', error)],
+        reportFile: path.join(directory, `${asset.assetId}-visual-gap.json`) };
+      await atomicJson(gap.reportFile, gap);
+      qualities.push(gap);
     }
-    const visual = visualEvidence(images, asset.spec.referenceImages?.length || 0);
-    const prompt = visualReviewPrompt({ spec: asset.spec, evidence: visual, metrics: row, phase: 'unreal-capture' });
-    const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
-      key: `engine-visual:${evidenceKey}:${asset.assetId}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) });
-    await atomicJson(path.join(directory,`${asset.assetId}-visual.json`), result);
-    const passed = reviewPasses(result,asset.spec,visual);
-    qualities.push({ assetId: asset.assetId, ...assetQuality(result, passed), reportFile: path.join(directory,`${asset.assetId}-visual.json`) });
-    if (!passed && !allowProvisional) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
   }
   const result={protocol:2,status:qualities.every(row => row.accepted) ? 'ENGINE_READY' : 'ENGINE_PROVISIONAL',reportFile,
     score: Math.round(qualities.reduce((n, row) => n + row.score, 0) / qualities.length),
