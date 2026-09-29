@@ -14,7 +14,7 @@ export async function main(args) {
   const options = {};
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--apply') options.apply = true;
-    else if (['--workspace', '--task-id', '--workspace-id', '--from-repo', '--worker-root', '--report'].includes(args[i]) && args[i + 1]) options[args[i++].slice(2)] = args[i];
+    else if (['--workspace', '--task-id', '--workspace-id', '--from-repo', '--engine-from-repo', '--worker-root', '--report'].includes(args[i]) && args[i + 1]) options[args[i++].slice(2)] = args[i];
     else throw new Error('Unknown upgrade argument: ' + args[i]);
   }
   for (const key of ['workspace', 'task-id', 'workspace-id', 'from-repo', 'worker-root', 'report']) if (!options[key]) throw new Error('Missing --' + key);
@@ -35,14 +35,23 @@ export async function main(args) {
   const oldRouting = await import(pathToFileURL(path.join(options['from-repo'], 'worker/agent/modeling-skill-routing.mjs')));
   const oldRuntime = await import(pathToFileURL(path.join(options['from-repo'], 'worker/agent/modeling-runtime-lock.mjs')));
   const invocation = codexInvocation([]), workspace = path.resolve(options.workspace), project = path.join(workspace, 'project');
+  let engineSource;
+  if (options['engine-from-repo']) {
+    const repo = options['engine-from-repo'];
+    if (git(repo, 'status', '--porcelain', '--', 'worker', 'skills')) throw new Error('Engine source release has local changes.');
+    const routing = await import(pathToFileURL(path.join(repo, 'worker/agent/modeling-skill-routing.mjs')));
+    const runtime = await import(pathToFileURL(path.join(repo, 'worker/agent/modeling-runtime-lock.mjs')));
+    engineSource = { harnessHashes: await routing.modelingToolHashes(), runtime: await runtime.modelingRuntimeIdentity(invocation, project), revision: git(repo, 'rev-parse', 'HEAD') };
+  }
   const result = await upgradeModelingToolchain({ workspace, job: { taskId: options['task-id'], workspaceId: options['workspace-id'] },
     fromHarnessHashes: await oldRouting.modelingToolHashes(), toHarnessHashes: await modelingToolHashes(),
     fromRuntime: await oldRuntime.modelingRuntimeIdentity(invocation, project), toRuntime: await modelingRuntimeIdentity(invocation, project),
-    policy: executionPolicy(invocation), productionPolicy: qualityReviewSettings(), sourceRevision, targetRevision, apply: Boolean(options.apply) });
+    policy: executionPolicy(invocation), productionPolicy: qualityReviewSettings(), sourceRevision, targetRevision, engineSource,
+    unreal: process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe', apply: Boolean(options.apply) });
   await atomicJson(options.report, result);
   console.log(JSON.stringify({ phase: result.phase, sourceRevision, targetRevision, iteration: result.iteration,
     completedRounds: result.completedRounds, consumedProductionAttempts: result.consumedProductionAttempts,
     stateCount: result.stateCount, verifiedArtifactCount: result.verifiedArtifactCount, routes: result.routes,
-    backupRoot: result.backupRoot, report: options.report }));
+    engine: result.engine, backupRoot: result.backupRoot, report: options.report }));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main(process.argv.slice(2));

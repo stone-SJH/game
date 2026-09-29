@@ -10,6 +10,14 @@ import { pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
 import { assetQuality } from './iteration-quality.mjs';
 import { stageIssue, throwIfExecutionFenced } from './stage-failure.mjs';
 
+export function modelingEnginePaths(project, job = {}) {
+  const key = hashValue({ taskId: job.taskId || null, project });
+  const root = path.join(path.dirname(project), 'modeling-state');
+  return { key, policyRoot: path.join(root, 'engine-policy'),
+    lockFile: path.join(root, 'engine-policy', 'toolchain-' + key + '.json'),
+    executionRoot: path.join(root, 'engine', key) };
+}
+
 export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, iteration = 1, job = {}, evaluate, allowProvisional = false }) {
   const assets = summary?.assets?.filter(a => a.usable !== false && a.contract?.runtime.engine === 'unreal') || [];
   if (!assets.length) return { status: 'NOT_APPLICABLE', assets: [] };
@@ -29,11 +37,11 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
       dccDimensions: geometry.export.dimensions, dccCollisionCount: geometry.source.gates.find(g=>g.id==='collision')?.actual?.length || 0,
       dccTraversal: geometry.source.gates.find(g=>g.id==='traversal')?.actual || null });
   }
-  const execution = createExecutionStore(path.join(path.dirname(project), 'modeling-state', 'engine', hashValue({ taskId: job.taskId || null, project })),
-    { signal, deadlineAt: job.deadlineAt });
+  const enginePaths = modelingEnginePaths(project, job);
+  const execution = createExecutionStore(enginePaths.executionRoot, { signal, deadlineAt: job.deadlineAt });
   await execution.assertSettled();
   const policy = executionPolicy(invocation);
-  await pinToolchain(path.join(path.dirname(project), 'modeling-state', 'engine-policy'), hashValue({ taskId: job.taskId || null, project }), {
+  await pinToolchain(enginePaths.policyRoot, enginePaths.key, {
     policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(), unrealHash: await hashFile(unreal),
   });
   // All project content dependencies are immutable during host inspection. This includes materials

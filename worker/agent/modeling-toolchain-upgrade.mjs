@@ -8,25 +8,32 @@ import { loadModelingRecovery, modelingTaskRoot } from './modeling-recovery.mjs'
 import { validateSkillPlan } from './modeling-skill-routing.mjs';
 import { prefersImageModeling } from './modeling-evaluation.mjs';
 import { referenceFiles } from './modeling-contract.mjs';
+import { modelingEnginePaths } from './modeling-unreal.mjs';
 
 function requireThat(condition, reason) {
   if (!condition) throw modelingFailure('INTEGRITY_ERROR', 'Toolchain upgrade preflight: ' + reason);
 }
 
+function verifyRuntimeTransition(before, after) {
+  const original = { ...before }, target = { ...after };
+  delete original.imageGeneration; delete target.imageGeneration;
+  requireThat(same(original, target), 'only image generation configuration may be added; model/CLI settings must match.');
+  requireThat(same(before, after) || !before.imageGeneration && after.imageGeneration?.model === 'gpt-image-2' &&
+    !after.imageGeneration.unavailable && after.imageGeneration.endpointHash,
+  'existing image configuration cannot change during a harness upgrade.');
+}
+
 // Operator-only offline upgrade of a recovered task. Unlike first-round recovery,
 // this preserves the production ledger and every completed/pending round exactly.
 export async function upgradeModelingToolchain({ workspace, job, fromHarnessHashes, toHarnessHashes,
-  fromRuntime, toRuntime, policy, productionPolicy, sourceRevision, targetRevision, apply = false }) {
+  fromRuntime, toRuntime, policy, productionPolicy, sourceRevision, targetRevision, unreal,
+  engineSource = { harnessHashes: fromHarnessHashes, runtime: fromRuntime, revision: sourceRevision }, apply = false }) {
   const project = path.join(workspace, 'project'), task = modelingTaskRoot(workspace, job);
   const recovery = await loadModelingRecovery(project, job);
   requireThat(recovery, 'a verified task recovery identity is required.');
   const planFile = path.join(task, 'plan.json'), plan = await readJson(planFile);
   requireThat(plan && hashValue(plan) === recovery.planHash, 'frozen recovery plan changed.');
-  const runtimeBefore = { ...fromRuntime }, runtimeAfter = { ...toRuntime };
-  delete runtimeBefore.imageGeneration; delete runtimeAfter.imageGeneration;
-  requireThat(same(runtimeBefore, runtimeAfter), 'only image generation configuration may be added; model/CLI settings must match.');
-  requireThat(!fromRuntime.imageGeneration && toRuntime.imageGeneration?.model === 'gpt-image-2' &&
-    !toRuntime.imageGeneration.unavailable && toRuntime.imageGeneration.endpointHash, 'expected the first reviewed GPT Image 2 router upgrade.');
+  verifyRuntimeTransition(fromRuntime, toRuntime);
   await createExecutionStore(task).assertSettled();
   const productionFile = await localPath(workspace, 'production-state/' + recovery.productionIdentity + '/iterations.json', { existing: true });
   const production = await readJson(productionFile, null, 64 * 1024 * 1024);
@@ -65,6 +72,36 @@ export async function upgradeModelingToolchain({ workspace, job, fromHarnessHash
     locks.push({ file, lock, next: { ...lock, harnessHashes: toHarnessHashes, ...(lock.runtime ? { runtime: toRuntime } : {}) } });
     await protect(file);
   }
+  // Unreal has a separate identity and durable ledger outside the task directory.
+  // A prior incomplete migration may leave it on an explicitly verified older release.
+  const engine = modelingEnginePaths(project, job);
+  const engineLock = await readJson(engine.lockFile);
+  const engineExecutionFile = path.join(engine.executionRoot, 'execution.json');
+  const engineExecution = await readJson(engineExecutionFile, null, 64 * 1024 * 1024);
+  requireThat(engineLock || !engineExecution, 'engine ledger exists without its toolchain lock.');
+  if (engineLock) {
+    verifyRuntimeTransition(engineSource.runtime, toRuntime);
+    requireThat(same(engineLock.harnessHashes, engineSource.harnessHashes), 'engine source release hashes differ.');
+    requireThat(same(engineLock.runtime, engineSource.runtime), 'engine source runtime changed.');
+    requireThat(same(engineLock.policy, policy), 'engine policy or budget changed.');
+    requireThat(unreal && engineLock.unrealHash === await hashFile(unreal), 'Unreal executable changed or is unavailable.');
+    await createExecutionStore(engine.executionRoot).assertSettled();
+    await protect(engine.lockFile);
+    if (engineExecution) {
+      await protect(engineExecutionFile);
+      for (const group of Object.values(engineExecution.groups)) {
+        let result = group.result;
+        if (group.resultEvidence) {
+          const file = await localPath(engine.executionRoot, group.resultEvidence.path, { existing: true });
+          retain([{ file, sha256: group.resultEvidence.sha256 }]);
+          result = await readJson(file, null, 32 * 1024 * 1024);
+        }
+        retain(result?.evidence);
+      }
+    }
+    locks.push({ file: engine.lockFile, lock: engineLock,
+      next: { ...engineLock, harnessHashes: toHarnessHashes, runtime: toRuntime } });
+  }
   const states = [], routes = [];
   for (const name of await fs.readdir(path.join(workspace, 'modeling-state'))) {
     if (!/^[a-f0-9]{20}$/.test(name)) continue;
@@ -91,9 +128,13 @@ export async function upgradeModelingToolchain({ workspace, job, fromHarnessHash
       retain(await Promise.all((candidate.files || []).map(async row => ({
         file: await localPath(project, row.path, { existing: true }), sha256: row.sha256 }))));
     }
+    for (const round of Object.values(state.rounds || {})) {
+      retain(round.concept?.evidence);
+      if (round.generatedBase) retain([{ file: await localPath(project, round.generatedBase.modelFile, { existing: true }), sha256: round.generatedBase.sha256 }]);
+    }
     const next = structuredClone(state);
     const mapped = recovery.assets.some(entry => path.resolve(workspace, entry.statePath || '') === path.resolve(file));
-    if (mapped && !state.accepted && state.route === 'blender_direct' && prefersImageModeling(state.spec, state.decision?.advice)) {
+    if (!fromRuntime.imageGeneration && mapped && !state.accepted && state.route === 'blender_direct' && prefersImageModeling(state.spec, state.decision?.advice)) {
       const started = state.productionIteration >= production.iteration || Boolean(state.rounds?.[production.iteration]);
       next.imageRouteUpgrade = { route: 'image_tripo_blender', earliestIteration: production.iteration + Number(started),
         sourceRevision, targetRevision, reason: 'Operator-authorized reviewed image workflow; preserve all previous attempts and candidates.' };
@@ -108,6 +149,9 @@ export async function upgradeModelingToolchain({ workspace, job, fromHarnessHash
   const id = hashValue({ sourceRevision, targetRevision, taskId: job.taskId, executionHash: protectedFiles.get(path.join(task, 'execution.json')) }).slice(0, 24);
   const originals = [...protectedFiles].map(([file, sha256]) => ({ path: path.relative(workspace, file).replaceAll('\\', '/'), sha256 }));
   const report = { protocol: 1, id, phase: 'PREVIEW', taskId: job.taskId, workspaceId: job.workspaceId, sourceRevision, targetRevision,
+    engine: engineLock ? { key: engine.key, sourceRevision: engineSource.revision,
+      executionHash: protectedFiles.get(engineExecutionFile) || null, nextCall: engineExecution?.nextCall || 1,
+      consumedCalls: Object.values(engineExecution?.groups || {}).reduce((sum, group) => sum + group.calls.length, 0) } : null,
     iteration: production.iteration, consumedProductionAttempts: production.attempts, completedRounds: production.rounds.length,
     productionIdentity: recovery.productionIdentity, stateCount: states.length, verifiedArtifactCount: evidence.size, routes,
     originals, changedPaths: changes.map(row => path.relative(workspace, row.file).replaceAll('\\', '/')),

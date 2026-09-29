@@ -83,3 +83,26 @@ If interrupted, keep maintenance active and restore only the changedPaths listed
 backup after comparing hashes; do not replay a partially applied upgrade or clear budgets.
 Deploy the exact committed Git worktree, update autostart registration and verify the
 idle worker before the operator selects Continue.
+
+### Include Unreal when upgrading a recovered task
+
+The upgrade also covers the task/project-specific lock in `modeling-state/engine-policy`
+and verifies its independent execution ledger in `modeling-state/engine`. All existing
+engine call IDs, deadlines, consumed allowances and immutable result evidence stay intact.
+It checks the actual Unreal executable hash and rejects unfinished/unconfirmed engine
+calls before writing any lock. An engine ledger without its pin is an integrity error.
+
+A harness-only upgrade may retain identical runtime settings. To repair a previously
+omitted engine migration, pass `--from-repo` for the current task release and
+`--engine-from-repo` for the exact older clean release still pinned by Unreal. Both source
+identities must match their stored locks; the only allowed runtime addition is the initial
+reviewed image configuration. Existing image settings cannot change through this command.
+Load the normal worker environment, including `UNREAL_CMD`, for preview and apply.
+
+The copy probe accepts the older engine release as its optional fourth positional argument.
+It first reproduces the old Unreal lock rejection, then upgrades the copied task and invokes
+the real Unreal validation orchestration with retained exports, mappings and project content.
+The external engine command is replaced with a controlled technical GAP: this proves the
+validator can pass the migrated lock, preserve earlier calls, and return `ENGINE_PROVISIONAL`
+instead of terminating the round. It does not claim a fresh Unreal quality pass or launch a
+paid call. Newly generated concept images and Tripo bases are hash-checked and preserved too.

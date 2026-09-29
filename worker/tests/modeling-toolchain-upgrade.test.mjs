@@ -16,6 +16,7 @@ import { executionPolicy } from '../agent/modeling-execution.mjs';
 import { prefersImageModeling } from '../agent/modeling-evaluation.mjs';
 import { RUBRIC_VERSION } from '../agent/modeling-rubric.mjs';
 import { prepareModelingReferences } from '../agent/modeling-research.mjs';
+import { modelingEnginePaths, validateUnrealModels } from '../agent/modeling-unreal.mjs';
 
 async function fixture(t, started = false) {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'toolchain-upgrade-'));
@@ -55,6 +56,12 @@ async function fixture(t, started = false) {
   const artifact = path.join(workspace, 'rounds', 'original.blend');
   await fs.writeFile(artifact, 'preserved delivered model');
   const evidence = [{ file: artifact, sha256: await hashFile(artifact) }];
+  const engine = modelingEnginePaths(project, job), unreal = process.execPath;
+  await atomicJson(engine.lockFile, { policy, runtime: fromRuntime, harnessHashes: fromHarnessHashes, unrealHash: await hashFile(unreal) });
+  const engineExecutionFile = path.join(engine.executionRoot, 'execution.json');
+  await atomicJson(engineExecutionFile, { protocol: 3, nextCall: 4, groups: {
+    retained: { key: 'original-engine', completed: true, deadlineAt: 123,
+      calls: [{ callId: 'technical-3', status: 'COMPLETED', stopConfirmed: true }], result: { evidence } } } });
   const identity = hashValue('retained-production'), productionPolicy = { maxIterations: 10, timeoutMs: 1200000, scoreThreshold: 85 };
   const productionFile = path.join(workspace, 'production-state', identity, 'iterations.json');
   await atomicJson(productionFile, { protocol: 1, policy: productionPolicy, iteration: 2, attempts: 11,
@@ -64,9 +71,9 @@ async function fixture(t, started = false) {
     id: 'previous-recovery', iteration: 1, productionIdentity: identity, planHash: hashValue(plan), assets: [{
       assetId: spec.assetId, baseHash: hashValue(spec), statePath: path.relative(workspace, stateFile).replaceAll('\\', '/'),
       specHash: hashValue(spec), requirementsHash, referenceEvidence: [], usable: false, score: 0 }] });
-  return { workspace, project, task, output, job, invocation, stateFile, state, productionFile, executionFile, artifact, spec,
+  return { workspace, project, task, output, job, invocation, stateFile, state, productionFile, executionFile, artifact, spec, engine, engineExecutionFile, unreal,
     options: { workspace, job, fromHarnessHashes, toHarnessHashes, fromRuntime, toRuntime, policy, productionPolicy,
-      sourceRevision: 'verified-old', targetRevision: 'verified-image' } };
+      sourceRevision: 'verified-old', targetRevision: 'verified-image', unreal } };
 }
 
 test('offline image upgrade preserves finished rounds, stage deadlines, counters and original files', async t => {
@@ -77,6 +84,9 @@ test('offline image upgrade preserves finished rounds, stage deadlines, counters
   assert.equal((await readModelingState(f.stateFile)).imageRouteUpgrade, undefined);
   const result = await upgradeModelingToolchain({ ...f.options, apply: true });
   assert.equal(result.phase, 'COMMITTED'); assert.equal(await hashFile(f.executionFile), before);
+  assert.equal(result.engine.nextCall, 4); assert.equal(result.engine.consumedCalls, 1);
+  assert.equal(await hashFile(f.engineExecutionFile), result.engine.executionHash);
+  assert.deepEqual((await readJson(f.engine.lockFile)).harnessHashes, f.options.toHarnessHashes);
   assert.equal(await hashFile(f.productionFile), productionHash);
   const after = await readModelingState(f.stateFile), { imageRouteUpgrade, ...unchanged } = after;
   assert.deepEqual(unchanged, f.state); assert.equal(imageRouteUpgrade.earliestIteration, 2);
@@ -144,4 +154,76 @@ test('upgrade rejects model/policy changes, unsettled calls and mutated retained
 test('static characters with face, finger and cloth detail qualify without magic quality words', () => {
   assert.equal(prefersImageModeling({ description: '坐姿人物', prompt: '手指与衣褶', requirements: [], contract: { assetClass: 'organic-static' } }), true);
   assert.equal(prefersImageModeling({ description: 'Mechanical cabinet', prompt: 'Cabinet', requirements: [], contract: { assetClass: 'modular-kit' } }), false);
+});
+
+test('an older engine pin is repaired alongside current task pins without replaying consumed calls', async t => {
+  const f = await fixture(t);
+  const engineSource = { harnessHashes: f.options.fromHarnessHashes, runtime: f.options.fromRuntime, revision: 'older-engine-release' };
+  const taskHarness = [{ file: 'agent/modeling-pipeline.mjs', sha256: '2'.repeat(64) }];
+  for (const file of [path.join(f.task, 'execution-policy/toolchain-runtime.json'), path.join(f.task, 'toolchain-monk.json')]) {
+    const lock = await readJson(file);
+    await atomicJson(file, { ...lock, harnessHashes: taskHarness, ...(lock.runtime ? { runtime: f.options.toRuntime } : {}) });
+  }
+  const options = { ...f.options, fromHarnessHashes: taskHarness, fromRuntime: f.options.toRuntime, engineSource };
+  await assert.rejects(upgradeModelingToolchain({ ...options, engineSource: undefined }), /engine source release/);
+  const stateHash = await hashFile(f.stateFile), engineHash = await hashFile(f.engineExecutionFile);
+  const upgraded = await upgradeModelingToolchain({ ...options, apply: true });
+  assert.equal(upgraded.engine.sourceRevision, 'older-engine-release');
+  assert.equal(await hashFile(f.stateFile), stateHash);
+  assert.equal(await hashFile(f.engineExecutionFile), engineHash);
+  assert.equal(upgraded.routes.length, 0);
+});
+
+test('engine uncertainty, executable drift and missing pins fail before any migration writes', async t => {
+  const f = await fixture(t), ledger = await readJson(f.engineExecutionFile);
+  ledger.groups.retained.calls[0].status = 'STARTED'; await atomicJson(f.engineExecutionFile, ledger);
+  await assert.rejects(upgradeModelingToolchain({ ...f.options, apply: true }), { kind: 'STOP_UNCONFIRMED' });
+  ledger.groups.retained.calls[0].status = 'FAILED';
+  ledger.groups.retained.calls[0].error = { stopConfirmed: false }; await atomicJson(f.engineExecutionFile, ledger);
+  await assert.rejects(upgradeModelingToolchain(f.options), { kind: 'STOP_UNCONFIRMED' });
+  delete ledger.groups.retained.calls[0].error; await atomicJson(f.engineExecutionFile, ledger);
+  const lock = await readJson(f.engine.lockFile);
+  await atomicJson(f.engine.lockFile, { ...lock, unrealHash: '0'.repeat(64) });
+  await assert.rejects(upgradeModelingToolchain(f.options), /Unreal executable/);
+  await fs.unlink(f.engine.lockFile);
+  await assert.rejects(upgradeModelingToolchain(f.options), /without its toolchain lock/);
+  await assert.rejects(fs.stat(path.join(f.workspace, 'recovery')), { code: 'ENOENT' });
+});
+
+test('real Unreal validator continues after migration and hands off a technical GAP with original engine history', async t => {
+  const f = await fixture(t), original = await readJson(f.engineExecutionFile);
+  const engineSpec = structuredClone(f.spec); engineSpec.contract.runtime.engine = 'unreal';
+  const model = 'art/' + (f.spec.contract.runtime.profile === 'glb-static' ? 'model.glb' : 'model.fbx');
+  await fs.mkdir(path.join(f.project, 'art'));
+  await fs.writeFile(path.join(f.project, model), 'fixture export');
+  const geometry = 'art/geometry-report.json';
+  await atomicJson(path.join(f.project, geometry), { export: { dimensions: [1, 1, 1] }, source: { gates: [] } });
+  const files = await Promise.all([model, geometry].map(async name => ({ path: name, sha256: await hashFile(path.join(f.project, name)) })));
+  const summary = { assets: [{ assetId: f.spec.assetId, spec: engineSpec, contract: engineSpec.contract, requirementsHash: 'retained-asset', files, usable: true }] };
+  await atomicJson(path.join(f.project, 'plan/modeling-engine-imports.json'), { protocol: 2, assets: [{
+    assetId: f.spec.assetId, packagePath: '/Game/Models/Monk.Monk', mapPath: '/Game/Maps/Validation' }] });
+  const projectFile = path.join(f.project, 'Fixture.uproject'); await fs.writeFile(projectFile, '{}');
+  await fs.mkdir(path.join(f.project, 'Content')); await fs.writeFile(path.join(f.project, 'Content/mesh.uasset'), 'fixture content');
+  let technicalCalls = 0;
+  const input = { ...f, summary, projectFile, signal: new AbortController().signal, iteration: 2, attempt: 12, allowProvisional: true,
+    step: async (name, command, args) => {
+      technicalCalls++;
+      assert.equal(name, 'modeling-unreal-12-technical-4');
+      const directory = path.dirname(args.find(arg => arg.startsWith('-script=')).slice(8));
+      const requestFile = path.join(directory, 'request.json'), request = await readJson(requestFile);
+      await atomicJson(path.join(directory, 'report.json'), { requestHash: await hashFile(requestFile), passed: false,
+        assets: request.assets.map(row => ({ assetId: row.spec.assetId, requirementsHash: row.requirementsHash, passed: false, views: [] })) });
+    } };
+  await assert.rejects(validateUnrealModels(input), { kind: 'TOOLCHAIN_CHANGED' });
+  assert.equal(technicalCalls, 0);
+  await upgradeModelingToolchain({ ...f.options, apply: true });
+  // The fixture's router identity may be synthetic on unconfigured CI hosts.
+  const lock = await readJson(f.engine.lockFile);
+  await atomicJson(f.engine.lockFile, { ...lock, runtime: await modelingRuntimeIdentity(f.invocation, f.project) });
+  const result = await validateUnrealModels(input);
+  assert.equal(result.status, 'ENGINE_PROVISIONAL'); assert.equal(result.score, 0);
+  assert.equal(technicalCalls, 1);
+  const after = await readJson(f.engineExecutionFile);
+  assert.equal(after.nextCall, 5); assert.deepEqual(after.groups.retained, original.groups.retained);
+  assert.equal((await readJson(f.productionFile)).attempts, 11);
 });
