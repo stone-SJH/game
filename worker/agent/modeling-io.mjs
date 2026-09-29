@@ -56,7 +56,7 @@ export function throwIfStopped(error, signal) {
 }
 
 export function agentEnvironment(base = process.env) {
-  return Object.fromEntries(Object.entries(base).filter(([key]) => !/^(?:TRIPO_|WORKER_TOKEN$)/i.test(key)));
+  return Object.fromEntries(Object.entries(base).filter(([key]) => !/^(?:TRIPO_|MODELING_IMAGE_API_KEY|WORKER_TOKEN$)/i.test(key)));
 }
 
 export async function recordAuthorRecipe(project, directory, receipt) {

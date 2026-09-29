@@ -2,11 +2,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJson, hashFile, hashValue, localPath, readJson, repositoryRoot, setting } from '../modeling-io.mjs';
+import { modelingFailure, verifyEvidence } from '../modeling-execution.mjs';
+import { checkConceptPng } from '../modeling-image-provider.mjs';
 
 // This worker uses a China-region key and endpoint. Do not fail over across regions.
 const API = 'https://openapi.tripo3d.com/v3';
 const unavailable = (reasonCode, extra = {}) => ({ status: 'unavailable', provider: 'tripo', reasonCode, fallbackRoute: 'blender_direct', ...extra });
 const failure = (reasonCode, extra = {}) => Object.assign(new Error(reasonCode), { reasonCode, ...extra });
+export const canResumeTripoImageTask = state => Boolean(state?.taskId && (['waiting', 'ready'].includes(state.status) ||
+  (state.status === 'unavailable' && !['task_failed', 'provider_region_unknown'].includes(state.reasonCode))));
 
 export async function readTripoKey({ repoRoot = repositoryRoot, keyFile = process.env.TRIPO_API_KEY_FILE } = {}) {
   const file = keyFile ? path.resolve(keyFile) : path.join(repoRoot, 'tripo.txt');
@@ -47,16 +51,17 @@ async function limitedBody(response, maxBytes) {
 }
 
 export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchImpl = globalThis.fetch,
-  requestTimeoutMs = setting('TRIPO_REQUEST_TIMEOUT_MS', 20000), maxWaitMs = setting('TRIPO_MAX_WAIT_MS', 480000),
+  requestTimeoutMs = setting('TRIPO_REQUEST_TIMEOUT_MS', 120000), maxWaitMs = setting('TRIPO_MAX_WAIT_MS', 1200000),
   pollMs = setting('TRIPO_POLL_MS', 3000), maxBytes = 150 * 1024 * 1024,
   model = process.env.TRIPO_MODEL || 'v3.1-20260211', maxGenerations = setting('TRIPO_MAX_GENERATIONS_PER_RUN', 1, 0, 20),
+  maxImageGenerations = setting('TRIPO_MAX_IMAGE_GENERATIONS_PER_ITERATION', 8, 0, 30),
 } = {}) {
-  async function request(endpoint, { key, method = 'GET', body, signal }) {
+  async function request(endpoint, { key, method = 'GET', body, form, signal }) {
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(requestTimeoutMs)]);
     try {
       const response = await fetchImpl(`${API}${endpoint}`, { method, redirect: 'error', signal: bounded,
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        ...(body ? { body: JSON.stringify(body) } : {}) });
+        headers: { Authorization: 'Bearer ' + key, ...(form ? {} : { 'Content-Type': 'application/json' }) },
+        ...(form ? { body: form } : body ? { body: JSON.stringify(body) } : {}) });
       let value;
       try { value = JSON.parse((await limitedBody(response, 1024 * 1024)).toString('utf8')); }
       catch { throw failure(classify(response.status), { httpStatus: response.status }); }
@@ -105,18 +110,36 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
         return result.balance > 0 ? { status: 'ready', balance: result.balance } : unavailable('insufficient_credits');
       } catch (error) { signal.throwIfAborted(); return unavailable(error.reasonCode || 'provider_error'); }
     },
-    async generate({ project, directory, stateFile, ledgerFile, assetId, prompt, requirementsHash, signal = new AbortController().signal, deadlineAt } = {}) {
+    async generate({ project, directory, stateFile, ledgerFile, assetId, prompt, requirementsHash, image, resumePolling = false, signal = new AbortController().signal, deadlineAt } = {}) {
       signal.throwIfAborted();
+      let imageBytes;
+      if (image) {
+        if (!image.approval?.file || !image.approval.sha256) throw modelingFailure('INTEGRITY_ERROR', 'Image-to-3D requires retained independent approval.');
+        const inputFile = await localPath(project, image.path, { existing: true });
+        const approvalFile = await localPath(project, image.approval.file, { existing: true });
+        await verifyEvidence([{ file: inputFile, sha256: image.sha256 }, { file: approvalFile, sha256: image.approval.sha256 }]);
+        const approval = await readJson(approvalFile);
+        if (approval.imageHash !== image.sha256 || approval.status !== 'APPROVED') throw modelingFailure('INTEGRITY_ERROR', 'Image-to-3D approval does not identify the submitted image.');
+        if (!approval.review?.file || !approval.review.sha256) throw modelingFailure('INTEGRITY_ERROR', 'Image-to-3D approval has no reviewed evidence.');
+        const reviewFile = await localPath(project, approval.review.file, { existing: true });
+        await verifyEvidence([{ file: reviewFile, sha256: approval.review.sha256 }]);
+        const review = await readJson(reviewFile);
+        if (review.criteria?.length !== 5 || new Set(review.criteria.map(item => item.criterion)).size !== 5 ||
+            review.criteria.some(item => item.status !== 'PASS')) throw modelingFailure('INTEGRITY_ERROR', 'Image-to-3D concept has not passed independent review.');
+        if ((await fs.stat(inputFile)).size > 20 * 1024 * 1024) throw new Error('Concept image is too large.');
+        imageBytes = await fs.readFile(inputFile); checkConceptPng(imageBytes);
+      }
       const keyInfo = await readTripoKey({ repoRoot, keyFile });
       if (!keyInfo.enabled) return unavailable(keyInfo.reasonCode);
       const root = await localPath(project, directory);
       await fs.mkdir(root, { recursive: true });
       const file = await localPath(project, `${directory}/tripo-model.glb`);
-      const body = { prompt: String(prompt || '').slice(0, 1024), model, texture: true, pbr: true, face_limit: 30000 };
-      const requestHash = hashValue({ body, assetId, requirementsHash });
+      const body = image ? { model, texture: true, pbr: true, texture_quality: 'detailed', face_limit: 30000 } :
+        { prompt: String(prompt || '').slice(0, 1024), model, texture: true, pbr: true, face_limit: 30000 };
+      const requestHash = hashValue({ body, assetId, requirementsHash, ...(image ? { imageHash: image.sha256, approval: image.approval } : {}) });
       let state = await readJson(stateFile);
-      if (state && state.requestHash !== requestHash) throw new Error('Provider state does not match immutable modeling inputs.');
-      if (state?.status === 'unavailable') return state;
+      if (state && state.requestHash !== requestHash) throw modelingFailure('INTEGRITY_ERROR', 'Provider state does not match immutable modeling inputs.');
+      if (state?.status === 'unavailable' && !(image && resumePolling && canResumeTripoImageTask(state))) return state;
       if (state?.status === 'ready') {
         try { if (await hashFile(file) === state.sha256) return state; } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
@@ -129,11 +152,19 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
       try {
         if (!state?.taskId) {
           const ledger = await readJson(ledgerFile, { submissions: 0, disabled: false });
-          if (ledger.disabled || ledger.submissions >= maxGenerations) return unavailable(ledger.reasonCode || 'generation_budget_exhausted');
+          if (ledger.disabled || ledger.submissions >= (image ? maxImageGenerations : maxGenerations)) return unavailable(ledger.reasonCode || 'generation_budget_exhausted');
           // Reserve before the request. Crash/timeout never permits a second paid POST.
           await save({ status: 'submission_intent', creditsConsumed: null });
           await atomicJson(ledgerFile, { ...ledger, submissions: ledger.submissions + 1 });
-          const created = await request('/generation/text-to-model', { key: keyInfo.key, method: 'POST', body, signal: totalSignal });
+          let token;
+          if (image) {
+            const form = new FormData(); form.append('file', new Blob([imageBytes], { type: 'image/png' }), 'concept.png');
+            const uploaded = await request('/files', { key: keyInfo.key, method: 'POST', form, signal: totalSignal });
+            if (typeof uploaded?.file_token !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(uploaded.file_token)) throw failure('missing_file_token');
+            token = uploaded.file_token;
+          }
+          const created = await request(image ? '/generation/image-to-model' : '/generation/text-to-model',
+            { key: keyInfo.key, method: 'POST', body: image ? { ...body, input: token } : body, signal: totalSignal });
           if (typeof created?.task_id !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(created.task_id)) throw failure('missing_task_id');
           await save({ status: 'waiting', taskId: created.task_id });
         }

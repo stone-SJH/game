@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { hashFile, hashValue } from './modeling-io.mjs';
 import { createRequire } from 'node:module';
+import { imageGenerationSettings } from './modeling-image-settings.mjs';
 
 // A danger-full-access exec registers its own workspace as trusted on first launch.
 // Ignore only that exact, standalone registration; keep revocations, other settings and
@@ -83,8 +84,17 @@ export async function modelingRuntimeIdentity(invocation = {}, project) {
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
+  let imageGeneration;
+  try { imageGeneration = (await imageGenerationSettings()).identity; }
+  catch {
+    // Invalid optional image configuration is a stage GAP. Pin the invalid input
+    // without leaking its URL/credentials or preventing unrelated modeling.
+    imageGeneration = { unavailable: true, inputHash: hashValue([
+      process.env.MODELING_IMAGE_BASE_URL || null, process.env.MODELING_IMAGE_TIMEOUT_MS || null,
+      process.env.TRIPO_MAX_IMAGE_GENERATIONS_PER_ITERATION || null]) };
+  }
   return { version: 2, cliVersion, configuredModel, configuredReasoning, projectConfigDirectoryPresent,
-    modelOverride: process.env.MODELING_AGENT_MODEL || null,
+    modelOverride: process.env.MODELING_AGENT_MODEL || null, imageGeneration,
     files: await Promise.all([...files].sort().map(async file => ({ file, sha256: file === globalConfigPath
       ? runtimeConfigFingerprint(await fs.readFile(file, 'utf8'), projectConfigDirectoryPresent ? null : project) : await hashFile(file) }))), missing: missing.sort() };
 }

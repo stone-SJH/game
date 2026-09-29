@@ -49,9 +49,21 @@ state; the production agent consumes accepted or explicitly provisional model ev
 
 1. `reuse_blender`: a registered editable source plus bounded edits can satisfy every original
    requirement. Preserve source identity and record source hash.
-2. `blender_direct`: use for precise, parametric, modular, or otherwise uncertain work. This is
-   the conservative fallback when the evaluator or provider is unavailable.
-3. `tripo_then_blender`: use only when the provider is enabled, the generated base is predicted
+2. `image_tripo_blender`: prefer for detailed skeletal characters and high-complexity organic
+   subjects. Generate a concept with the configured local GPT Image 2 router, independently
+   inspect its actual pixels against the original appearance requirements, and submit only an
+   approved image to Tripo image-to-model. Blender preserves the generated detail while repairing
+   topology, materials, rig, weights, requested animations and exports. This route permits those
+   substantial refinements; it is not constrained by the legacy small-edit heuristic.
+   Keep original references separate from the concept. A concept approval does not prove model
+   fidelity, topology, rig motion or engine acceptance. A rejected concept gets one new draft,
+   never a second vote on identical pixels. Retain image/review hashes and provider task evidence.
+   Service/review gaps retain the best existing artifact and finish the whole iteration. They
+   must not trigger a long primitive-based rebuild. Subsequent rounds refine the best retained
+   Blender source without paying to regenerate its image or 3D base.
+3. `blender_direct`: use for precise, parametric, modular, or simple low-poly work. This is
+   the conservative fallback for these subjects when the evaluator or provider is unavailable.
+4. `tripo_then_blender`: use only when the provider is enabled, the generated base is predicted
    to be closer than direct authoring, and Blender can complete small edits. Small edits cover
    transforms, local cleanup, materials, collision, and LOD; rebuilding the silhouette, global
    retopology, or a rig is outside this route.
@@ -78,11 +90,32 @@ after this whole round has been assessed and retained; do not exit early to obta
 The Tripo adapter uses `https://openapi.tripo3d.com/v3` with the worker's China-region key;
 it does not fail over to the international `.ai` endpoint. It reads the Git repository root's
 `tripo.txt` (or `TRIPO_API_KEY_FILE`) only when it exists and is non-empty. The key
-never enters prompts, arguments, logs, progress, reports, or artifacts. Each revision permits at
-most one generation submission, with a default total of one new submission per run. An unknown submission result is never retried blindly. Credits,
+never enters prompts, arguments, logs, progress, reports, or artifacts. The legacy text-to-model
+route permits at most one generation submission per revision, with a default total of one new
+submission per run. The image route has a durable task-owned ledger per whole iteration, allowing
+eight image-to-model submissions across assets by default
+(`TRIPO_MAX_IMAGE_GENERATIONS_PER_ITERATION`). One approved input gets one submission.
+After a polling timeout, later whole iterations query the original known Tripo task instead of
+submitting or charging again. Approved concepts and downloaded bases are reused across rounds,
+including when Blender failed before producing a usable export. An unknown submission result is
+never retried blindly. Tripo defaults to a 20-minute total wait and 2-minute individual requests.
+Credits,
 authentication, rate limits, service errors, timeout, malformed output, download errors, and
-quality gaps all return a recorded `blender_direct` fallback. Cancellation or unconfirmed process
+quality gaps in the legacy route return a recorded `blender_direct` fallback. In the image route,
+retain the stage GAP and complete the whole iteration. Cancellation or unconfirmed process
 shutdown propagates to the worker instead of starting a fallback.
+
+The image route sends `model=gpt-image-2` to the configured local
+`/v1/images/generations` API. It never uses Tripo text-to-image. By default it reads the selected
+provider's base URL and `OPENAI_API_KEY` from the worker account's global Codex configuration.
+An explicit `MODELING_IMAGE_BASE_URL` override can use `MODELING_IMAGE_API_KEY_FILE`; the original
+router credential is never forwarded to a different host. Keys remain outside the repository and
+agent subprocess environment. Requests default to a 20-minute timeout, bounded by the task deadline
+(`MODELING_IMAGE_TIMEOUT_MS`). The router may return a different actual image size; retain the
+measured dimensions and review the returned pixels. Persist submission intent before the
+synchronous call; timeout/interruption with an unknown result consumes that draft, and resume
+cannot repeat the paid request. An unknown draft can be retried only in the next whole production
+iteration, without reopening the consumed submission in the current iteration.
 
 ## V2 staged modeling and engine handoff
 
