@@ -2,12 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJson, hashValue, readJson, localPath } from './modeling-io.mjs';
 import { fileEvidence, verifyEvidence, modelingFailure } from './modeling-execution.mjs';
+import { loadModelingRecovery } from './modeling-recovery.mjs';
 
 export async function createProductionIterations({ job, project, policy }) {
-  const identity = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, objective: job.objective });
+  const recovery = await loadModelingRecovery(project, job);
+  const identity = recovery?.productionIdentity || hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, objective: job.objective });
   const root = path.join(path.dirname(project), 'production-state', identity);
   const file = path.join(root, 'iterations.json');
-  const state = await readJson(file, null, 64 * 1024 * 1024) || { protocol: 1, policy, iteration: 1, attempts: 0, rounds: [], best: null };
+  const retained = await readJson(file, null, 64 * 1024 * 1024);
+  if (recovery && !retained) throw modelingFailure('INTEGRITY_ERROR', 'Recovered production ledger is missing; consumed budgets cannot restart.');
+  const state = retained || { protocol: 1, policy, iteration: 1, attempts: 0, rounds: [], best: null };
   if (state.protocol !== 1 || hashValue(state.policy) !== hashValue(policy)) throw modelingFailure('ITERATION_POLICY_CHANGED', 'Restore the production iteration policy pinned for this task.');
   await atomicJson(file, state);
   return {

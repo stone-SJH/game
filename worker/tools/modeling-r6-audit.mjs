@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { atomicJson, hashFile, hashValue, readJson, localPath } from '../agent/modeling-io.mjs';
+import { readModelingState } from '../agent/modeling-state.mjs';
 
 async function filesBelow(root, predicate) {
   const result=[];
@@ -65,7 +66,10 @@ export async function auditModelingBatch({manifest,variant,outputRoot}) {
       durationMs:result?.durationMs??null,terminalFailure:result?.passed===false?{kind:result.kind||'UNCLASSIFIED',message:result.error}:interruption?{kind:interruption.kind,message:interruption.reason}:null};
     const states=[];
     for(const file of await filesBelow(path.join(root,caseId,'modeling-state'),f=>path.basename(f)==='state.json')) {
-      const state=await readJson(file);states.push(state);
+      // Audits also inspect historical, pre-protocol fixtures; only v3 needs
+      // the evidence-aware decoder. Execution still rejects old formats.
+      const stored=await readJson(file,null,64*1024*1024);
+      const state=stored?.protocol===3?await readModelingState(file):stored;states.push(state);
     }
     row.authorAttempts=states.reduce((sum,s)=>sum+Object.values(s.attempts||{}).reduce((n,x)=>n+x,0),0);
     row.qualityGaps=states.flatMap(s=>s.failures||[]).filter(f=>['TECHNICAL_GAP','VISUAL_GAP'].includes(f.kind))

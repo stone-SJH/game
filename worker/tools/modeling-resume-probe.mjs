@@ -8,6 +8,7 @@ import { callBlenderMcp } from '../agent/modeling-capabilities.mjs';
 import { codexInvocation } from '../agent/production-harness.mjs';
 import { runCommand } from '../agent/process-runner.mjs';
 import { atomicJson, readJson } from '../agent/modeling-io.mjs';
+import { readModelingState } from '../agent/modeling-state.mjs';
 
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--out') throw new Error('Usage: --out <new audit directory>');
@@ -64,12 +65,12 @@ function options() {
 await assert.rejects(createModelingPipeline(options()).prepare(), /Probe pause/);
 const stateDirectory = (await fs.readdir(path.join(root, 'modeling-state'))).find(n => n !== 'tasks');
 const stateFile = path.join(root, 'modeling-state', stateDirectory, 'state.json');
-const before = await readJson(stateFile);
+const before = await readModelingState(stateFile);
 assert.equal(before.pending.phase, 'FINAL_PENDING');
 controller = new AbortController();
 const pipeline = createModelingPipeline(options());
 const summary = await pipeline.prepare(); await pipeline.verify();
-const after = await readJson(stateFile);
+const after = await readModelingState(stateFile);
 assert.deepEqual(authored, ['blockout', 'final']);
 assert.equal(reviews, 3);
 assert.deepEqual(after.attemptBudgets, before.attemptBudgets);

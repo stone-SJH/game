@@ -30,7 +30,9 @@ export async function localPath(root, relative, { existing = false } = {}) {
 
 export async function readJson(file, fallback = null, limit = 2 * 1024 * 1024) {
   try {
-    if ((await fs.stat(file)).size > limit) throw new Error('Modeling JSON exceeds size limit.');
+    const bytes = (await fs.stat(file)).size;
+    if (bytes > limit) throw Object.assign(new Error(`Modeling JSON exceeds size limit: ${file} (${bytes} bytes; limit ${limit} bytes).`),
+      { kind: 'MODELING_JSON_TOO_LARGE', file, bytes, limit, hardFailure: false });
     return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
   } catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
