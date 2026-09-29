@@ -24,7 +24,7 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
   const record = await loadModelingRecovery(project, job);
   // A real specification revision goes through normal research and authoring.
   if (!record || record.planHash !== hashValue(plan)) return null;
-  const assets = [], evidence = [], handoffs = [];
+  const assets = [], evidence = [], handoffs = [], frozenAssetIds = [];
   for (const spec of plan.assets) {
     const entry = record.assets.find(row => row.assetId === spec.assetId);
     if (!entry || entry.baseHash !== hashValue(spec)) throw modelingFailure('INTEGRITY_ERROR', 'Recovery asset contract changed.');
@@ -35,6 +35,7 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
       throw modelingFailure('INTEGRITY_ERROR', 'Recovered asset state does not match its frozen contract.');
     }
     await verifyEvidence(entry.referenceEvidence);
+    frozenAssetIds.push(spec.assetId);
     assets.push(state.spec); evidence.push(...entry.referenceEvidence);
     if (iteration === record.iteration) {
       const handoff = state.rounds?.[iteration]?.stageGap;
@@ -47,7 +48,7 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
       await verifyEvidence(files); evidence.push(...files); handoffs.push(handoff);
     }
   }
-  return { assets, handoffs, skipResearch: iteration === record.iteration,
+  return { assets, handoffs, frozenAssetIds, skipResearch: iteration === record.iteration,
     record: { recoveryId: record.id, evidence, references: [], blocked: [],
       reason: 'Reuse verified task-owned references and original attempt budgets. Finish the retained iteration before new quality repairs.' } };
 }

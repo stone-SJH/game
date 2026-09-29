@@ -17,8 +17,10 @@ export function needsVisualResearch(spec) {
 }
 
 // Research has its own durable calls. It cannot consume or reset an author's attempt budget.
-export async function prepareModelingReferences({ assets, project, job, engineering, review, reportProgress, signal, iteration = 1 }) {
-  const targets = assets.filter(needsVisualResearch);
+export async function prepareModelingReferences({ assets, project, job, engineering, review, reportProgress, signal, iteration = 1, frozenAssetIds = [] }) {
+  // A recovered asset already owns a skill lock and consumed attempt ledger.
+  // Adding references here would change both identities without a revision.
+  const targets = assets.filter(spec => !frozenAssetIds.includes(spec.assetId) && needsVisualResearch(spec));
   if (!targets.length) return { assets, record: null };
   const inputHash = hashValue({ targets, objective: job.objective, engineering });
   const base = `plan/modeling-references/${inputHash.slice(0, 20)}`;
@@ -76,5 +78,5 @@ export async function prepareModelingReferences({ assets, project, job, engineer
   if (record.blocked.length) await reportProgress({ phase: 'planning', tool: 'Modeling reference research',
     step: 'Retain unresolved reference gaps and continue a provisional production iteration', referenceEvidence: reportFile });
   return { assets: assets.map(spec => ({ ...spec, referenceImages: [...spec.referenceImages,
-    ...record.references.filter(row => row.assetId === spec.assetId).map(row => row.file)] })), record };
+    ...record.references.filter(row => row.assetId === spec.assetId && !frozenAssetIds.includes(spec.assetId)).map(row => row.file)] })), record };
 }

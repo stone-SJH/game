@@ -47,3 +47,39 @@ The operator can then select Continue on the original task. The recovered first
 iteration finishes delivery and scoring before another modeling repair round.
 Subsequent specification revisions still invalidate the affected recovery mapping.
 Recovery does not relabel incomplete assets or visual gaps as accepted results.
+
+## Paused task upgrade to reviewed image modeling
+
+For an already recovered task with completed deliveries, use
+worker/tools/modeling-task-upgrade.mjs. Supply the same workspace/task/source-release
+arguments as recovery, plus --report outside the repository. Default is read-only preview.
+This separate migration requires settled modeling calls and no pending asset operation;
+it does not join, replace or reset any production ledger. Runtime model/CLI settings,
+stage policies, geometry validators, original requirements, skill resources and retained
+artifact hashes must match. Only the new GPT Image 2 configuration and explicitly verified
+harness hashes change in toolchain locks.
+
+The preview verifies completed snapshots and current candidates, records every consumed
+attempt and plans image-route activation for detailed characters. Assets already started
+in the current whole iteration defer that route until the next iteration. Existing scores,
+earlier routes, budgets, execution history and all source assets remain retained.
+Recovered assets keep their verified reference set in subsequent iterations, including
+an empty reference set. Automatic research cannot silently append images and change
+their skill lock or attempt identity; an explicit specification revision still permits
+new research. Concept generation uses the retained requirements and references.
+
+Run worker/tools/modeling-toolchain-upgrade-probe.mjs with positional arguments
+<original-workspace> <new-disposable-workspace> <old-release> first. It tests the copied
+migration, verifies the next production attempt continues its counter, and invokes the real
+pipeline up to the next external stage with all paid/author operations replaced by a stop.
+The original workspace remains unchanged.
+
+After tests pass, commit the release, pause autostart and stop the verified idle worker.
+Use --apply only under maintenance; the command enforces no execution journal or worker
+process. It backs up every original lock, asset state, recovery identity, execution ledger
+and production ledger under recovery/toolchain-<id>, then writes upgrade.json as PREPARED
+and finally COMMITTED. State payloads are immutable and remain available for rollback.
+If interrupted, keep maintenance active and restore only the changedPaths listed in that
+backup after comparing hashes; do not replay a partially applied upgrade or clear budgets.
+Deploy the exact committed Git worktree, update autostart registration and verify the
+idle worker before the operator selects Continue.

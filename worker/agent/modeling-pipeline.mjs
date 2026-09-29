@@ -547,6 +547,12 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (state.productionIteration !== productionIteration) {
       if (state.pending) throw modelingFailure('ITERATION_BOUNDARY_INVALID', 'An unfinished modeling attempt must resume in its original production iteration.');
       state.productionIteration = productionIteration;
+      if (state.imageRouteUpgrade && !state.imageRouteUpgrade.appliedIteration &&
+          productionIteration >= state.imageRouteUpgrade.earliestIteration) {
+        state.route = state.imageRouteUpgrade.route;
+        state.decision = { ...state.decision, route: state.route, reason: state.imageRouteUpgrade.reason };
+        state.imageRouteUpgrade.appliedIteration ||= productionIteration;
+      }
       if (state.bestCandidate) {
         state.previousAttemptDirectory = state.bestCandidate.directory;
         state.feedback = state.bestCandidate.review;
@@ -868,7 +874,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       engineeringContext = await readJson(engineeringFile);
       const recovery = await recoveredModelingReferences({ project, job, plan: current, iteration });
       const prepared = recovery?.skipResearch ? recovery : await prepareModelingReferences({ assets: recovery?.assets || current.assets,
-        project, job, engineering: engineeringContext, review: reviewer, reportProgress, signal, iteration });
+        project, job, engineering: engineeringContext, review: reviewer, reportProgress, signal, iteration,
+        frozenAssetIds: recovery?.frozenAssetIds });
       referenceResearch = prepared.record;
       if (referenceResearch?.blocked?.length) pipelineIssues.push(referenceResearch.issue || { stage: 'modeling-reference-research', status: 'GAP', reason: JSON.stringify(referenceResearch.blocked) });
       accepted = [];

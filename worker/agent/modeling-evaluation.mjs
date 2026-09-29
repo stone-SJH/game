@@ -13,7 +13,9 @@ export function prefersImageModeling(spec, advice = {}) {
   const detail = /high.?quality|high.?detail|realistic|photoreal|faithful|replica|高质量|高精度|高细节|写实|复刻|一比一/i
     .test([spec.description, spec.prompt, ...spec.requirements].join('\n'));
   if (assetClass === 'skeletal-character') return spec.contract.styleProfile !== 'lowpoly' || detail;
-  return assetClass === 'organic-static' && (detail || advice.complexity === 'high');
+  const fineOrganicDetail = /facial|fingers?|layered.{0,20}(fur|cloth)|anatomical|面部|手指|衣褶|毛发|鳞片/i
+    .test([spec.description, spec.prompt, ...spec.requirements].join('\n'));
+  return assetClass === 'organic-static' && (detail || fineOrganicDetail || advice.complexity === 'high');
 }
 export const assetSpecSchema = object({
   assetId: id, description: string, prompt: { ...string, maxLength: 1024 },
