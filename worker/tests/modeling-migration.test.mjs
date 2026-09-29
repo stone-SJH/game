@@ -72,14 +72,14 @@ test('offline migration preserves artifacts and consumed budgets, then Continue 
   assert.equal(await ledger.reserveAttempt(), 10); assert.equal(ledger.iteration, 1);
   const forbidden = async () => { throw new Error('Unexpected new author/review call'); };
   const pipeline = createModelingPipeline({ ...f, signal: new AbortController().signal, step: forbidden, evaluate: forbidden, build: forbidden,
-    probe: async () => ({ blenderMcpAvailable: true }), provider: { availability: async () => ({ enabled: false }) } });
+    probe: forbidden, provider: { availability: forbidden, balance: forbidden } });
   const result = await pipeline.prepare();
   assert.equal(result.assets.length, 2); assert.equal(result.assets[0].quality.score, 83);
   assert.equal(result.assets[0].reused, true); assert.equal(result.assets[1].status, 'NO_USABLE_ARTIFACT');
   await pipeline.verify();
   const after = await readJson(execFile, null, 64000000);
   assert.deepEqual(after.groups.original, f.execution.groups.original);
-  assert.equal(Object.keys(after.groups).length, 2); // Only the new capability probe.
+  assert.equal(Object.keys(after.groups).length, 1); // Even capability/provider discovery is unnecessary.
   assert.equal(await fs.readFile(path.join(f.project, 'original.blend'), 'utf8'), 'original generated model');
   const revised = { ...f.plan, assets: f.plan.assets.map(asset => ({ ...asset, maxTriangles: 200 })) };
   assert.equal(await recoveredModelingReferences({ project: f.project, job: f.job, plan: revised, iteration: 2 }), null);

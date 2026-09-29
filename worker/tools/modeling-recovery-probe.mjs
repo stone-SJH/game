@@ -52,13 +52,11 @@ const migration = await migrateModelingTask({ workspace: destination, job, fromH
 const policy = (await readJson(path.join(destination, 'production-state', migration.productionIdentity, 'iterations.json'))).policy;
 const ledger = await createProductionIterations({ project, job, policy });
 assert.equal(await ledger.reserveAttempt(), migration.consumedProductionAttempts + 1);
-const capability = await readJson(path.join(source, 'runs', context.runId, 'modeling-capabilities.json'));
-await atomicJson(path.join(task, 'capabilities-1.json'), capability);
 const output = path.join(destination, 'probe-output'); await fs.mkdir(output);
 const forbidden = async () => { throw new Error('Recovery attempted a new external operation.'); };
 const options = { job, project, output, invocation, signal: new AbortController().signal,
   build: forbidden, step: forbidden, evaluate: forbidden, probe: forbidden,
-  provider: { availability: async () => ({ enabled: false }), generate: forbidden } };
+  provider: { availability: forbidden, balance: forbidden, generate: forbidden } };
 for (let resume = 0; resume < 2; resume++) {
   const pipeline = createModelingPipeline(options), result = await pipeline.prepare({ iteration: ledger.iteration });
   await pipeline.verify();

@@ -797,7 +797,11 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       referenceResearch = prepared.record;
       if (referenceResearch?.blocked?.length) pipelineIssues.push(referenceResearch.issue || { stage: 'modeling-reference-research', status: 'GAP', reason: JSON.stringify(referenceResearch.blocked) });
       accepted = [];
-      if (current.assets.length) {
+      if (recovery?.skipResearch) {
+        // Offline migration already verified this round's artifacts. Unrelated
+        // capability/provider outages must not suppress their delivery again.
+        accepted = recovery.handoffs;
+      } else if (current.assets.length) {
         const probeRecord = await readJson(path.join(taskState, `capabilities-${iteration}.json`));
         if (probeRecord) capabilities = probeRecord;
         else {

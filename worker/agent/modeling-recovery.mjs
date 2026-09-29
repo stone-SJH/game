@@ -24,7 +24,7 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
   const record = await loadModelingRecovery(project, job);
   // A real specification revision goes through normal research and authoring.
   if (!record || record.planHash !== hashValue(plan)) return null;
-  const assets = [], evidence = [];
+  const assets = [], evidence = [], handoffs = [];
   for (const spec of plan.assets) {
     const entry = record.assets.find(row => row.assetId === spec.assetId);
     if (!entry || entry.baseHash !== hashValue(spec)) throw modelingFailure('INTEGRITY_ERROR', 'Recovery asset contract changed.');
@@ -36,8 +36,18 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
     }
     await verifyEvidence(entry.referenceEvidence);
     assets.push(state.spec); evidence.push(...entry.referenceEvidence);
+    if (iteration === record.iteration) {
+      const handoff = state.rounds?.[iteration]?.stageGap;
+      if (!handoff || handoff.assetId !== spec.assetId || !Array.isArray(handoff.files) ||
+          Boolean(handoff.usable) !== entry.usable || handoff.quality?.score !== entry.score) {
+        throw modelingFailure('INTEGRITY_ERROR', 'Recovered first-round handoff changed.');
+      }
+      const files = await Promise.all(handoff.files.map(async row => ({
+        file: await localPath(project, row.path, { existing: true }), sha256: row.sha256 })));
+      await verifyEvidence(files); evidence.push(...files); handoffs.push(handoff);
+    }
   }
-  return { assets, skipResearch: iteration === record.iteration,
+  return { assets, handoffs, skipResearch: iteration === record.iteration,
     record: { recoveryId: record.id, evidence, references: [], blocked: [],
       reason: 'Reuse verified task-owned references and original attempt budgets. Finish the retained iteration before new quality repairs.' } };
 }
