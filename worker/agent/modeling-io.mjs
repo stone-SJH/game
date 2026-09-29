@@ -30,7 +30,9 @@ export async function localPath(root, relative, { existing = false } = {}) {
 
 export async function readJson(file, fallback = null, limit = 2 * 1024 * 1024) {
   try {
-    if ((await fs.stat(file)).size > limit) throw new Error('Modeling JSON exceeds size limit.');
+    const bytes = (await fs.stat(file)).size;
+    if (bytes > limit) throw Object.assign(new Error(`Modeling JSON exceeds size limit: ${file} (${bytes} bytes; limit ${limit} bytes).`),
+      { kind: 'MODELING_JSON_TOO_LARGE', file, bytes, limit, hardFailure: false });
     return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
   } catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
@@ -54,7 +56,7 @@ export function throwIfStopped(error, signal) {
 }
 
 export function agentEnvironment(base = process.env) {
-  return Object.fromEntries(Object.entries(base).filter(([key]) => !/^(?:TRIPO_|WORKER_TOKEN$)/i.test(key)));
+  return Object.fromEntries(Object.entries(base).filter(([key]) => !/^(?:TRIPO_|MODELING_IMAGE_API_KEY|WORKER_TOKEN$)/i.test(key)));
 }
 
 export async function recordAuthorRecipe(project, directory, receipt) {
