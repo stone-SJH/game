@@ -7,6 +7,7 @@ import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { validateUnrealModels } from '../agent/modeling-unreal.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
 import { atomicJson, hashFile, readJson } from '../agent/modeling-io.mjs';
+import { readModelingState } from '../agent/modeling-state.mjs';
 
 const spec = { assetId: 'fixture', description: 'A red fixture', prompt: 'A red fixture', requirements: ['Red body'],
   referenceImages: [], maxTriangles: 100, requireRig: false, requireClosedMesh: false };
@@ -91,7 +92,7 @@ test('review exhaustion preserves technical evidence and cannot restart its budg
   }
   assert.deepEqual(f.counts, { author: 1, technical: 1, review: 4 });
   const states = (await fs.readdir(path.join(f.root, 'modeling-state'))).filter(n => n !== 'tasks');
-  const state = await readJson(path.join(f.root, 'modeling-state', states[0], 'state.json'));
+  const state = await readModelingState(path.join(f.root, 'modeling-state', states[0], 'state.json'));
   assert.equal(state.pending, null);
   assert.deepEqual(state.rejectedSources, []);
   assert.equal(state.attempts.reuse_blender, 1);
