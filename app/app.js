@@ -104,19 +104,6 @@ function progressPercent(progress) {
   if (Number.isFinite(iteration) && Number.isFinite(iterationTotal) && iterationTotal > 0) return Math.max(phasePercent, Math.round(Math.max(0, Math.min(1, (iteration - 1 + stepPercent / 100) / iterationTotal)) * 100), currentStatus === 'running' ? 1 : 0);
   return Math.max(stepPercent, phasePercent, currentStatus === 'running' ? 1 : 0);
 }
-function fileList(title, entries, emptyText = 'No files reported yet') {
-  const section = node('section', undefined, 'telemetry-files');
-  section.append(node('h4', title));
-  if (!entries?.length) { section.append(node('div', emptyText, 'empty')); return section; }
-  const list = node('ul');
-  for (const entry of entries) {
-    const row = node('li');
-    const name = node('strong', entry.name || entry.path || 'Unnamed file');
-    const meta = node('small', `${entry.path || ''}${entry.updatedAt ? ` · ${date(entry.updatedAt)}` : ''}${Number.isFinite(Number(entry.size)) ? ` · ${Number(entry.size).toLocaleString()} bytes` : ''}`);
-    row.append(name, meta); list.append(row);
-  }
-  section.append(list); return section;
-}
 function progressPanel(task) {
   const panel = node('section', undefined, 'worker-progress');
   const heading = node('div', undefined, 'progress-heading'); heading.append(node('h3', 'Worker progress'));
@@ -146,22 +133,6 @@ function progressPanel(task) {
     const prompt = document.createElement('details'); prompt.className = 'progress-prompt';
     prompt.append(node('summary', 'Codex prompt'), node('pre', progress.prompt)); panel.append(prompt);
   }
-  const screenshots = node('section', undefined, 'telemetry-files'); screenshots.append(node('h4', 'Recent screenshots'));
-  if (!progress.screenshots?.length) screenshots.append(node('div', 'No screenshots reported yet', 'empty'));
-  else {
-    const list = node('div', undefined, 'screenshot-grid');
-    for (const entry of progress.screenshots) {
-      const row = node('figure', undefined, 'screenshot-card');
-      if (entry.previewUrl && entry.downloadUrl) {
-        const link = node('a'); link.href = entry.downloadUrl; link.target = '_blank'; link.rel = 'noopener'; link.append(lazyPreview(entry.previewUrl, entry.name || entry.path)); row.append(link);
-      } else if (entry.downloadUrl) {
-        const link = node('a', entry.name || entry.path); link.href = entry.downloadUrl; link.target = '_blank'; link.rel = 'noopener'; row.append(link);
-      } else row.append(node('strong', entry.name || entry.path));
-      row.append(node('figcaption', `${entry.name || entry.path || 'Unnamed image'}${entry.updatedAt ? ` · ${date(entry.updatedAt)}` : ''}`)); list.append(row);
-    }
-    screenshots.append(list);
-  }
-  panel.append(screenshots, fileList('Recent project files', progress.projectFiles), fileList('Recent log files', progress.logFiles));
   if (worker) {
     const workerMeta = node('div', undefined, 'worker-meta');
     workerMeta.append(node('span', `Worker ${worker.workerId}`), node('span', `Last heartbeat ${dateOrDash(worker.lastSeenAt)}`), node('span', `Attempt ${worker.attempt || 0}`));
@@ -407,6 +378,7 @@ function renderList() {
   if (!items.length) list.append(node('div', 'No tasks yet', 'empty'));
   for (const task of items) {
     const row = node('button', undefined, `task-row${selected === task.task_id ? ' selected' : ''}`);
+    row.title = task.objective;
     row.append(node('span', task.objective, 'task-title'));
     if (task.progress?.phase) row.append(node('span', `${task.progress.phase}${task.progress.steps?.total ? ` · ${task.progress.steps.completed ?? 0}/${task.progress.steps.total}` : ''}`, 'task-progress'));
     const meta = node('span', undefined, 'task-meta'); meta.append(status(task.status), node('time', date(task.created_at))); row.append(meta);
