@@ -83,7 +83,7 @@ test('quality review repairs only a concrete gap and then completes', async t =>
   await fs.mkdir(output);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   environment(t, { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '0', CODEX_RETRY_DELAY_MS: '1', QUALITY_REVIEW_MAX_ITERATIONS: '5' });
-  const calls = [], reviews = [], qualityCalls = { count: 0 };
+  const calls = [], reviews = [], progress = [], qualityCalls = { count: 0 };
   const step = async (name, command, args, timeout, cwd, accepts) => {
     calls.push(name);
     if (name.startsWith('production-orchestrator')) await seedDeliverables(project);
@@ -101,7 +101,7 @@ test('quality review repairs only a concrete gap and then completes', async t =>
     objective: 'Make a platformer.\n质量验收条件：\n- 美术精度达到卡通参考\n- 关卡节奏有休息段\n- 交互手感响应及时',
   };
   await runProductionHarness({ job, project, output, signal: new AbortController().signal, step,
-    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {}, onIterationReview: async value => reviews.push(value.record) });
+    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async value => progress.push(value), onIterationReview: async value => reviews.push(value.record) });
   assert.equal(calls.filter(name => name.startsWith('production-orchestrator-')).length, 2);
   assert.equal(qualityCalls.count, 2);
   assert.deepEqual(reviews.filter(record => record.kind === 'quality-review').map(record => record.action), ['repair-project', 'complete']);
@@ -109,6 +109,65 @@ test('quality review repairs only a concrete gap and then completes', async t =>
   assert.equal(JSON.parse(await fs.readFile(path.join(project, 'plan', 'production-context.json'), 'utf8')).qualityReview.maxAdditionalIterations, 5);
   assert.equal(JSON.parse(await fs.readFile(path.join(output, 'quality-review-1.json'), 'utf8')).remainingGap, 0.4);
   assert.equal(JSON.parse(await fs.readFile(path.join(output, 'quality-review-2.json'), 'utf8')).action, 'complete');
+  assert.equal(progress.at(-1).error, null);
+  assert.equal(progress.at(-1).diagnostic, null);
+  assert.ok(!progress.some(value => value.error === 'All explicit quality criteria are met.'));
+});
+
+test('quality transport failures retain their actual upstream cause in progress and delivered rounds', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-upstream-'));
+  const project = path.join(root, 'project'), output = path.join(root, 'run');
+  await fs.mkdir(project, { recursive: true }); await fs.mkdir(output);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  environment(t, { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '2', CODEX_RETRY_DELAY_MS: '1' });
+  const progress = [], deliveries = [], calls = [];
+  const messages = ['unexpected status 503 Service Unavailable, url: http://43.106.115.130:8080/v1/responses, request id: test-request',
+    'stream disconnected before completion: stream closed before response.completed'];
+  const step = async (name, command, args) => {
+    calls.push(name);
+    if (name.startsWith('production-orchestrator')) await seedDeliverables(project);
+    if (name.startsWith('quality-review-')) {
+      const message = messages[Number(name.split('-').at(-1)) - 1];
+      throw Object.assign(new Error(name + ' failed'), { result: { exitCode: 1, stopConfirmed: true,
+        stdout: JSON.stringify({ type: 'turn.failed', error: { message } }), stderr: 'stale arg0 temp dirs, error 145' } });
+    }
+    return { exitCode: 0, stopConfirmed: true };
+  };
+  await runProductionHarness({ job: { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
+      objective: 'Make a polished game.' }, project, output, signal: new AbortController().signal, step, unreal: 'fixture',
+    reportProgress: async value => progress.push(value),
+    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
+  assert.equal(deliveries.length, 2); // Existing iteration/retry behavior is unchanged.
+  assert.equal(calls.filter(name => name.startsWith('quality-review-')).length, 2);
+  assert.deepEqual(deliveries.map(record => record.quality.upstreamAI.code), ['HTTP_503', 'STREAM_DISCONNECTED']);
+  for (const record of deliveries) {
+    assert.equal(record.playable, true); assert.equal(record.qualityAccepted, false);
+    assert.match(record.quality.reason, /上游 AI 服务调用失败/);
+    assert.match(record.issues.find(issue => issue.stage === 'quality-review').reason, /quality-review-\d+ failed/);
+    const saved = JSON.parse(await fs.readFile(path.join(output, 'iteration-' + record.iteration + '-quality-review-gap.json')));
+    assert.equal(saved.upstreamAI.category, 'upstream-ai');
+    assert.equal(await fs.readFile(path.join(record.retainedProject, 'package/Windows/Game.exe'), 'utf8'), 'game');
+  }
+  assert.ok(progress.some(value => value.phase === 'retrying' && /HTTP 503/.test(value.error)));
+  assert.match(progress.at(-1).error, /响应流中断/); // Terminal budget path retains the cause too.
+  assert.doesNotMatch(progress.at(-1).error, /arg0|145/);
+});
+
+test('local quality response errors remain distinguishable from upstream outages', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-local-error-'));
+  const project = path.join(root, 'project'), output = path.join(root, 'run');
+  await fs.mkdir(project, { recursive: true }); await fs.mkdir(output);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  environment(t, { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '1' });
+  const step = async (name, command, args) => {
+    if (name.startsWith('production-orchestrator')) await seedDeliverables(project);
+    if (name.startsWith('quality-review-')) await fs.writeFile(args[args.indexOf('-o') + 1], 'invalid JSON');
+    return { exitCode: 0, stopConfirmed: true };
+  };
+  const delivered = await runProductionHarness({ job: { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
+    objective: 'Make a polished game.' }, project, output, signal: new AbortController().signal, step, unreal: 'fixture' });
+  assert.match(delivered.delivery.quality.reason, /Invalid quality reviewer JSON/);
+  assert.equal(delivered.delivery.quality.upstreamAI, undefined);
 });
 
 test('quality advice cannot complete with an unresolved dimension gap', () => {

@@ -368,6 +368,9 @@ test('orchestrator outage still assesses existing files and next round produces 
   assert.equal(deliveries[0].status, 'RETAINED_INCOMPLETE');
   assert.equal(deliveries[0].score, 0); assert.equal(deliveries[0].playable, false);
   assert.ok(deliveries[0].issues.some(issue => issue.stage === 'stage-manifest'));
+  assert.equal(deliveries[0].issues.find(issue => issue.stage === 'production-orchestrator').upstreamAI.code, 'HTTP_503');
+  assert.ok(f.progress.some(value => value.diagnostic?.category === 'upstream-ai' && /HTTP 503/.test(value.error)));
+  assert.equal(f.progress.at(-1).error, null);
   assert.equal(result.delivery.iteration, 2); assert.equal(result.delivery.playable, true);
   assert.equal(await fs.readFile(path.join(deliveries[0].retainedProject, 'draft.txt'), 'utf8'), 'Retained work');
 });

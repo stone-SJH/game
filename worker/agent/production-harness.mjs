@@ -16,6 +16,7 @@ import { validateUnrealModels } from './modeling-unreal.mjs';
 import { criterionScore, iterationScore } from './iteration-quality.mjs';
 import { createProductionIterations } from './production-iterations.mjs';
 import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
+import { diagnoseUpstreamAI } from './modeling-upstream-ai.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -431,10 +432,13 @@ export async function runProductionHarness({ job, project, output, signal, step,
       try { const result = await operation(); stageScores.push({ stage: name, score: 100 }); return result; }
       catch (error) {
         throwIfExecutionFenced(error, signal);
-        const issue = { stage: name, status: 'GAP', reason: error.message, kind: error.kind, acceptanceFailure: error.acceptanceFailure };
+        const upstreamAI = diagnoseUpstreamAI(error, { stage: name });
+        const issue = { stage: name, status: 'GAP', reason: error.message, kind: error.kind, acceptanceFailure: error.acceptanceFailure,
+          ...(upstreamAI ? { upstreamAI } : {}) };
         issues.push(issue);
         stageScores.push({ stage: name, score: error.qualityScore ?? 0 });
         await writeJson(path.join(output, `iteration-${iteration}-${name.replaceAll(':', '-')}-gap.json`), issue);
+        if (upstreamAI) await reportProgress({ error: upstreamAI.message, diagnostic: upstreamAI });
         return null;
       }
     }
@@ -617,12 +621,20 @@ export async function runProductionHarness({ job, project, output, signal, step,
         });
       }
       stage = 'quality-review';
-      const quality = await observe(stage, () => runQualityReview(iteration)) || {
-        kind: 'quality-review', action: 'repair-project', reason: 'Quality review unavailable; keep the delivered iteration and retry review.',
+      const reviewedQuality = await observe(stage, () => runQualityReview(iteration));
+      const reviewFailure = issues.find(issue => issue.stage === stage);
+      const quality = reviewedQuality || {
+        kind: 'quality-review', action: 'repair-project',
+        reason: reviewFailure?.upstreamAI ? `${reviewFailure.upstreamAI.message}本轮未取得质量评审结果，已保留已有产物。` :
+          `Quality review unavailable; keep the delivered iteration and retry review. Cause: ${reviewFailure?.reason || 'No review result was returned.'}`,
+        ...(reviewFailure?.upstreamAI ? { upstreamAI: reviewFailure.upstreamAI } : {}),
         criteria: [], dimensions: null, remainingGap: 1, repairInstructions: 'Retry the independent review with retained evidence.' };
+      const upstreamFailure = quality.upstreamAI || issues.find(issue => issue.upstreamAI)?.upstreamAI;
+      const iterationError = upstreamFailure ? `${upstreamFailure.message}本轮产物已保留，仍需完成评审和验收。` : quality.reason;
       const score = playable ? iterationScore({ quality, modeling: modelingResults, stages: stageScores, issues }) : 0;
       const qualityAccepted = playable && !issues.length && ['skip', 'complete'].includes(quality.action) &&
         !(modelingResults?.assets || []).some(asset => !asset.quality?.accepted);
+      await reportProgress({ error: qualityAccepted ? null : iterationError, diagnostic: upstreamFailure || null });
       const existingFiles = {};
       for (const [role, file] of Object.entries(deliverables.files)) if (await isFile(file)) existingFiles[role] = file;
       const delivered = await iterations.complete({ deliverables: { ...deliverables, files: existingFiles }, score,
@@ -640,7 +652,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       await writeJson(path.join(project, 'plan', 'iteration-feedback.json'), feedback);
       await reportProgress({ phase: 'retrying', status: 'running', goal: job.objective, iteration,
         iterationTotal: maxAttempts || qualityIterationTotal || null,
-        step: `Quality repair after iteration ${attempt}`, error: quality.reason });
+        step: `Quality repair after iteration ${attempt}`, error: iterationError, diagnostic: upstreamFailure || null });
       await delay(retryDelayMs, undefined, { signal });
     } catch (error) {
       await writeJson(path.join(output, `codex-production-attempt-${attempt}.json`), {

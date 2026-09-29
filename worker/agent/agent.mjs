@@ -11,6 +11,7 @@ import { agentEnvironment } from './modeling-io.mjs';
 import { materializeReferences } from './references.mjs';
 import { createArtifactPublisher, awaitArtifactPublication } from './artifact-publication.mjs';
 import { throwIfExecutionFenced } from './stage-failure.mjs';
+import { diagnoseUpstreamAI, isAiInvocation, upstreamAiEvent } from './modeling-upstream-ai.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -212,13 +213,14 @@ export async function executeJob(job, ctx) {
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
     const monitorStep = name.startsWith('iteration-diagnosis');
-    const modelingStep = /^modeling-(plan|evaluation|author|visual-review)/.test(name);
-    const codexStep = name.startsWith('production-orchestrator') || name.startsWith('quality-review') || monitorStep || modelingStep;
+    const codexStep = isAiInvocation(name, args);
     await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
+      ...(currentProgress.diagnostic?.category === 'upstream-ai' ? { error: null, diagnostic: null } : {}),
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
     await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
     let pendingOutput = '';
+    let upstreamIssue = null;
     const onStdout = chunk => {
       if (!codexStep) return;
       pendingOutput += chunk;
@@ -226,6 +228,16 @@ export async function executeJob(job, ctx) {
       while ((newline = pendingOutput.indexOf('\n')) !== -1) {
         const line = pendingOutput.slice(0, newline); pendingOutput = pendingOutput.slice(newline + 1);
         let event; try { event = JSON.parse(line); } catch { continue; }
+        const diagnostic = upstreamAiEvent(event, name);
+        if (diagnostic) {
+          upstreamIssue = diagnostic;
+          publish({ error: diagnostic.message, diagnostic }).catch(() => {});
+          continue;
+        }
+        if (event.type === 'turn.completed' && upstreamIssue) {
+          upstreamIssue = null;
+          publish({ error: null, diagnostic: null }).catch(() => {});
+        }
         if (event.item?.type === 'mcp_tool_call' && event.item.server === 'yahaha_blender') {
           const done = event.type === 'item.completed';
           publish({ tool: done ? 'AI / Codex' : 'Blender MCP', phase: done ? 'thinking' : 'crafting', command: String(event.item.tool || 'Blender MCP').slice(0, 180) }).catch(() => {});
@@ -248,7 +260,17 @@ export async function executeJob(job, ctx) {
     signal.throwIfAborted();
     const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
     logs.push({ name, ...result, passed });
-    if (!passed) throw Object.assign(new Error(`${name} failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`), { result });
+    if (!passed) {
+      const error = Object.assign(new Error(`${name} failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`), { result });
+      const upstreamAI = diagnoseUpstreamAI(error, { stage: name, ai: codexStep });
+      if (upstreamAI) {
+        error.upstreamAI = upstreamAI;
+        await publish({ error: upstreamAI.message, diagnostic: { ...upstreamAI, exitCode: result.exitCode,
+          logFiles: [`${name}.stdout.jsonl`, `${name}.stderr.log`] } });
+      }
+      throw error;
+    }
+    if (upstreamIssue) await publish({ error: null, diagnostic: null });
     if (!monitorStep) await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }
@@ -331,8 +353,8 @@ export async function executeJob(job, ctx) {
     }
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
-    failure = error.message;
-    await publish({ phase: 'failed', status: 'failed', goal: job.objective, error: failure });
+    failure = error.upstreamAI?.message || error.message;
+    await publish({ phase: 'failed', status: 'failed', goal: job.objective, error: failure, diagnostic: error.upstreamAI || null });
   } finally {
     clearInterval(snapshotTimer);
     await publishing;
