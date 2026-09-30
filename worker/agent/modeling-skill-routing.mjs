@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { atomicJson, hashFile, hashValue, localPath, readJson, repositoryRoot } from './modeling-io.mjs';
 import { modelingFailure, verifyEvidence } from './modeling-execution.mjs';
 
@@ -29,12 +30,19 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
     if (!/^[a-f0-9]{64}$/.test(pinnedLockHash)) throw modelingFailure('INTEGRITY_ERROR', 'Invalid pinned skill identity.');
     const root = `tools/modeling-skills/${pinnedLockHash}`;
     const plan = await readJson(await localPath(project, `${root}/skill-plan.json`));
-    if (!plan || plan.protocol !== 2 || plan.lockHash !== pinnedLockHash || hashValue(plan.resources) !== pinnedLockHash ||
-        hashValue(plan.selected) !== hashValue(selected) ||
-        hashValue(plan.entrypoints) !== hashValue(selected.map(name => `${root}/${name}/SKILL.md`)) ||
-        hashValue(plan.helperDirectories) !== hashValue(selected.filter(name => ['yahaha-blender-modeling', 'yahaha-blender-lowpoly'].includes(name)).map(name => `${root}/${name}/scripts`)) ||
-        hashValue(plan.stages) !== hashValue(['blockout', 'final'])) {
-      throw modelingFailure('INTEGRITY_ERROR', 'Pinned skill plan changed or is missing.');
+    const resourceSkills = Array.isArray(plan?.resources)
+      ? [...new Set(plan.resources.map(resource => typeof resource?.path === 'string' ? resource.path.split('/')[0] : null))] : [];
+    // Accepted revisions may add reference images without changing the technical
+    // contract. Keep the original toolchain; the current spec still drives image
+    // inputs and reference review. Derive membership from the hashed resources,
+    // never from editable plan metadata. New assets still use full routing below.
+    const pinnedSelected = selected.filter(name => name !== 'yahaha-blender-reference-fit' || resourceSkills.includes(name));
+    if (!plan || plan.protocol !== 2 || plan.lockHash !== pinnedLockHash || !Array.isArray(plan.resources) || hashValue(plan.resources) !== pinnedLockHash ||
+        !isDeepStrictEqual(resourceSkills, pinnedSelected) || !isDeepStrictEqual(plan.selected, pinnedSelected) ||
+        !isDeepStrictEqual(plan.entrypoints, pinnedSelected.map(name => `${root}/${name}/SKILL.md`)) ||
+        !isDeepStrictEqual(plan.helperDirectories, pinnedSelected.filter(name => ['yahaha-blender-modeling', 'yahaha-blender-lowpoly'].includes(name)).map(name => `${root}/${name}/scripts`)) ||
+        !isDeepStrictEqual(plan.stages, ['blockout', 'final'])) {
+      throw modelingFailure('INTEGRITY_ERROR', `Pinned skill plan changed or is missing for ${spec.assetId}: ${root}/skill-plan.json.`);
     }
     await validateSkillPlan(project, plan);
     return { ...plan, repairDimensions };

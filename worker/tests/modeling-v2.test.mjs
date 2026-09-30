@@ -72,6 +72,51 @@ test('online preflight suppresses third-party routing and caches one balance req
   assert.equal(builds,2);
 });
 
+test('accepted reference additions preserve pinned skills and prior budgets across a new run', async t => {
+  const f = await fixture(t), built = [], checked = [];
+  const job = { taskId: 'reference-revision', workspaceId: 'workspace', runId: 'first', modelingSpecs: [spec] };
+  const state = path.join(f.root, 'modeling-state');
+  const taskState = path.join(state, 'tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }));
+  const options = { ...f, job, signal: new AbortController().signal,
+    invocation: { args: [], command: process.execPath }, step: async () => {},
+    probe: async () => ({ blenderMcpAvailable: true, blenderVersion: 'test' }),
+    provider: { availability: async () => ({ enabled: false }) },
+    evaluate: async () => { throw new Error('Use local route'); },
+    build: async ({ directory, spec: current }) => {
+      built.push(current.referenceImages);
+      for (const name of ['source.blend', 'model.glb', 'recipe.py', 'asset-manifest.json']) {
+        await fs.writeFile(path.join(f.project, directory, name), 'fixture');
+      }
+      await atomicJson(path.join(f.project, directory, 'build-report.json'), { smallEditsOnly: true });
+    },
+    check: async ({ spec: current }) => { checked.push(current.referenceImages); return { passed: true, smallEditsOnly: true }; },
+  };
+  const pipeline = createModelingPipeline(options);
+  assert.equal((await pipeline.prepare()).assets[0].status, 'DCC_READY');
+  const pinFile = path.join(taskState, 'toolchain-meter.json'), pin = await readJson(pinFile);
+  const planFile = path.join(f.project, 'tools/modeling-skills', pin.skillLockHash, 'skill-plan.json');
+  const oldStates = (await fs.readdir(state)).filter(name => /^[a-f0-9]{20}$/.test(name)).map(name => path.join(state, name, 'state.json'));
+  assert.equal(oldStates.length, 1);
+  const retainedFiles = [pinFile, planFile, ...oldStates], before = await Promise.all(retainedFiles.map(hashFile));
+  await fs.writeFile(path.join(f.project, 'reference.png'), 'reference fixture');
+  const revised = { ...spec, referenceImages: ['reference.png'] };
+  await atomicJson(path.join(f.project, 'plan/modeling-request.json'), { reason: 'Add a supplied reference', assets: [revised] });
+  const result = await pipeline.prepare({ iteration: 2 });
+  assert.equal(result.assets[0].status, 'DCC_READY');
+  assert.deepEqual(result.assets[0].spec.referenceImages, revised.referenceImages);
+  assert.deepEqual(built, [[], revised.referenceImages]);
+  assert.ok(checked.some(images => images.includes('reference.png')));
+  assert.deepEqual(await Promise.all(retainedFiles.map(hashFile)), before);
+
+  const output = path.join(f.root, 'continued-run');
+  await fs.mkdir(output);
+  const resumed = createModelingPipeline({ ...options, output, job: { ...job, runId: 'continued' } });
+  assert.equal((await resumed.prepare({ iteration: 2 })).assets[0].reused, true);
+  assert.equal(built.length, 2);
+  assert.deepEqual(await Promise.all(retainedFiles.map(hashFile)), before);
+  assert.equal((await readJson(path.join(taskState, 'plan.json'))).revisions, 1);
+});
+
 test('unknown provider region cannot poll a legacy task or submit a second generation',async t=>{
   const f=await fixture(t),keyFile=path.join(f.root,'key.txt');await fs.writeFile(keyFile,'fixture');
   const stateFile=path.join(f.root,'provider.json'),ledgerFile=path.join(f.root,'ledger.json');let calls=0;
