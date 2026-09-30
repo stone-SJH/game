@@ -75,7 +75,8 @@ export async function stageMigration(workspace, plan) {
 }
 
 export async function activateMigration(workspace, plan, { maintenance, verifyTarget } = {}) {
-  if (!maintenance || maintenance.status !== 'READY' || !maintenance.token) throw new Error('Controller maintenance fence required');
+  if (!maintenance || !maintenance.token || !(maintenance.status === 'READY' ||
+      maintenance.status === 'COMMITTED' && maintenance.planHash === plan.planHash)) throw new Error('Controller maintenance fence required');
   if (plan.branches.some(branch => branch.revisionIds.length !== 1)) throw new Error('Controller revision mapping is missing or ambiguous');
   if (typeof verifyTarget !== 'function') throw new Error('Target release/runtime verifier required');
   await verifyTarget(plan);

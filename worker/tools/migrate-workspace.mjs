@@ -106,7 +106,10 @@ if (action === 'plan') {
     if (prior) await fs.rename(pointer, path.join(audit, `rolled-back-${Date.now()}.json`));
     console.log(JSON.stringify({ status: 'ROLLED_BACK_OFFLINE', note: 'Old runtime is not restored. Keep maintenance enabled until a compatible release is ready.' }));
   } else {
-    const ticket = await readJson(ticketFile);
+    // Reacquire the same maintenance identity on every apply. This also recovers
+    // a crash after remote release but before the local completion receipt.
+    const ticket = await controller({ action: 'begin', migrationId: `iteration-${context.taskId}` });
+    await atomicJson(ticketFile, ticket);
     const result = await activateMigration(workspace, plan, { maintenance: ticket?.maintenance, verifyTarget });
     const auth = { migrationId: ticket.maintenance.migrationId, token: ticket.maintenance.token, writeEpoch: ticket.maintenance.writeEpoch,
       planHash: plan.planHash, workerCommit: plan.targetCommit };

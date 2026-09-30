@@ -130,6 +130,7 @@ test('migration preserves legacy pins and budgets; activation is exact, fenced a
   await assert.rejects(activateMigration(workspace, plan), /maintenance fence/);
   const options = { maintenance: { status: 'READY', token: 'fixture' }, verifyTarget: async () => {} };
   await activateMigration(workspace, plan, options); await activateMigration(workspace, plan, options);
+  await activateMigration(workspace, plan, { ...options, maintenance: { status: 'COMMITTED', token: 'fixture', planHash: plan.planHash } });
   const resumed = await createProductionIterations({ project: path.join(workspace, 'project'), policy, job: { taskId, workspaceId, revisionId: 'revision-1' } });
   assert.equal(resumed.attempts, 10); assert.equal(resumed.iteration, 10);
   assert.equal(await modelingIteration(workspace, { revisionId: 'revision-1' }, 10), 10);

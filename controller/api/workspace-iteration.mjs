@@ -41,6 +41,7 @@ export async function workspaceMaintenance(db, worker, input) {
     if (!previous || previous.migrationId !== input.migrationId || previous.token !== input.token || String(workspace.write_epoch) !== String(input.writeEpoch)) throw problem(409, 'Stale maintenance identity.');
     if (input.action === 'commit') {
       if (!/^[a-f0-9]{64}$/.test(input.planHash || '') || !/^[a-f0-9]{40}$/.test(input.workerCommit || '')) throw problem(400, 'Verified migration receipt required.');
+      if (previous.status === 'COMMITTED' && (previous.planHash !== input.planHash || previous.workerCommit !== input.workerCommit)) throw problem(409, 'Another verified migration is already committed.');
       await client.query('UPDATE workspaces SET required_capabilities=$2,maintenance=$3 WHERE workspace_id=$1', [workspace.workspace_id, { workspaceIteration: 2 }, { ...previous, status: 'COMMITTED', planHash: input.planHash, workerCommit: input.workerCommit }]);
     } else if (input.action === 'release') {
       if (previous.status !== 'COMMITTED' || previous.planHash !== input.planHash) throw problem(409, 'Migration is not committed.');

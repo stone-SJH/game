@@ -44,7 +44,14 @@ test('revision/recovery identity, task-scoped blob reuse, maintenance fence and 
   const auth = { taskId: task.taskId, migrationId: 'migration', token: ticket.maintenance.token, writeEpoch: ticket.maintenance.writeEpoch,
     planHash: 'c'.repeat(64), workerCommit: 'b'.repeat(40) };
   await workspaceMaintenance(db, worker, { ...auth, action: 'commit' });
+  const committed = await workspaceMaintenance(db, worker, { taskId: task.taskId, migrationId: 'migration', action: 'begin' });
+  assert.equal(committed.maintenance.status, 'COMMITTED');
+  await assert.rejects(workspaceMaintenance(db, worker, { ...auth, action: 'commit', planHash: 'd'.repeat(64) }), error => error.status === 409);
   await workspaceMaintenance(db, worker, { ...auth, action: 'release' });
+  const replay = await workspaceMaintenance(db, worker, { taskId: task.taskId, migrationId: 'migration', action: 'begin' });
+  const replayAuth = { ...auth, token: replay.maintenance.token, writeEpoch: replay.maintenance.writeEpoch };
+  await workspaceMaintenance(db, worker, { ...replayAuth, action: 'commit' });
+  await workspaceMaintenance(db, worker, { ...replayAuth, action: 'release' });
   await registerWorker(db, worker, { protocol: 2, bootId, capabilities: {} }); assert.equal(await claim(), null);
   await registerWorker(db, worker, { protocol: 2, bootId, capabilities: { workspaceIteration: 2 } });
   const recovered = await claim(); assert.equal(recovered.revisionId, next.revisionId); assert.equal(recovered.runId, recovery.runId);
