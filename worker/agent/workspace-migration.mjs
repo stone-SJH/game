@@ -4,6 +4,14 @@ import { walkFiles, contentStore, checkpointEntry } from './workspace-storage.mj
 import { verifyEvidence, createExecutionStore } from './modeling-execution.mjs';
 import { readWorkspaceEpoch } from './workspace-epoch.mjs';
 import { readModelingState } from './modeling-state.mjs';
+import { loadModelingRecovery } from './modeling-recovery.mjs';
+
+export function migrationMappingsReady(branches) {
+  const assigned = new Set();
+  return branches.every(branch => branch.revisionIds.length > 0 &&
+    (branch.revisionIds.length === 1 || branch.identityMode === 'recovered') &&
+    branch.revisionIds.every(id => typeof id === 'string' && id && !assigned.has(id) && assigned.add(id)));
+}
 
 export async function planWorkspaceMigration({ workspace, taskId, targetCommit, targetHarness, runtime, policy, validatorHashes, revisions = [] }) {
   if (!/^[a-f0-9]{40}$/.test(targetCommit)) throw new Error('Migration requires a committed target release');
@@ -40,14 +48,39 @@ export async function planWorkspaceMigration({ workspace, taskId, targetCommit, 
     }
   }
   const branches = [];
+  const recovery = await loadModelingRecovery(path.join(workspace, 'project'), { taskId, workspaceId: context.workspaceId });
   for (const row of await walkFiles(path.join(workspace, 'production-state'))) {
     if (path.basename(row.file) !== 'iterations.json') continue;
     const value = await readJson(row.file, null, 64 * 1024 * 1024);
     const relative = path.relative(workspace, row.file).split(path.sep).join('/');
     source.push({ path: relative, sha256: await hashFile(row.file) });
     const objectiveHash = path.basename(path.dirname(row.file));
-    const matching = revisions.filter(revision => hashValue({ taskId, workspaceId: context.workspaceId, objective: revision.objective }) === objectiveHash);
-    branches.push({ path: relative, objectiveHash, revisionIds: [...new Set(matching.map(row => row.revision_id))], attempts: value.attempts, iteration: value.iteration });
+    const revisionMatches = revisions.filter(revision => hashValue({ taskId, workspaceId: context.workspaceId, revisionId: revision.revision_id }) === objectiveHash);
+    let matching = revisionMatches.length ? revisionMatches
+      : revisions.filter(revision => hashValue({ taskId, workspaceId: context.workspaceId, objective: revision.objective }) === objectiveHash);
+    let identityMode = revisionMatches.length ? 'revision' : 'objective';
+    if (recovery?.productionIdentity === objectiveHash) {
+      if (value.recovery?.id !== recovery.id) throw new Error('Recovered production identity changed');
+      identityMode = 'recovered';
+      matching = [];
+      // Recovery can share one ledger across several historical Continue runs.
+      // Bind only controller runs witnessed by hash-verified delivery reports.
+      for (const round of value.rounds) {
+        const reportFile = await localPath(workspace, path.relative(workspace, round.reportFile), { existing: true });
+        const evidence = round.evidence?.find(item => path.resolve(item.file) === reportFile);
+        if (!evidence) throw new Error('Recovered delivery has no report evidence');
+        await verifyEvidence([evidence]);
+        const report = await readJson(reportFile);
+        if (report.taskId !== taskId || report.workspaceId !== context.workspaceId || report.iteration !== round.iteration)
+          throw new Error('Recovered delivery ownership or iteration changed');
+        const runs = revisions.filter(revision => revision.run_id === report.runId);
+        if (new Set(runs.map(row => row.revision_id)).size !== 1) throw new Error('Recovered delivery has no unambiguous controller revision');
+        matching.push(...runs);
+        source.push({ path: path.relative(workspace, reportFile).split(path.sep).join('/'), sha256: evidence.sha256 });
+      }
+    }
+    branches.push({ path: relative, objectiveHash, identityMode, budgetMode: identityMode === 'revision' ? 'revision' : 'legacy',
+      revisionIds: [...new Set(matching.map(row => row.revision_id))], attempts: value.attempts, iteration: value.iteration });
   }
   const plan = { protocol: 2, taskId, workspaceId: context.workspaceId, targetCommit, targetHarness, runtime,
     runtimeReview: 'CONFIG_BASELINE_REPLACED: retain old pins; validate the explicitly recorded target runtime and precision profile.',
@@ -79,7 +112,7 @@ export async function stageMigration(workspace, plan) {
 export async function activateMigration(workspace, plan, { maintenance, verifyTarget } = {}) {
   if (!maintenance || !maintenance.token || !(maintenance.status === 'READY' ||
       maintenance.status === 'COMMITTED' && maintenance.planHash === plan.planHash)) throw new Error('Controller maintenance fence required');
-  if (plan.branches.some(branch => branch.revisionIds.length !== 1)) throw new Error('Controller revision mapping is missing or ambiguous');
+  if (!migrationMappingsReady(plan.branches)) throw new Error('Controller revision mapping is missing or ambiguous');
   if (typeof verifyTarget !== 'function') throw new Error('Target release/runtime verifier required');
   await verifyTarget(plan);
   await checkMigration(workspace, plan);

@@ -28,10 +28,15 @@ export async function compatiblePin(file, before, target) {
 
 // The controller revision is the budget identity. A monotonically allocated
 // display sequence prevents legacy numerical stage filenames from colliding.
+export function usesLegacyModelingBudget(epoch, revisionId) {
+  return Boolean(revisionId && epoch?.branches?.some(branch =>
+    branch.budgetMode !== 'revision' && branch.revisionIds.includes(revisionId)));
+}
+
 export async function modelingIteration(workspace, job, iteration) {
   if (!job.revisionId) return iteration; // Legacy controller remains supported.
   const epoch = await readWorkspaceEpoch(workspace);
-  if (epoch?.branches?.some(branch => branch.revisionIds.includes(job.revisionId))) return iteration;
+  if (usesLegacyModelingBudget(epoch, job.revisionId)) return iteration;
   const file = path.join(workspace, 'state-v2/revisions.json');
   const state = await readJson(file) || { protocol: 2, next: 100000, revisions: {} };
   const prior = state.revisions[job.revisionId];

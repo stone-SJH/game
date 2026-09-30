@@ -106,3 +106,29 @@ The external engine command is replaced with a controlled technical GAP: this pr
 validator can pass the migrated lock, preserve earlier calls, and return `ENGINE_PROVISIONAL`
 instead of terminating the round. It does not claim a fresh Unreal quality pass or launch a
 paid call. Newly generated concept images and Tripo bases are hash-checked and preserved too.
+
+## Upgrade recovered workspaces to revision-aware releases
+
+Use worker/tools/migrate-workspace.mjs plan|stage|apply|resume-check for the
+workspace-iteration release. The online plan fences controller dispatch and binds
+the exact committed worker and runtime. Review its mappingReady result before
+staging; do not delete unmatched ledgers or change their attempt counters.
+
+The migration recognizes objective-based legacy ledgers, revision-based ledgers
+created by a failed first run after deployment, and shared recovered ledgers.
+Recovered branches require the retained recovery identity and hash-verified
+delivery reports whose task, workspace, iteration and run match controller
+revision records. Multiple revisions may share that original recovered ledger;
+two different ledgers may not claim the same revision. Native revisions retain
+their revision-wide modeling budget and existing stage sequence after migration.
+
+Pause autostart, verify IDLE/empty queue/no journal, and stop the idle worker before
+staging or applying. Pin the current CLI/configuration with
+worker/deploy/pin-worker-runtime.ps1 before creating the final plan when the
+worker still uses a mutable global installation. Verify that runtime separately;
+never copy credentials into Git or print configuration contents. Stage a verified
+rollback snapshot, apply with the exact reviewed plan hash, and run resume-check
+from the committed deployment. Compare all original ledger/pin hashes and consumed
+budgets, restart via the Git deployment workflow, restore autostart, and verify a
+fresh monitor snapshot. Leave the task for the operator to Continue; readiness
+verification is not a production attempt or a quality acceptance result.
