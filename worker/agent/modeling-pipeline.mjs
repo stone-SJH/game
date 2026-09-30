@@ -21,7 +21,7 @@ import { recoveredModelingReferences } from './modeling-recovery.mjs';
 import { createModelingImageProvider } from './modeling-image-provider.mjs';
 import { prepareModelingConcept } from './modeling-concept.mjs';
 import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
-import { modelingIteration, readWorkspaceEpoch } from './workspace-epoch.mjs';
+import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from './workspace-epoch.mjs';
 import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
@@ -550,7 +550,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     }
     const decisionMirror = await localPath(project, `plan/modeling/${spec.assetId}/${short}/decision.json`);
     state.rounds ||= {};
-    const legacyRevision = (await readWorkspaceEpoch(path.dirname(project)))?.branches?.some(branch => branch.revisionIds.includes(job.revisionId));
+    const legacyRevision = usesLegacyModelingBudget(await readWorkspaceEpoch(path.dirname(project)), job.revisionId);
     const revisionBudget = job.revisionId && !legacyRevision;
     const priorRevisionRound = revisionBudget ? state.rounds[job.revisionId] : null;
     if (priorRevisionRound) priorRevisionRound.iteration ||= state.productionIteration;

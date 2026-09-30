@@ -190,8 +190,9 @@ test('a reviewed successor epoch preserves legacy maps and new revision budgets,
   const second = await planWorkspaceMigration({ ...options, targetCommit: 'b'.repeat(40), targetHarness: [{ file: 'harness', sha256: 'second' }],
     revisions: [...options.revisions, { revision_id: 'revision-new', objective: 'original' }] });
   assert.equal(second.previousEpoch.sha256, hashValue(originalEpoch));
-  assert.deepEqual(second.branches[0].revisionIds, ['revision-legacy']);
-  assert.equal(second.branches.length, 1);
+  assert.deepEqual(second.branches.find(branch => branch.path === legacyFile).revisionIds, ['revision-legacy']);
+  assert.equal(second.branches.length, 2);
+  assert.equal(second.branches.find(branch => branch.path === modernFile).budgetMode, 'revision');
   assert.equal(second.budgets.find(row => row.path === modernFile).attempts, 2);
   await stageMigration(workspace, second);
   const pointerFile = path.join(workspace, 'state-v2/current.json'), pointer = JSON.parse(await fs.readFile(pointerFile));

@@ -7,7 +7,7 @@ import { modelingToolHashes, pinToolchain } from '../agent/modeling-skill-routin
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { executionPolicy } from '../agent/modeling-execution.mjs';
 import { codexInvocation, readProductionPlans } from '../agent/production-harness.mjs';
-import { planWorkspaceMigration, checkMigration, stageMigration, activateMigration, verifyRollbackSource } from '../agent/workspace-migration.mjs';
+import { planWorkspaceMigration, checkMigration, stageMigration, activateMigration, verifyRollbackSource, migrationMappingsReady } from '../agent/workspace-migration.mjs';
 import { readWorkspaceEpoch } from '../agent/workspace-epoch.mjs';
 import { planContentGc, applyContentGc } from '../agent/workspace-gc.mjs';
 import { workspaceLock } from '../agent/workspace-lock.mjs';
@@ -62,7 +62,7 @@ if (action === 'plan') {
   await atomicJson(planFile, plan);
   await atomicJson(path.join(workspace, 'state-v2/migration-required.json'), { protocol: 2, planHash: plan.planHash, targetCommit: plan.targetCommit });
   console.log(JSON.stringify({ status: ticket ? 'READY' : 'OFFLINE_PLAN', planFile, planHash: plan.planHash, candidates: plan.candidates.length,
-    mappingReady: plan.branches.every(branch => branch.revisionIds.length === 1), budgets: plan.budgets.map(row => ({ path: row.path, calls: row.calls, attempts: row.attempts })) }));
+    mappingReady: migrationMappingsReady(plan.branches), budgets: plan.budgets.map(row => ({ path: row.path, calls: row.calls, attempts: row.attempts })) }));
 } else if (action === 'gc') {
   const file = path.join(audit, 'gc-plan.json');
   if (args.includes('--apply')) {
