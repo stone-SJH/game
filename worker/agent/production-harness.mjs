@@ -105,7 +105,7 @@ export async function collectQualityEvidence(project) {
   return evidence;
 }
 
-export async function inspectProduction(project) {
+export async function inspectProduction(project, stageIds = STAGES) {
   const files = await filesUnder(project);
   const projectFile = files.find(file => file.toLowerCase().endsWith('.uproject'));
   const scenePreview = files.find(file => /^scene-preview\.(png|jpe?g|webp)$/i.test(path.basename(file)));
@@ -117,7 +117,7 @@ export async function inspectProduction(project) {
     playtestEvidence: path.join(project, 'acceptance', 'playtest-evidence.json'),
     acceptanceReport: path.join(project, 'acceptance', 'acceptance-report.json'),
   };
-  for (const stage of STAGES) {
+  for (const stage of stageIds) {
     required[`${stage}-report`] = path.join(project, 'stages', stage, 'stage-report.json');
     required[`${stage}-evidence`] = path.join(project, 'stages', stage, 'evidence.json');
   }
@@ -300,7 +300,42 @@ async function removeCodexTempDirectory(directory) {
   await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
 }
 
+function productionStageIds(value, name, job) {
+  const fail = reason => { throw new Error(`Cannot resume invalid production state: ${name} (${reason})`); };
+  if (value?.protocol !== 1 || value.taskId !== job.taskId ||
+      value.workspaceId && job.workspaceId && value.workspaceId !== job.workspaceId) fail('task/workspace or protocol mismatch');
+  if (!Array.isArray(value.stages) || !value.stages.length || value.stages.length > 256) fail('invalid stages array');
+  const ids = value.stages.map(entry => entry?.id);
+  if (ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id))) fail('invalid stage id');
+  if (new Set(ids).size !== ids.length) fail('duplicate stage id');
+  if (STAGES.some(id => !ids.includes(id))) fail('missing required stage');
+  return ids;
+}
+
+// Shared by startup and the read-only migration preflight. Stage templates may
+// be extended or reordered; their identity, counters and evidence must survive.
+export async function readProductionPlans(project, job) {
+  const values = {};
+  let stageIds;
+  for (const name of ['production-plan.json', 'stage-manifest.json']) {
+    const value = await readJson(await localPath(project, `plan/${name}`));
+    if (value !== null) {
+      const ids = productionStageIds(value, name, job);
+      if (stageIds && (ids.length !== stageIds.length || ids.some(id => !stageIds.includes(id)))) {
+        throw new Error(`Cannot resume invalid production state: ${name} (stage identities differ from production-plan.json)`);
+      }
+      stageIds ||= ids;
+    }
+    values[name] = value;
+  }
+  if (Boolean(values['production-plan.json']) !== Boolean(values['stage-manifest.json'])) {
+    throw new Error('Cannot resume invalid production state: production plan/manifest pair is incomplete; restore the missing state.');
+  }
+  return { values, stageIds: stageIds || [...STAGES], existing: Boolean(stageIds) };
+}
+
 export async function initializeProductionPlans(project, job, context) {
+  const { values, stageIds } = await readProductionPlans(project, job);
   const seeds = {
     'production-plan.json': {
       protocol: 1, taskId: job.taskId, runId: job.runId, objective: job.objective,
@@ -315,23 +350,21 @@ export async function initializeProductionPlans(project, job, context) {
   const writes = [];
   for (const [name, seed] of Object.entries(seeds)) {
     const file = await localPath(project, `plan/${name}`);
-    const previous = await readJson(file);
-    if (previous?.taskId === job.taskId) {
-      if (previous.protocol !== 1 || !Array.isArray(previous.stages) ||
-          previous.stages.length !== STAGES.length || previous.stages.some((entry, index) => entry.id !== STAGES[index])) {
-        throw new Error(`Cannot resume invalid production state: ${name}`);
-      }
+    const previous = values[name];
+    if (previous) {
       // Update the run envelope only: accepted evidence and consumed attempts survive resumption.
       writes.push([file, { ...previous, runId: job.runId }]);
     } else writes.push([file, seed]);
   }
   for (const [file, value] of writes) await writeJson(file, value);
+  return stageIds;
 }
 
 export async function runProductionHarness({ job, project, output, signal, step, unreal, requirePublishableResult = false, reportProgress = async () => {}, onIterationPackage = async () => {}, onIterationReview = async () => {}, onModelingReport = async () => {} }) {
   if ((job.payload?.references?.length || 0) !== (job.referenceFiles?.length || 0)) throw new Error('Reference files must be downloaded and verified before production starts.');
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
+  const productionState = await readProductionPlans(project, job);
   const qualityCriteria = extractQualityCriteria(job);
   const qualitySettings = qualityReviewSettings();
   const iterations = await createProductionIterations({ job, project, policy: qualitySettings });
@@ -349,13 +382,13 @@ export async function runProductionHarness({ job, project, output, signal, step,
     createdAt: new Date().toISOString(),
     workspaceRoot: project,
     references: job.referenceFiles || [],
-    stages: STAGES,
+    stages: productionState.stageIds,
     requiredOutputs: ['.uproject', 'scene-preview.png', 'package/Windows/<ProjectName>.exe', 'workspace-manifest.json', 'provenance/asset-manifest.json', 'plan/stage-manifest.json', 'acceptance/playtest-evidence.json', 'acceptance/acceptance-report.json'],
     qualityCriteria,
     qualityReview: { enabled: qualityCriteria.length > 0, maxAdditionalIterations: qualitySettings.maxIterations },
   };
-  await writeJson(path.join(project, 'plan', 'production-context.json'), context);
   await initializeProductionPlans(project, job, context);
+  await writeJson(path.join(project, 'plan', 'production-context.json'), context);
 
   const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
   const skillCandidates = [process.env.YAHAHA_PRODUCTION_SKILL, path.resolve(moduleRoot, '..', '..', 'skills', 'yahahagame-production', 'SKILL.md'), path.join(process.env.USERPROFILE || '', '.codex', 'skills', 'yahahagame-production', 'SKILL.md')].filter(Boolean);
@@ -547,7 +580,14 @@ export async function runProductionHarness({ job, project, output, signal, step,
       }
 
       stage = 'deliverables';
-      const deliverables = await inspectProduction(project);
+      // Include stages added during this round without dropping any prior stage.
+      const currentPlans = await observe('production-plan', () => readProductionPlans(project, job));
+      const stageIds = [...new Set([...context.stages, ...(currentPlans?.stageIds || [])])];
+      if (currentPlans && context.stages.some(id => !currentPlans.stageIds.includes(id))) {
+        await observe('production-plan', async () => { throw new Error('Production removed a previously planned stage; retain its requirements and evidence.'); });
+      }
+      context.stages = stageIds;
+      const deliverables = await inspectProduction(project, stageIds);
       const hasPackage = await isFile(deliverables.files.projectFile) && await isFile(deliverables.files.packageFile);
       if (!hasPackage) await observe(stage, async () => { throw new Error(`Production deliverables missing: ${deliverables.missing.join(', ')}. Preserve the project draft and repair packaging next iteration; no playable delivery is claimed.`); });
       if (deliverables.missing.length) issues.push({ stage: 'deliverables', status: 'GAP', reason: `Missing supporting evidence: ${deliverables.missing.join(', ')}` });
@@ -610,13 +650,14 @@ export async function runProductionHarness({ job, project, output, signal, step,
         if (stageManifest.protocol !== 1 || stageManifest.taskId !== job.taskId || stageManifest.runId !== job.runId) {
           throw new Error(`Stage manifest identity does not match the current task/run (${job.taskId}/${job.runId}).`);
         }
-        if (!Array.isArray(stageManifest.stages) || stageManifest.stages.length !== STAGES.length ||
-            stageManifest.stages.some((entry, index) => entry.id !== STAGES[index] || entry.status !== 'ACCEPTED')) {
+        const manifestIds = productionStageIds(stageManifest, 'stage-manifest.json', job);
+        if (manifestIds.length !== stageIds.length || stageIds.some(id => !manifestIds.includes(id)) ||
+            stageManifest.stages.some(entry => entry.status !== 'ACCEPTED')) {
           throw Object.assign(new Error('Stage manifest retains provisional or missing stages.'), {
-            qualityScore: Math.round(100 * STAGES.filter(id => stageManifest.stages?.some(row => row.id === id && row.status === 'ACCEPTED')).length / STAGES.length) });
+            qualityScore: Math.round(100 * stageIds.filter(id => stageManifest.stages?.some(row => row.id === id && row.status === 'ACCEPTED')).length / stageIds.length) });
         }
       });
-      for (const stageId of STAGES) {
+      for (const stageId of stageIds) {
         stage = `stage-evidence:${stageId}`;
         await observe(stage, async () => {
           const reportPath = deliverables.files[`${stageId}-report`];

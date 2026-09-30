@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { contentStore, requireSpace, walkFiles } from '../agent/workspace-storage.mjs';
 import { recoverService, failureKind } from '../agent/service-recovery.mjs';
-import { modelingIteration, compatiblePin } from '../agent/workspace-epoch.mjs';
+import { modelingIteration, compatiblePin, readWorkspaceEpoch } from '../agent/workspace-epoch.mjs';
 import { atomicJson, hashValue, hashFile } from '../agent/modeling-io.mjs';
 import { planContentGc, applyContentGc } from '../agent/workspace-gc.mjs';
 import { planWorkspaceMigration, stageMigration, activateMigration, checkMigration } from '../agent/workspace-migration.mjs';
@@ -142,7 +142,44 @@ test('migration preserves legacy pins and budgets; activation is exact, fenced a
   const epochFile = path.join(workspace, 'state-v2/epochs', plan.planHash, 'epoch.json');
   const epoch = JSON.parse(await fs.readFile(epochFile));
   epoch.pins[relative].after = 'forged'; await atomicJson(epochFile, epoch);
-  await assert.rejects(activateMigration(workspace, plan, options), /Staged epoch differs/);
+  await assert.rejects(activateMigration(workspace, plan, options), /Staged epoch differs|epoch manifest changed/);
   await fs.appendFile(path.join(workspace, relative), ' ');
   await assert.rejects(checkMigration(workspace, plan), /source changed/);
+});
+
+test('a reviewed successor epoch preserves legacy maps and new revision budgets, and rejects stale predecessors', async t => {
+  const workspace = await fixture(t), taskId = 'task', workspaceId = path.basename(workspace);
+  const relative = 'modeling-state/tasks/fixture/toolchain-runtime.json';
+  const pin = { harnessHashes: [{ file: 'harness', sha256: 'old' }], runtime: { version: 'fixed' } };
+  await atomicJson(path.join(workspace, relative), pin);
+  await atomicJson(path.join(workspace, 'project/plan/production-context.json'), { taskId, workspaceId });
+  const legacyFile = `production-state/${hashValue({ taskId, workspaceId, objective: 'original' })}/iterations.json`;
+  await atomicJson(path.join(workspace, legacyFile), { protocol: 1, attempts: 8, iteration: 8 });
+  const options = { workspace, taskId, targetCommit: 'a'.repeat(40), targetHarness: [{ file: 'harness', sha256: 'first' }],
+    runtime: pin.runtime, policy: {}, validatorHashes: [], revisions: [{ revision_id: 'revision-legacy', objective: 'original' }] };
+  const activate = { maintenance: { status: 'READY', token: 'verified' }, verifyTarget: async () => {} };
+  const first = await planWorkspaceMigration(options);
+  await stageMigration(workspace, first); await activateMigration(workspace, first, activate);
+  const originalEpoch = await readWorkspaceEpoch(workspace);
+  const modernFile = `production-state/${hashValue({ taskId, workspaceId, revisionId: 'revision-new' })}/iterations.json`;
+  const modern = { protocol: 2, attempts: 2, iteration: 1, rounds: [] };
+  await atomicJson(path.join(workspace, modernFile), modern);
+  const second = await planWorkspaceMigration({ ...options, targetCommit: 'b'.repeat(40), targetHarness: [{ file: 'harness', sha256: 'second' }],
+    revisions: [...options.revisions, { revision_id: 'revision-new', objective: 'original' }] });
+  assert.equal(second.previousEpoch.sha256, hashValue(originalEpoch));
+  assert.deepEqual(second.branches[0].revisionIds, ['revision-legacy']);
+  assert.equal(second.branches.length, 1);
+  assert.equal(second.budgets.find(row => row.path === modernFile).attempts, 2);
+  await stageMigration(workspace, second);
+  const pointerFile = path.join(workspace, 'state-v2/current.json'), pointer = JSON.parse(await fs.readFile(pointerFile));
+  await fs.rename(pointerFile, pointerFile + '.retained');
+  await assert.rejects(activateMigration(workspace, second, activate), /Previous epoch changed/);
+  await atomicJson(pointerFile, pointer);
+  await activateMigration(workspace, second, activate); await activateMigration(workspace, second, activate);
+  assert.equal((await readWorkspaceEpoch(workspace)).planHash, second.planHash);
+  assert.equal(await compatiblePin(path.join(workspace, relative), pin, second.pins[relative].target), true);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(workspace, modernFile))), modern);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(workspace, relative))), pin);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(workspace, 'state-v2/epochs', first.planHash, 'epoch.json'))), originalEpoch);
+  await assert.rejects(activateMigration(workspace, first, activate), /Another epoch is already active/);
 });
