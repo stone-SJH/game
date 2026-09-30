@@ -99,6 +99,26 @@ test('checkpoint rejects workspace escapes, stale hashes and writes a distinct i
   assert.notEqual(info.file,'source.blend');assert.equal(await hashFile(path.join(f.project,info.file)),hash);
 });
 
+test('resumed Blender server appends receipts and preserves an unconfirmed shutdown fence',async t=>{
+  const f=await fixture(t),source=path.join(f.project,'source.blend'),receiptFile=path.join(f.output,'receipt.json');
+  await fs.writeFile(source,'blend fixture');
+  const prior={tool:'blender_run_python',exitCode:0,stopConfirmed:true,scriptFile:'retained-recipe.py'};
+  await atomicJson(receiptFile,{protocol:1,transport:'mcp-stdio',calls:[prior]});
+  async function checkpoint() {
+    const input=new PassThrough(),output=new PassThrough(),messages=[];
+    output.on('data',chunk=>messages.push(JSON.parse(chunk.toString())));
+    const server=serveBlender({workspace:f.project,blender:'unused',receiptFile,input,output});
+    input.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'blender_checkpoint',arguments:{source:'source.blend',expectedHash:await hashFile(source),stage:'final'}}})+'\n');
+    await server.finished();input.end();return messages[0];
+  }
+  assert.ok(!(await checkpoint()).result.isError);
+  assert.deepEqual((await readJson(receiptFile)).calls[0],prior);
+  assert.equal((await readJson(receiptFile)).calls.length,2);
+  await atomicJson(receiptFile,{protocol:1,calls:[{...prior,stopConfirmed:false}]});
+  assert.equal((await checkpoint()).result.isError,true);
+  assert.equal((await readJson(receiptFile)).calls[0].stopConfirmed,false);
+});
+
 test('DCC_READY cannot become ENGINE_READY from missing or invented import evidence',async t=>{
   const f=await fixture(t);let steps=0;
   await assert.rejects(validateUnrealModels({...f,summary:{assets:[{assetId:'a',contract:{runtime:{engine:'unreal'}}}]},step:async()=>steps++}),/import mapping/);

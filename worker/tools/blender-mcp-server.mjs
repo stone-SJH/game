@@ -24,11 +24,20 @@ export const blenderTools = [
 
 export function serveBlender({ workspace, blender, receiptFile, input = process.stdin, output = process.stdout }) {
   const pending = new Map(); let queue = Promise.resolve(), calls = [];
+  let receiptLoaded = false;
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   const send = value => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...value })}\n`);
   const stop = () => { for (const controller of pending.values()) controller.abort(); };
   lines.on('close', stop);
   async function call(name, args, signal) {
+    if (!receiptLoaded) {
+      const prior = receiptFile ? await readJson(receiptFile, null, 32 * 1024 * 1024) : null;
+      if (prior && (!Array.isArray(prior.calls) || prior.calls.some(call => call.stopConfirmed !== true))) {
+        throw new Error('Previous Blender receipt is invalid or process stop is unconfirmed.');
+      }
+      calls = prior?.calls || [];
+      receiptLoaded = true;
+    }
     let commandArgs, reportFile, sourceHash, source, scriptFile;
     const definition = blenderTools.find(t => t.name === name);
     if (!definition || !args || Array.isArray(args) || Object.keys(args).some(k => !Object.hasOwn(definition.inputSchema.properties, k))) throw new Error('Invalid Blender tool arguments.');

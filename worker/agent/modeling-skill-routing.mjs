@@ -88,7 +88,7 @@ export async function modelingToolHashes() {
     'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs', 'agent/stage-failure.mjs', 'agent/artifact-publication.mjs',
     'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs',
     'agent/workspace-epoch.mjs', 'agent/workspace-storage.mjs', 'agent/workspace-lock.mjs', 'agent/service-recovery.mjs', 'agent/stage-cache.mjs',
-    'agent/agent.mjs', 'agent/progress-preview.mjs', 'agent/workspace-gc.mjs', 'agent/workspace-migration.mjs',
+    'agent/agent.mjs', 'agent/codex-service-session.mjs', 'agent/progress-preview.mjs', 'agent/workspace-gc.mjs', 'agent/workspace-migration.mjs',
     '../skills/yahahagame-production/SKILL.md', '../skills/yahahagame-production/references/production-contract.md'];
   for (const directory of ['agent', 'tools']) {
     for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {
