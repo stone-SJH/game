@@ -63,6 +63,31 @@ test('migration maps recovered run evidence and native revisions without resetti
   assert.equal(await resumed.reserveAttempt(), 2);
 });
 
+test('successor migration preserves verified recovered and native mappings after protocol upgrades', async t => {
+  const f = await recoveredFixture(t), activate = { maintenance: { status: 'READY', token: 'fixture' }, verifyTarget: async () => {} };
+  const first = await planWorkspaceMigration(f.options);
+  await stageMigration(f.workspace, first); await activateMigration(f.workspace, first, activate);
+  const retained = await readJson(f.recoveredFile);
+  // Normal completion upgrades an old ledger without changing its identity.
+  retained.protocol = 2; retained.attempts++; retained.iteration++;
+  await atomicJson(f.recoveredFile, retained);
+  const before = await Promise.all([f.recoveredFile, f.nativeFile].map(hashFile));
+  const second = await planWorkspaceMigration({ ...f.options, targetCommit: 'b'.repeat(40), revisions: [] });
+  assert.deepEqual(second.branches.find(branch => branch.identityMode === 'recovered').revisionIds, ['revision-1', 'revision-2']);
+  assert.equal(second.branches.find(branch => branch.identityMode === 'revision').budgetMode, 'revision');
+  assert.equal(second.budgets.find(row => row.path.endsWith(first.branches.find(branch => branch.identityMode === 'recovered').path)).attempts, 10);
+  await stageMigration(f.workspace, second); await activateMigration(f.workspace, second, activate);
+  const epoch = await readWorkspaceEpoch(f.workspace);
+  assert.equal(usesLegacyModelingBudget(epoch, 'revision-2'), true);
+  assert.equal(usesLegacyModelingBudget(epoch, 'revision-3'), false);
+  for (const [revisionId, attempts, iteration] of [['revision-2', 10, 4], ['revision-3', 1, 1]]) {
+    const resumed = await createProductionIterations({ project: f.project, policy: f.policy,
+      job: { taskId: f.taskId, workspaceId: f.workspaceId, revisionId } });
+    assert.equal(resumed.attempts, attempts); assert.equal(resumed.iteration, iteration);
+  }
+  assert.deepEqual(await Promise.all([f.recoveredFile, f.nativeFile].map(hashFile)), before);
+});
+
 test('recovered revision mapping rejects changed evidence and records report hashes in its plan', async t => {
   const f = await recoveredFixture(t), plan = await planWorkspaceMigration(f.options);
   assert.equal(plan.source.filter(row => row.path.endsWith('iteration-result.json')).length, 2);

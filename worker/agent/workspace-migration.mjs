@@ -17,6 +17,8 @@ export async function planWorkspaceMigration({ workspace, taskId, targetCommit, 
   if (!/^[a-f0-9]{40}$/.test(targetCommit)) throw new Error('Migration requires a committed target release');
   const context = await readJson(path.join(workspace, 'project/plan/production-context.json'));
   if (context?.taskId !== taskId || context.workspaceId !== path.basename(workspace)) throw new Error('Workspace ownership mismatch');
+  const previous = await readWorkspaceEpoch(workspace);
+  if (previous && previous.taskId !== taskId) throw new Error('Previous epoch belongs to another task');
   const pins = {}, source = [], candidates = [], budgets = [];
   for (const row of await walkFiles(path.join(workspace, 'modeling-state'))) {
     if (!row.path.endsWith('.json')) continue;
@@ -55,17 +57,26 @@ export async function planWorkspaceMigration({ workspace, taskId, targetCommit, 
     const relative = path.relative(workspace, row.file).split(path.sep).join('/');
     source.push({ path: relative, sha256: await hashFile(row.file) });
     const objectiveHash = path.basename(path.dirname(row.file));
+    const inherited = previous?.branches.find(branch => branch.path === relative);
     const revisionMatches = revisions.filter(revision => hashValue({ taskId, workspaceId: context.workspaceId, revisionId: revision.revision_id }) === objectiveHash);
+    // Retain every native budget. Known mappings remain explicit so recovered
+    // branches cannot claim the same revision; unknown native ledgers need no map.
+    if (value.protocol === 2) {
+      budgets.push({ path: relative, attempts: value.attempts, iteration: value.iteration, sha256: await hashFile(row.file) });
+      if (!inherited && recovery?.productionIdentity !== objectiveHash && !revisionMatches.length) continue;
+    }
     let matching = revisionMatches.length ? revisionMatches
       : revisions.filter(revision => hashValue({ taskId, workspaceId: context.workspaceId, objective: revision.objective }) === objectiveHash);
-    let identityMode = revisionMatches.length ? 'revision' : 'objective';
+    let identityMode = inherited?.identityMode || (revisionMatches.length ? 'revision' : 'objective');
     if (recovery?.productionIdentity === objectiveHash) {
       if (value.recovery?.id !== recovery.id) throw new Error('Recovered production identity changed');
       identityMode = 'recovered';
       matching = [];
       // Recovery can share one ledger across several historical Continue runs.
       // Bind only controller runs witnessed by hash-verified delivery reports.
-      for (const round of value.rounds) {
+      // A verified predecessor already fixes ownership, including rounds added
+      // after migration. Its digest is checked again before staging/activation.
+      for (const round of inherited ? [] : value.rounds) {
         const reportFile = await localPath(workspace, path.relative(workspace, round.reportFile), { existing: true });
         const evidence = round.evidence?.find(item => path.resolve(item.file) === reportFile);
         if (!evidence) throw new Error('Recovered delivery has no report evidence');
@@ -79,12 +90,14 @@ export async function planWorkspaceMigration({ workspace, taskId, targetCommit, 
         source.push({ path: path.relative(workspace, reportFile).split(path.sep).join('/'), sha256: evidence.sha256 });
       }
     }
-    branches.push({ path: relative, objectiveHash, identityMode, budgetMode: identityMode === 'revision' ? 'revision' : 'legacy',
-      revisionIds: [...new Set(matching.map(row => row.revision_id))], attempts: value.attempts, iteration: value.iteration });
+    branches.push({ path: relative, objectiveHash, identityMode, budgetMode: inherited?.budgetMode || (identityMode === 'revision' ? 'revision' : 'legacy'),
+      revisionIds: inherited?.revisionIds || [...new Set(matching.map(row => row.revision_id))], attempts: value.attempts, iteration: value.iteration });
   }
   const plan = { protocol: 2, taskId, workspaceId: context.workspaceId, targetCommit, targetHarness, runtime,
     runtimeReview: 'CONFIG_BASELINE_REPLACED: retain old pins; validate the explicitly recorded target runtime and precision profile.',
-    pins, source, candidates, budgets, branches, revisions, createdAt: new Date().toISOString() };
+    pins, source, candidates, budgets, branches, revisions,
+    ...(previous ? { previousEpoch: { planHash: previous.planHash, targetCommit: previous.targetCommit, sha256: hashValue(previous) } } : {}),
+    createdAt: new Date().toISOString() };
   return { ...plan, planHash: hashValue(plan) };
 }
 
@@ -97,12 +110,14 @@ export async function checkMigration(workspace, plan) {
 }
 
 export async function stageMigration(workspace, plan) {
+  await verifyPreviousEpoch(workspace, plan);
   await checkMigration(workspace, plan);
   const store = contentStore(workspace);
   const rollback = await store.snapshot(path.join(workspace, 'project'), checkpointEntry);
   const directory = path.join(workspace, 'state-v2/epochs', plan.planHash);
   const epoch = { protocol: 2, status: 'VERIFIED', planHash: plan.planHash, taskId: plan.taskId, targetCommit: plan.targetCommit,
     pins: plan.pins, branches: plan.branches, legacyBudgets: plan.budgets, rollbackSnapshot: rollback.id, createdAt: new Date().toISOString(),
+    ...(plan.previousEpoch ? { previousEpoch: plan.previousEpoch } : {}),
     legacyRoot: 'modeling-state', storageMode: 'legacy-ledger-with-versioned-toolchain-overlay' };
   await atomicJson(path.join(directory, 'epoch.json'), epoch);
   await atomicJson(path.join(directory, 'plan.json'), plan);
@@ -115,19 +130,28 @@ export async function activateMigration(workspace, plan, { maintenance, verifyTa
   if (!migrationMappingsReady(plan.branches)) throw new Error('Controller revision mapping is missing or ambiguous');
   if (typeof verifyTarget !== 'function') throw new Error('Target release/runtime verifier required');
   await verifyTarget(plan);
+  await verifyPreviousEpoch(workspace, plan);
   await checkMigration(workspace, plan);
   const file = path.join(workspace, 'state-v2/epochs', plan.planHash, 'epoch.json');
   const epoch = await readJson(file);
   if (epoch?.planHash !== plan.planHash || epoch.status !== 'VERIFIED') throw new Error('Stage and verify the complete epoch first');
   if (epoch.protocol !== 2 || epoch.taskId !== plan.taskId || epoch.targetCommit !== plan.targetCommit ||
       hashValue(epoch.pins) !== hashValue(plan.pins) || hashValue(epoch.branches) !== hashValue(plan.branches) ||
+      hashValue(epoch.previousEpoch || null) !== hashValue(plan.previousEpoch || null) ||
       hashValue(epoch.legacyBudgets) !== hashValue(plan.budgets)) throw new Error('Staged epoch differs from the reviewed migration plan');
   await verifyRollbackSource(workspace, epoch);
-  const current = await readWorkspaceEpoch(workspace);
-  if (current && current.planHash !== plan.planHash) throw new Error('Another epoch is already active');
   await atomicJson(path.join(workspace, 'state-v2/current.json'), { protocol: 2, path: path.relative(workspace, file).split(path.sep).join('/'), sha256: await hashFile(file),
     maintenance, activatedAt: new Date().toISOString() });
   return { status: 'COMMITTED', planHash: plan.planHash };
+}
+
+async function verifyPreviousEpoch(workspace, plan) {
+  const current = await readWorkspaceEpoch(workspace);
+  if (current?.planHash === plan.planHash) return; // Idempotent activation/release retry.
+  if (plan.previousEpoch) {
+    if (!current || current.planHash !== plan.previousEpoch.planHash || current.targetCommit !== plan.previousEpoch.targetCommit ||
+        hashValue(current) !== plan.previousEpoch.sha256) throw new Error('Previous epoch changed after planning');
+  } else if (current) throw new Error('Another epoch is already active; plan an explicit successor migration');
 }
 
 export async function verifyRollbackSource(workspace, epoch) {

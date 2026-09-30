@@ -6,7 +6,7 @@ import { atomicJson, hashFile, hashValue, readJson, repositoryRoot } from '../ag
 import { modelingToolHashes, pinToolchain } from '../agent/modeling-skill-routing.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { executionPolicy } from '../agent/modeling-execution.mjs';
-import { codexInvocation } from '../agent/production-harness.mjs';
+import { codexInvocation, readProductionPlans } from '../agent/production-harness.mjs';
 import { planWorkspaceMigration, checkMigration, stageMigration, activateMigration, verifyRollbackSource, migrationMappingsReady } from '../agent/workspace-migration.mjs';
 import { readWorkspaceEpoch } from '../agent/workspace-epoch.mjs';
 import { planContentGc, applyContentGc } from '../agent/workspace-gc.mjs';
@@ -79,12 +79,14 @@ if (action === 'plan') {
   if (!epoch) throw new Error('Migration is not active');
   const plan = await readJson(path.join(workspace, 'state-v2/epochs', epoch.planHash, 'plan.json'), null, 64 * 1024 * 1024);
   await verifyTarget(plan);
+  const production = await readProductionPlans(project, context);
+  if (!production.existing) throw new Error('Cannot resume without retained production plans');
   for (const [relative, binding] of Object.entries(epoch.pins)) {
     const file = path.join(workspace, relative);
     await pinToolchain(path.dirname(file), path.basename(file).slice('toolchain-'.length, -5), binding.target);
   }
   const result = { status: 'READY_FOR_CONTINUE', planHash: epoch.planHash, targetCommit: epoch.targetCommit,
-    realContinueValidated: false, legacyPinsPreserved: true };
+    realContinueValidated: false, legacyPinsPreserved: true, productionStages: production.stageIds };
   await atomicJson(path.join(audit, 'resume-check.json'), result); console.log(JSON.stringify(result));
 } else {
   await quiescent();
