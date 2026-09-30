@@ -128,9 +128,8 @@ test('a visually deficient asset hands off its best usable result, other assets 
 test('all author executions failing do not mislabel a reuse quality gap', async t => {
   const f = await fixture(t, [validReview('PASS')], true);
   f.options.build = async () => { f.counts.author++; throw new Error('author service unavailable'); };
-  const result = await createModelingPipeline(f.options).prepare();
-  assert.equal(result.assets[0].status, 'NO_USABLE_ARTIFACT');
-  assert.deepEqual(f.counts, { author: 5, technical: 0, review: 0 });
+  await assert.rejects(createModelingPipeline(f.options).prepare(), error => error.kind === 'SERVICE_TRANSIENT');
+  assert.deepEqual(f.counts, { author: 1, technical: 0, review: 0 });
 });
 
 test('exhausted technical checks retain an asset gap, finish other assets and retry only next round', async t => {
@@ -241,10 +240,39 @@ test('Unreal visual retries and resumed acceptance reuse the original capture an
   const { options, counts } = await engineFixture(t);
   assert.equal((await validateUnrealModels(options)).status, 'ENGINE_READY');
   assert.equal((await validateUnrealModels({ ...options, attempt: 2 })).status, 'ENGINE_READY');
+  assert.equal((await validateUnrealModels({ ...options, attempt: 1, job: { revisionId: 'new-revision', runId: 'new-run' } })).status, 'ENGINE_READY');
   assert.equal(counts.technical, 1); assert.equal(counts.reviews, 3);
 });
 
-test('Unreal exhausted visual review retains a gap, checks other assets, and recovers only in the next round', async t => {
+test('confirmed service failure settles the author reservation without resetting its count', async t => {
+  const f = await fixture(t, [validReview('PASS')]);
+  f.options.job.revisionId = 'first-revision';
+  const build = f.options.build;
+  f.options.build = async () => { f.counts.author++; throw Object.assign(new Error('HTTP 503 upstream'), { stopConfirmed: true }); };
+  await assert.rejects(createModelingPipeline(f.options).prepare(), error => error.kind === 'SERVICE_TRANSIENT');
+  const directories = await fs.readdir(path.join(f.root, 'modeling-state'));
+  const stateDirectory = directories.find(name => /^[a-f0-9]{20}$/.test(name));
+  const stateFile = path.join(f.root, 'modeling-state', stateDirectory, 'state.json');
+  const failed = await readJson(stateFile);
+  assert.equal(failed.pending, null); assert.equal(failed.attempts.blender_direct, 1);
+  f.options.build = build; f.options.job.revisionId = 'next-revision';
+  assert.equal((await createModelingPipeline(f.options).prepare()).assets[0].status, 'DCC_READY');
+  assert.equal((await readJson(stateFile)).attempts.blender_direct, 2);
+});
+
+test('a scoped revision repair improves an accepted source once and never carries into an unrelated continuation', async t => {
+  const f = await fixture(t, [validReview('PASS')]); f.options.job.revisionId = 'revision-a';
+  await createModelingPipeline(f.options).prepare();
+  await atomicJson(path.join(f.options.project, 'plan/modeling-repair-request.json'), { revisionId: 'revision-a', assetIds: ['fixture'], reason: 'Refine edge detail' });
+  await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(f.counts.author, 2);
+  await createModelingPipeline(f.options).prepare({ iteration: 3 });
+  f.options.job.revisionId = 'revision-b';
+  await createModelingPipeline(f.options).prepare();
+  assert.equal(f.counts.author, 2);
+});
+
+test('Unreal review outages keep their service identity and reuse successful technical evidence', async t => {
   const { options, counts, pass } = await engineFixture(t, ['fixture', 'second']);
   let recovered = false, failedCalls = 0;
   options.allowProvisional = true;
@@ -254,15 +282,13 @@ test('Unreal exhausted visual review retains a gap, checks other assets, and rec
     if (asset.assetId === 'fixture' && !recovered) { failedCalls++; throw new Error('review service unavailable'); }
     return pass;
   };
-  const first = await validateUnrealModels(options);
-  assert.equal(first.status, 'ENGINE_PROVISIONAL'); assert.equal(first.score, 50);
-  assert.deepEqual(first.assets.map(asset => asset.quality.accepted), [false, true]);
-  assert.equal(failedCalls, 4);
-  await validateUnrealModels({ ...options, attempt: 2 });
-  assert.equal(counts.reviews, 5); assert.equal(counts.technical, 1);
+  await assert.rejects(validateUnrealModels(options), error => error.kind === 'SERVICE_TRANSIENT');
+  assert.equal(failedCalls, 1);
+  await assert.rejects(validateUnrealModels({ ...options, attempt: 2 }), error => error.kind === 'SERVICE_TRANSIENT');
+  assert.equal(counts.reviews, 1); assert.equal(counts.technical, 1);
   recovered = true;
   assert.equal((await validateUnrealModels({ ...options, iteration: 2, attempt: 3 })).status, 'ENGINE_READY');
-  assert.equal(counts.reviews, 7); assert.equal(counts.technical, 2);
+  assert.equal(counts.reviews, 3); assert.equal(counts.technical, 1);
 });
 
 test('Unreal technical service exhaustion cannot permanently poison a later production round', async t => {

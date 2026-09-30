@@ -132,6 +132,7 @@ function progressPanel(task) {
   const meter = node('div', undefined, 'progress-track');
   const fill = node('span'); fill.style.width = `${percent ?? 0}%`; meter.append(fill);
   const stepText = progress.steps?.total ? `${progress.steps.completed ?? 0} / ${progress.steps.total} steps` : 'Steps pending';
+  if (progress.waitReason) panel.append(node('p', `${progress.waitReason}${progress.nextRetryAt ? ` · Retry ${date(progress.nextRetryAt)}` : ''}`, 'task-progress'));
   const meterMeta = node('div', undefined, 'progress-meter-meta'); meterMeta.append(node('strong', percent === null ? stepText : `${percent}%`), node('span', stepText));
   panel.append(meter, meterMeta);
   const facts = node('div', undefined, 'progress-facts');

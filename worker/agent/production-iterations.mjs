@@ -2,16 +2,38 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJson, hashValue, readJson, localPath } from './modeling-io.mjs';
 import { fileEvidence, verifyEvidence, modelingFailure } from './modeling-execution.mjs';
+import { contentStore, checkpointEntry, packageEntry } from './workspace-storage.mjs';
+import { readWorkspaceEpoch } from './workspace-epoch.mjs';
 
 export async function createProductionIterations({ job, project, policy }) {
-  const identity = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, objective: job.objective });
-  const root = path.join(path.dirname(project), 'production-state', identity);
+  const identity = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId,
+    ...(job.revisionId ? { revisionId: job.revisionId } : { objective: job.objective }) });
+  const store = contentStore(path.dirname(project));
+  const workspace = path.dirname(project), epoch = await readWorkspaceEpoch(workspace);
+  const legacy = epoch?.branches?.find(branch => branch.revisionIds.includes(job.revisionId));
+  const root = legacy ? path.dirname(await localPath(workspace, legacy.path, { existing: true })) : path.join(workspace, 'production-state', identity);
   const file = path.join(root, 'iterations.json');
-  const state = await readJson(file, null, 64 * 1024 * 1024) || { protocol: 1, policy, iteration: 1, attempts: 0, rounds: [], best: null };
-  if (state.protocol !== 1 || hashValue(state.policy) !== hashValue(policy)) throw modelingFailure('ITERATION_POLICY_CHANGED', 'Restore the production iteration policy pinned for this task.');
+  let state = await readJson(file, null, 64 * 1024 * 1024);
+  if (!state) {
+    let best = null;
+    if (job.parentRevisionId) {
+      const parent = epoch?.branches?.find(branch => branch.revisionIds.includes(job.parentRevisionId));
+      const parentFile = parent ? await localPath(workspace, parent.path, { existing: true })
+        : path.join(workspace, 'production-state', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, revisionId: job.parentRevisionId }), 'iterations.json');
+      const prior = await readJson(parentFile, null, 64 * 1024 * 1024);
+      if (prior?.best) {
+        await verifyEvidence(prior.best.evidence);
+        best = { ...prior.best, inherited: true, qualityAccepted: false, delivery: { ...prior.best.delivery,
+          qualityAccepted: false, inheritedFromRevision: job.parentRevisionId, requiresCurrentRevisionValidation: true } };
+      }
+    }
+    state = { protocol: 2, policy, iteration: 1, attempts: 0, rounds: [], best };
+  }
+  if (![1, 2].includes(state.protocol) || hashValue(state.policy) !== hashValue(policy)) throw modelingFailure('ITERATION_POLICY_CHANGED', 'Restore the production iteration policy pinned for this task.');
   await atomicJson(file, state);
   return {
     get iteration() { return state.iteration; },
+    get attempts() { return state.attempts; },
     get rounds() { return state.rounds; },
     async reserveAttempt() { state.attempts++; await atomicJson(file, state); return state.attempts; },
     async best(reason) {
@@ -24,52 +46,43 @@ export async function createProductionIterations({ job, project, policy }) {
       const iteration = state.iteration;
       const directory = path.join(root, 'deliveries', `iteration-${iteration}`);
       await fs.mkdir(directory, { recursive: true });
-      // UE still loads some third-party DLLs through Windows APIs with MAX_PATH limits.
-      // Keep executable snapshots close to the original project's path depth.
       const packageRoot = deliverables.files.packageFile ? path.dirname(deliverables.files.packageFile) : null;
-      const snapshotRoot = path.join(path.dirname(project), 'rounds', identity.slice(0, 20), String(iteration));
-      const sourceFiles = [];
-      const included = source => {
-        const relative = path.relative(project, source);
-        if (packageRoot && (source === packageRoot || source.startsWith(packageRoot + path.sep))) {
-          const parts = path.relative(packageRoot, source).split(path.sep);
-          return parts[0] !== 'Saved' && parts[1] !== 'Saved'; // Runtime writes, not package dependencies.
-        }
-        if (relative.split(path.sep)[0] === 'Saved') return Boolean(packageRoot?.startsWith(source + path.sep));
-        return !relative.split(path.sep).some(part => ['Intermediate', 'DerivedDataCache', '.git', '.codex', '__pycache__'].includes(part));
-      };
-      async function collect(current) {
-        for (const entry of await fs.readdir(current, { withFileTypes: true })) {
-          const source = await localPath(project, path.relative(project, path.join(current, entry.name)), { existing: true });
-          if (!included(source)) continue;
-          if (entry.isDirectory()) await collect(source); else sourceFiles.push(source);
-        }
-      }
-      await collect(project);
-      // Preserve the project and relative evidence links as well as the complete playable package.
-      // This directory is outside the working project, so later repair passes cannot overwrite it.
-      await fs.cp(project, snapshotRoot, { recursive: true, filter: included });
+      const manifest = await store.snapshot(project, checkpointEntry);
+      // A runnable package is materialized once per payload, at a short path for
+      // third-party Windows DLL loading. Project recovery uses the CAS manifest.
+      const packageManifest = packageRoot ? await store.snapshot(packageRoot, packageEntry) : null;
+      const snapshotRoot = packageManifest ? path.join(path.dirname(project), 'play', packageManifest.id.slice(0, 20)) : null;
+      if (packageManifest) await store.restore(packageManifest, snapshotRoot);
       const files = {};
       for (const [role, source] of Object.entries(deliverables.files)) {
         const relative = path.relative(project, source);
         await localPath(project, relative, { existing: true });
-        files[role] = path.join(snapshotRoot, relative);
+        if (packageRoot && (source === packageRoot || source.startsWith(packageRoot + path.sep))) files[role] = path.join(snapshotRoot, path.relative(packageRoot, source));
+        else {
+          const object = await store.put(source);
+          const retained = path.join(store.root, 'views', object.sha256, path.basename(source));
+          await store.restore({ id: hashValue([{ path: path.basename(source), ...object }]), files: [{ path: path.basename(source), ...object }] }, path.dirname(retained));
+          files[role] = retained;
+        }
       }
       const record = { protocol: 1, kind: 'iteration-delivery', taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId,
         iteration, status: !playable ? 'RETAINED_INCOMPLETE' : qualityAccepted ? 'ACCEPTED' : 'DELIVERED_WITH_GAPS', score, threshold, playable,
         publishable: playable && ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].every(role => files[role]),
-        qualityAccepted, issues, quality, modeling, sourceWorkspace: project, retainedProject: snapshotRoot, createdAt: new Date().toISOString() };
+        qualityAccepted, issues, quality, modeling, sourceWorkspace: project, retainedProject: null,
+        snapshotManifest: path.join(store.root, 'manifests', `${manifest.id}.json`),
+        snapshotId: manifest.id, packageDigest: packageManifest?.id || null, createdAt: new Date().toISOString() };
       const reportFile = path.join(directory, 'iteration-result.json');
       await atomicJson(reportFile, record); files.iterationResult = reportFile;
-      const evidence = await fileEvidence([...Object.values(files), ...sourceFiles.map(source => path.join(snapshotRoot, path.relative(project, source)))]);
+      const evidence = await fileEvidence([...Object.values(files), ...(packageManifest?.files || []).map(row => path.join(snapshotRoot, row.path))]);
       const retained = { files, evidence, qualityAccepted, delivery: record };
-      state.rounds.push({ iteration, score, qualityAccepted, reportFile, files, evidence });
+      state.rounds.push({ iteration, score, qualityAccepted, reportFile, snapshotId: manifest.id, packageDigest: packageManifest?.id || null });
       const priorPlayable = state.best?.delivery.playable !== false;
       const priorPublishable = state.best?.delivery.publishable === true;
-      if (!state.best || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
+      if (!state.best || record.publishable && state.best.inherited || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
         (playable && !priorPlayable || playable === priorPlayable &&
         (score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted))) state.best = retained;
       state.iteration++;
+      state.protocol = 2;
       await atomicJson(file, state);
       return { record, file: reportFile, retained: { ...deliverables, files, qualityAccepted, delivery: record } };
     },

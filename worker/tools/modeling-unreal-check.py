@@ -8,6 +8,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import unreal as u
 from modeling_unreal_traversal import check_traversal
+from modeling_precision import measurement
 
 
 def file_hash(file):
@@ -111,13 +112,15 @@ def validate(request_file, report_file):
                 dims=[extent.x*2/100,extent.y*2/100,extent.z*2/100]
                 target=c['dimensions']['meters'] or item['dccDimensions']
                 tol=c['dimensions']['toleranceMeters']
-                gate('dimensions',abs(dims[2]-target[2])<=tol and all(abs(a-b)<=tol for a,b in zip(sorted(dims[:2]),sorted(target[:2]))),target,dims)
+                measured = measurement(dims, target, tol)
+                gate('dimensions', measured['passed'], {'meters':target, 'precision':measured}, dims)
                 mode = c['pivot']['mode']
                 if mode in ['center', 'base-center']:
                     origin = bounds.origin
                     actual = [origin.x/100, origin.y/100, origin.z/100]
                     wanted = [0, 0, extent.z/100 if mode == 'base-center' else 0]
-                    gate('pivot',all(abs(a-b)<=c['pivot']['toleranceMeters'] for a,b in zip(actual,wanted)),wanted,actual)
+                    measured = measurement(actual, wanted, c['pivot']['toleranceMeters'], max(dims))
+                    gate('pivot', measured['passed'], {'meters':wanted, 'precision':measured}, actual)
                 elif mode == 'custom':
                     gate('pivot',False,'Calibrated custom pivot mapping','not calibrated')
                 triangles=mesh.get_num_triangles(0)

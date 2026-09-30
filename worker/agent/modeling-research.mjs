@@ -20,7 +20,10 @@ export function needsVisualResearch(spec) {
 export async function prepareModelingReferences({ assets, project, job, engineering, review, reportProgress, signal, iteration = 1 }) {
   const targets = assets.filter(needsVisualResearch);
   if (!targets.length) return { assets, record: null };
-  const inputHash = hashValue({ targets, objective: job.objective, engineering });
+  // Asset specifications and engineering evidence are the research inputs.
+  // An unrelated Continue sentence must not invalidate already inspected images.
+  const inputHash = hashValue(job.revisionId ? { protocol: 2, targets, engineering: engineeringEvidence(engineering) }
+    : { targets, objective: job.objective, engineering });
   const base = `plan/modeling-references/${inputHash.slice(0, 20)}`;
   const directory = `${base}/iteration-${iteration}`;
   const reportFile = await localPath(project, `${directory}/research.json`);

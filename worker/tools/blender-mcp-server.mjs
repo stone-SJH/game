@@ -38,10 +38,11 @@ export function serveBlender({ workspace, blender, receiptFile, input = process.
       sourceHash = await hashFile(source);
       if (name === 'blender_checkpoint') {
         if (!source.endsWith('.blend') || args.expectedHash !== sourceHash || !definition.inputSchema.properties.stage.enum.includes(args.stage)) throw new Error('Checkpoint source/hash/stage mismatch.');
-        const directory = `tools/modeling-checkpoints/${crypto.randomUUID()}`;
+        const directory = `tools/modeling-checkpoints/${sourceHash}`;
         const copy = await localPath(workspace, `${directory}/source.blend`);
         await fs.mkdir(path.dirname(copy), { recursive: true });
-        await fs.copyFile(source, copy, fs.constants.COPYFILE_EXCL);
+        try { await fs.copyFile(source, copy, fs.constants.COPYFILE_EXCL); }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
         if (await hashFile(copy) !== sourceHash) throw new Error('Source changed during checkpoint.');
         const checkpoint = { protocol: 2, source: args.source, sourceHash, stage: args.stage, file: `${directory}/source.blend` };
         await atomicJson(await localPath(workspace, `${directory}/checkpoint.json`), checkpoint);

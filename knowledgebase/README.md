@@ -4,6 +4,7 @@ Current target: **Phase 1, internal testing with a limited invited audience**. P
 
 | Document | Purpose |
 | --- | --- |
+| [Workspace iteration implementation](workspace-iteration-implementation.md) | Persistent projects, content checkpoints, service recovery, compatibility migration and coordinated deployment |
 | [Phase 1 implementation](phase1-implementation.md) | Actual repository implementation, local verification, outstanding work and rollout |
 | [Phase 1 plan](phase1-http-pilot-plan.md) | Internal-pilot scope and acceptance gates; retains the original filename |
 | [User/workspace design](user-workspace-worker-design.md) | Logical model, constraints and phased design; not all planned tables/features are implemented |

@@ -22,6 +22,13 @@ $env:CONTROL_URL = $ControlUrl
 $env:WORKER_ID = $WorkerId
 $env:WORKER_TOKEN = $WorkerToken
 $env:YAHAHAGAME_WORKER_ROOT = $WorkerRoot
+$pinnedRuntime = Join-Path $WorkerRoot 'config\runtime-invocation.json'
+if (Test-Path -LiteralPath $pinnedRuntime) {
+  $invocation = Get-Content -LiteralPath $pinnedRuntime -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($invocation.protocol -ne 1 -or -not (Test-Path -LiteralPath $invocation.command) -or -not (Test-Path -LiteralPath $invocation.codexHome)) { throw 'Invalid pinned worker runtime.' }
+  $env:CODEX_CMD = $invocation.command
+  $env:CODEX_HOME = $invocation.codexHome
+}
 $env:YAHAHA_PRODUCTION_SKILL = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'skills\yahahagame-production\SKILL.md'
 if (-not $env:MODELING_HARNESS_V2_ENABLED) { $env:MODELING_HARNESS_V2_ENABLED = '0' }
 if (-not $env:TRIPO_API_KEY_FILE) { $env:TRIPO_API_KEY_FILE = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'tripo.txt' }

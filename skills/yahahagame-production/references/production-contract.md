@@ -91,7 +91,7 @@ technical/report issues still require another round even if the score reaches th
 Default maximum: ten additional complete iterations. At the limit, deliver the best retained
 playable round with `qualityAccepted:false` and its actual gaps instead of failing the task.
 
-Modeling retains its local retry limits per whole production round. A new round repairs the
+Modeling shares its local author limits across the controller revision. A new round repairs the
 previous best source and reconsiders available generation strategies; passing assets are
 reused. Review/service errors are recorded as unverified quality, not fabricated visual GAP
 measurements. Budgets and completed rounds survive resume. Cancellation, process-stop
@@ -99,12 +99,18 @@ uncertainty and modified frozen evidence still fence execution.
 
 ### Internal stage failures and publication
 
-Internal schema/service failures, missing technical reports, capability discovery outages,
+Internal schema failures, missing technical reports, capability discovery gaps,
 invalid optional evidence, and a production agent's hard-failure marker are stage gaps.
 Retain the diagnostics, consume only the stage's original local retries, and finish every
 independent stage in the round. Never label an unverified model technically usable. Reuse a
 verified previous model when possible; otherwise use an explicit temporary engine-native
 representation. The complete round is scored before another round repairs these gaps.
+
+Transient service failures use a durable operation retry/circuit budget and WAITING_SERVICE
+progress. Authentication/configuration errors and ENOSPC stop new tool work. They do not become
+content GAPs or renew author budgets. Unchanged content retains its previous measured quality.
+Content checkpoints store a manifest and shared immutable objects. Restore them through the
+host; their manifest path is not another editable Unreal project.
 
 Write a model revision request without stopping integration. The host preserves the request,
 repairs it internally at the next complete iteration, and keeps the approved base contract
@@ -113,8 +119,8 @@ requested additions. Same-round resume never refreshes the durable budget.
 
 When no package can be launched, the host retains the project and diagnostic snapshot as
 `RETAINED_INCOMPLETE`, `playable:false`, score 0. This is not a playable delivery. The live
-worker continues essential-delivery rounds beyond the quality-iteration cap until a publishable
-result exists, subject to the existing task deadline, cancellation and integrity fences.
+worker stops at the finite execution/quality budget and reports the actual missing delivery.
+It must not refresh budgets through an outer loop merely because publication is required.
 
 Publication has its own durable `artifact-publication.json` and immutable local outbox.
 Upload outages leave items `PENDING`; they cannot change a production result to `FAIL`.

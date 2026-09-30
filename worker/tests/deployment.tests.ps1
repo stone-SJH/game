@@ -99,6 +99,14 @@ try {
   Expect-Failure { & $deploy -RepoRoot $checkout } 'still running'
   $deploymentTestState.Running = @()
 
+  Expect-Failure { & $deploy -RepoRoot $checkout -PrepareOnly } 'autostart.paused'
+  Write-Fixture 'runtime/config/autostart.paused' 'maintenance fixture'
+  & $deploy -RepoRoot $checkout -PrepareOnly
+  Assert ($deploymentTestState.Started -eq 0) 'PrepareOnly started polling before migration.'
+  $prepared = Get-Content -LiteralPath (Join-Path $runtime 'deployment-prepared.json') -Raw | ConvertFrom-Json
+  Assert ($prepared.commit -eq $localCommit -and $prepared.status -eq 'PREPARED') 'Prepared release identity is incorrect.'
+  Remove-Item -LiteralPath (Join-Path $runtime 'config/autostart.paused')
+
   [IO.File]::WriteAllText((Join-Path $publisher 'upstream.txt'), 'remote update')
   Git $publisher @('commit', '-am', 'Remote update') | Out-Null
   Git $publisher @('push', 'origin', 'main') | Out-Null

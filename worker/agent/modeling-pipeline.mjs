@@ -17,6 +17,9 @@ import { prepareModelingReferences } from './modeling-research.mjs';
 import { assetQuality } from './iteration-quality.mjs';
 import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
 import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
+import { modelingIteration, readWorkspaceEpoch } from './workspace-epoch.mjs';
+import { workingSource } from './modeling-working-source.mjs';
+import { failureKind } from './service-recovery.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -351,6 +354,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       cleanup ? 'This is a limited cleanup attempt: transforms, local mesh fixes, materials, collision/LOD. If it needs silhouette reconstruction, global retopology or a new rig, write build-report.json with smallEditsOnly=false; do not perform a full rebuild of this generated source.' :
         context.phase === 'blockout' ? 'This call establishes rough proportions and essential parts. Save its three stage artifacts and return; the final stage completes materials, runtime preparation, exports and quality checks.' : 'Meet every original requirement. Do not substitute a default cube or silently reduce fidelity.',
       `Previous repair findings: ${JSON.stringify(feedback || null)}`,
+      'The host maintains art/working/<assetId>/source.blend as the editable entry. Continue the supplied current source for local repairs. Set bpy.context.preferences.filepaths.save_version=0; the host owns recoverable checkpoints, so do not create .blend1 backups or extra project copies.',
       ...(previousAttemptDirectory ? [`Previous attempt: ${previousAttemptDirectory}. If its source is usable, copy/open it and repair it; write all new outputs to this attempt directory.`] : []),
       ...(context.phase === 'blockout' ? [] : ['Write build-report.json as {"smallEditsOnly":true,"editsApplied":["specific changes"],"limitations":[]}. Report actual work; this report does not authorize acceptance.']),
       ...(context.phase === 'final' ? [`Place any required joint/material closeups or assembly/LOD evidence directly under ${directory}/evidence/ (at most 12 PNG/JPEG/WebP images; use contact sheets). Explain their source and limitations in self-check.json. These are author-supplied supplements, not independent host acceptance.`,
@@ -509,17 +513,23 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       version: 3, skillLockHash: skillPlan.lockHash, validatorHashes, blenderVersion: capabilities.blenderVersion,
       policy, harnessHashes: await modelingToolHashes(), rubricVersion: RUBRIC_VERSION,
     });
+    const epoch = await readWorkspaceEpoch(path.dirname(project));
     const requirementsHash = hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, spec, referenceHashes,
-      ...(spec.contract ? { skillLockHash: skillPlan.lockHash, validatorHashes, blenderVersion: capabilities.blenderVersion } : {}) });
+      ...(spec.contract ? { skillLockHash: skillPlan.lockHash, validatorHashes: epoch && pinnedToolchain ? pinnedToolchain.validatorHashes : validatorHashes, blenderVersion: capabilities.blenderVersion } : {}) });
     const short = requirementsHash.slice(0, 20);
     if (spec.contract) await pinToolchain(path.join(taskState, 'rubrics'), short, visualRubric(spec));
     const stateFile = path.join(stateRoot, short, 'state.json');
     let state = await readJson(stateFile);
     if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
-    if (state?.accepted && state.requirementsHash === requirementsHash) {
+    const repairRequest = await readJson(path.join(project, 'plan/modeling-repair-request.json'));
+    const repairKey = hashValue({ revision: job.revisionId || productionIteration, assetId: spec.assetId, reason: repairRequest?.reason || '' });
+    const repair = repairRequest?.assetIds?.includes(spec.assetId) && typeof repairRequest.reason === 'string' && repairRequest.reason.trim() &&
+      (!job.revisionId || repairRequest.revisionId === job.revisionId) && state?.lastRepair !== repairKey;
+    if (state?.accepted && state.requirementsHash === requirementsHash && !repair) {
       const evidence = [];
       for (const artifact of state.accepted.files) evidence.push({ file: await localPath(project, artifact.path), sha256: artifact.sha256 });
       await verifyEvidence(evidence);
+      await workingSource(project, state.accepted);
       return { ...state.accepted, reused: true };
     }
     const candidates = await candidatesFor(spec);
@@ -531,8 +541,21 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     }
     const decisionMirror = await localPath(project, `plan/modeling/${spec.assetId}/${short}/decision.json`);
     state.rounds ||= {};
-    state.rounds[productionIteration] ||= { attempts: {}, startedAt: new Date().toISOString() };
-    const round = state.rounds[productionIteration];
+    const legacyRevision = (await readWorkspaceEpoch(path.dirname(project)))?.branches?.some(branch => branch.revisionIds.includes(job.revisionId));
+    const roundKey = legacyRevision ? productionIteration : job.revisionId || productionIteration;
+    state.rounds[roundKey] ||= { attempts: {}, startedAt: new Date().toISOString() };
+    const round = state.rounds[roundKey];
+    if (repair && (!state.pending || state.pending.phase === 'ACCEPTED')) {
+      state.bestCandidate ||= state.accepted;
+      state.accepted = null; state.pending = null; state.lastRepair = repairKey;
+      delete round.delivered; delete round.stageGap;
+      await atomicJson(stateFile, state);
+    }
+    if (job.revisionId && state.bestCandidate && !state.pending && !repair) {
+      await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
+      await workingSource(project, state.bestCandidate);
+      return { ...state.bestCandidate, reused: true, reuseReason: 'Unchanged asset contract; validate the existing candidate before requesting a scoped repair.' };
+    }
     if (round.stageGap) {
       await verifyEvidence(round.stageGap.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       return round.stageGap;
@@ -556,7 +579,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       await atomicJson(stateFile, state);
     }
     await report({ ...state, taskId: job.taskId, runId: job.runId, workspaceId: job.workspaceId }, decisionMirror);
-    let sourceFile = state.pending?.sourceFile || null;
+    let sourceFile = state.pending?.sourceFile || (state.bestCandidate && state.route !== 'tripo_then_blender' ? await workingSource(project, state.bestCandidate) : null);
     const fallback = async reason => {
       state.failures.push({ route: state.route, reason, at: new Date().toISOString() });
       state.route = 'blender_direct'; sourceFile = null; state.previousAttemptDirectory = null; state.pending = null;
@@ -719,6 +742,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           status: validation.passed ? 'DCC_READY' : 'DCC_PROVISIONAL',
           ...(spec.contract ? { contract: spec.contract, spec, skillLockHash: skillPlan.lockHash } : {}),
           source: state.source || (state.providerAttempted ? 'Tripo attempted; see provider report and effective route' : 'Task authored'), failures: state.failures };
+        await workingSource(project, candidate);
         if (!validation.passed) {
           if (!state.bestCandidate || candidate.quality.score > state.bestCandidate.quality.score) state.bestCandidate = candidate;
           state.pending = null;
@@ -742,6 +766,13 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       } catch (error) {
         const stage = ['AUTHORING', 'FINAL_PENDING'].includes(state.pending?.phase) ? 'AUTHOR' : 'VALIDATION';
         state.failures.push({ attemptId, route, phase: state.pending?.phase, at: new Date().toISOString(), ...failureRecord(error, stage, signal) });
+        // A confirmed failed call consumed its reservation. Preserve its files
+        // and ledger, but do not leave an active author blocking the next revision.
+        if (['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error)) &&
+            (error.stopConfirmed ?? error.result?.stopConfirmed) === true) {
+          state.previousAttemptDirectory = directory;
+          state.pending = null;
+        }
         await atomicJson(stateFile, state);
         throwIfExecutionFenced(error, signal);
         if (stage === 'VALIDATION') {
@@ -773,7 +804,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   return {
     async prepare({ iteration = 1 } = {}) {
       if (!Number.isSafeInteger(iteration) || iteration < 1) throw new Error('Invalid production iteration.');
-      productionIteration = iteration;
+      productionIteration = await modelingIteration(path.dirname(project), job, iteration);
       pipelineIssues = [];
       await execution.assertSettled();
       await pinToolchain(path.join(taskState, 'execution-policy'), 'runtime', {

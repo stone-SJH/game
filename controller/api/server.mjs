@@ -12,6 +12,7 @@ import { digest, problem } from './database.mjs';
 import * as tasks from './tasks.mjs';
 import { getPngPreview } from './image-preview.mjs';
 import { receiveReference, removePendingReference, expirePendingReferences } from './references.mjs';
+import { prepareArtifact, workspaceMaintenance } from './workspace-iteration.mjs';
 
 export function createServer({ db, artifactRoot, origin, secureCookies = true, maxUsers = 10, leaseMs = 120000,
   appRoot = fileURLToPath(new URL('../../app/', import.meta.url)), maxArtifactBytes = 2 * 1024 ** 3,
@@ -188,7 +189,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         'content-disposition': `attachment; filename="reference"; filename*=UTF-8''${encodeURIComponent(row.name).replaceAll("'", '%27')}` });
       return pipeline(fs.createReadStream(row.storage_path), res);
     }
-    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|artifacts))?$/);
+    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|recover|artifacts))?$/);
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
       const session = await user(req, req.method !== 'GET');
@@ -202,6 +203,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         return json(res, value.status === 'CANCELING' ? 202 : 200, value);
       }
       if (req.method === 'POST' && task[2] === 'rerun') return json(res, 202, await tasks.rerunTask(db, task[1], session.user_id, await body(req)));
+      if (req.method === 'POST' && task[2] === 'recover') return json(res, 202, await tasks.recoverTask(db, task[1], session.user_id, await body(req)));
     }
     const artifact = url.pathname.match(/^\/artifacts\/([a-zA-Z0-9-]{1,100})$/);
     if (req.method === 'GET' && artifact) {
@@ -236,6 +238,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
       const agent = await worker(req), input = await body(req);
       if (input.workerId && input.workerId !== agent.worker_id) throw problem(403, 'Worker identity mismatch.');
       const handlers = { register: () => tasks.registerWorker(db, agent, input), poll: () => tasks.pollWorker(db, agent, input, leaseMs),
+        'artifacts-prepare': () => prepareArtifact(db, agent, input), 'workspace-maintenance': () => workspaceMaintenance(db, agent, input),
         heartbeat: () => tasks.heartbeat(db, agent, input, leaseMs), 'step-result': () => tasks.stepResult(db, agent, input) };
       const handler = handlers[url.pathname.slice('/v1/worker/'.length)];
       if (handler) return json(res, 200, await handler());

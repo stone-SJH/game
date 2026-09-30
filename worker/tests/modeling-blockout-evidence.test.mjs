@@ -8,6 +8,7 @@ import { createExecutionStore, fileEvidence, verifyEvidence } from '../agent/mod
 import { atomicJson, hashFile, readJson } from '../agent/modeling-io.mjs';
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
+import { contentStore } from '../agent/workspace-storage.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'blockout-evidence-'));
@@ -60,7 +61,7 @@ test('modified surviving evidence fences restoration before any missing files ar
 
 test('missing or changed backups cannot be regenerated from surviving working files', async t => {
   for (const mode of ['missing', 'changed']) {
-    const f = await fixture(t), backup = path.join(path.dirname(f.snapshot.file), '0.blob');
+    const f = await fixture(t), backup = contentStore(path.dirname(f.project)).objectPath(f.evidence[0].sha256);
     if (mode === 'missing') await fs.unlink(backup);
     else await fs.writeFile(backup, 'changed backup');
     await fs.unlink(f.evidence[1].file);

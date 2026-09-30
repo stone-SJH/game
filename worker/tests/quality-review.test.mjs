@@ -263,9 +263,11 @@ test('planning exhaustion completes two playable rounds and delivers retained ga
   assert.ok(deliveries.every(row => row.score === 0 && row.issues.some(issue => issue.stage === 'modeling-planning')));
   assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
   assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 8);
-  assert.equal(calls.filter(name => name.startsWith('packaged-game-playtest')).length, 2);
+  assert.equal(calls.filter(name => name.startsWith('packaged-game-playtest')).length, 1);
   assert.equal(await fs.readFile(result.files.packageFile, 'utf8'), 'game');
-  const retainedGap = JSON.parse(await fs.readFile(path.join(result.delivery.retainedProject, 'plan/modeling-planning/iteration-1/gap.json'), 'utf8'));
+  const manifest = JSON.parse(await fs.readFile(result.delivery.snapshotManifest, 'utf8'));
+  const row = manifest.files.find(row => row.path === 'plan/modeling-planning/iteration-1/gap.json');
+  const retainedGap = JSON.parse(await fs.readFile(path.join(path.dirname(project), 'storage-v2/objects', row.sha256.slice(0, 2), row.sha256), 'utf8'));
   assert.deepEqual(retainedGap.draft, draft);
   const callCount = calls.length;
   const resumed = await runProductionHarness(options);

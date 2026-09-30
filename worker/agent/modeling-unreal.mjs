@@ -4,11 +4,12 @@ import { atomicJson, readJson, localPath, hashFile, hashValue, repositoryRoot, a
 import { visualSchemaFor, reviewPasses } from './modeling-evaluation.mjs';
 import { createExecutionStore, executionPolicy, fileEvidence, verifyEvidence, modelingFailure } from './modeling-execution.mjs';
 import { createModelingReviewer } from './modeling-review.mjs';
-import { visualEvidence, visualReviewPrompt } from './modeling-rubric.mjs';
+import { visualEvidence, visualReviewPrompt, RUBRIC_VERSION } from './modeling-rubric.mjs';
 import { modelingRuntimeIdentity } from './modeling-runtime-lock.mjs';
 import { pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
 import { assetQuality } from './iteration-quality.mjs';
 import { stageIssue, throwIfExecutionFenced } from './stage-failure.mjs';
+import { createStageCache } from './stage-cache.mjs';
 
 export async function validateUnrealModels({ summary, project, output, unreal, projectFile, step, signal, invocation, attempt, iteration = 1, job = {}, evaluate, allowProvisional = false }) {
   const assets = summary?.assets?.filter(a => a.usable !== false && a.contract?.runtime.engine === 'unreal') || [];
@@ -48,8 +49,11 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
   }
   await contentFiles(path.join(path.dirname(projectFile), 'Content'));
   const evidence = await fileEvidence(engineFiles.sort());
-  const evidenceKey = hashValue({ request, evidence });
-  const inspected = await execution.run({ key: `engine-technical:${evidenceKey}:iteration-${iteration}`, stage: 'TECHNICAL', input: { request, policy }, evidence,
+  const evidenceKey = hashValue({ request, evidence, validator: await hashFile(path.join(repositoryRoot, 'worker/tools/modeling-unreal-check.py')),
+    precision: await hashFile(path.join(repositoryRoot, 'worker/tools/modeling_precision.py')) });
+  const cached = createStageCache(path.dirname(project), job);
+  const operationRevision = job.revisionId || `legacy-iteration-${iteration}`;
+  const inspected = await cached('engine-technical', { evidenceKey, policy }, () => execution.run({ key: `engine-technical:${evidenceKey}:${operationRevision}`, stage: 'TECHNICAL', input: { request, policy }, evidence,
     maxCalls: policy.technicalCalls, timeoutMs: policy.technicalMs, retry: () => true }, async ({ callId, timeoutMs }) => {
     const directory = path.join(output, `modeling-unreal-${attempt}-${callId}`);
     await fs.mkdir(directory,{recursive:true});
@@ -65,7 +69,7 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
     const files = [requestFile, reportFile];
     for (const row of report.assets) for (const view of row.views || []) files.push(await localPath(directory, path.relative(directory, view.file), { existing: true }));
     return { directory, reportFile, requestFile, report, evidence: await fileEvidence(files) };
-  });
+  }));
   const { directory, reportFile, report } = inspected;
   await verifyEvidence(inspected.evidence);
   signal.throwIfAborted();
@@ -86,11 +90,17 @@ export async function validateUnrealModels({ summary, project, output, unreal, p
       }
       const visual = visualEvidence(images, asset.spec.referenceImages?.length || 0);
       const prompt = visualReviewPrompt({ spec: asset.spec, evidence: visual, metrics: row, phase: 'unreal-capture' });
-      const result = await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
-        key: `engine-visual:${evidenceKey}:${asset.assetId}:iteration-${iteration}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) });
-      await atomicJson(path.join(directory,`${asset.assetId}-visual.json`), result);
+      const visualInputs = { evidenceKey, assetId: asset.assetId, rubric: RUBRIC_VERSION, policy, images: await fileEvidence(images) };
+      const inspectedVisual = await cached('engine-visual', visualInputs, async () => ({
+        value: await review({ name: 'modeling-engine-visual', schema: visualSchemaFor(asset.spec, visual), prompt, images,
+          key: `engine-visual:${evidenceKey}:${asset.assetId}:${operationRevision}`, identity: { assetId: asset.assetId }, validate: value => reviewPasses(value, asset.spec, visual) }),
+        evidence: visualInputs.images,
+      }));
+      const result = inspectedVisual.value;
+      const visualFile = path.join(output, `engine-visual-${asset.assetId}-${hashValue(visualInputs).slice(0, 20)}.json`);
+      await atomicJson(visualFile, { ...result, ...(inspectedVisual.reusedEvidence ? { reusedEvidence: inspectedVisual.reusedEvidence } : {}) });
       const passed = reviewPasses(result,asset.spec,visual);
-      qualities.push({ assetId: asset.assetId, ...assetQuality(result, passed), reportFile: path.join(directory,`${asset.assetId}-visual.json`) });
+      qualities.push({ assetId: asset.assetId, ...assetQuality(result, passed), reportFile: visualFile });
       if (!passed && !allowProvisional) throw Object.assign(new Error(`Unreal visual quality gap: ${asset.assetId}`), { kind: 'VISUAL_GAP' });
     } catch (error) {
       throwIfExecutionFenced(error, signal);
