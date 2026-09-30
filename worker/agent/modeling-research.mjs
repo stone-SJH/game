@@ -22,7 +22,10 @@ export async function prepareModelingReferences({ assets, project, job, engineer
   // Adding references here would change both identities without a revision.
   const targets = assets.filter(spec => !frozenAssetIds.includes(spec.assetId) && needsVisualResearch(spec));
   if (!targets.length) return { assets, record: null };
-  const inputHash = hashValue({ targets, objective: job.objective, engineering });
+  // Asset specifications and engineering evidence are the research inputs.
+  // An unrelated Continue sentence must not invalidate already inspected images.
+  const inputHash = hashValue(job.revisionId ? { protocol: 2, targets, engineering: engineeringEvidence(engineering) }
+    : { targets, objective: job.objective, engineering });
   const base = `plan/modeling-references/${inputHash.slice(0, 20)}`;
   const directory = `${base}/iteration-${iteration}`;
   const reportFile = await localPath(project, `${directory}/research.json`);

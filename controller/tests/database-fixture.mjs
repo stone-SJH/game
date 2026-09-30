@@ -4,6 +4,7 @@ import net from 'node:net';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { migrate } from '../api/database.mjs';
 
 export async function availablePort() {
@@ -21,8 +22,19 @@ export async function startDatabase(directory) {
   const embedded = new EmbeddedPostgres({ databaseDir: path.join(root, 'postgres'), user: 'postgres', password, port,
     persistent: true, postgresFlags: ['-h', '127.0.0.1'], initdbFlags: ['--locale=C', '--encoding=UTF8'], onLog() {}, onError() {} });
   if (!await fs.stat(path.join(root, 'postgres', 'PG_VERSION')).catch(() => null)) await embedded.initialise();
-  await embedded.start();
+  let windowsStop;
+  if (process.platform === 'win32') {
+    // pg_ctl drops the elevated Windows token before starting postgres. Direct
+    // spawning (used by embedded.start) is rejected on deployed worker hosts.
+    const { pg_ctl } = await import('@embedded-postgres/windows-x64');
+    const run = (command, args) => new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: 'ignore', windowsHide: true });
+      child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`pg_ctl failed (${code}); inspect ${root}/postgres.log`)));
+    });
+    await run(pg_ctl, ['-D', path.join(root, 'postgres'), '-l', path.join(root, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port}`, '-w', 'start']);
+    windowsStop = () => run(pg_ctl, ['-D', path.join(root, 'postgres'), '-m', 'fast', '-w', 'stop']);
+  } else await embedded.start();
   const db = new pg.Pool({ host: '127.0.0.1', port, user: 'postgres', password, database: 'postgres' });
   await migrate(db);
-  return { db, root, close: async () => { await db.end(); await embedded.stop(); } };
+  return { db, root, close: async () => { await db.end(); if (windowsStop) await windowsStop(); else await embedded.stop(); } };
 }

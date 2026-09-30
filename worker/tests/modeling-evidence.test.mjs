@@ -96,18 +96,16 @@ test('author supplements and limitations reach review but cannot replace indepen
   assert.equal(malformed.files.length, 3);
 });
 
-test('research service exhaustion is provisional and retries only in a subsequent round', async t => {
+test('research outages retain the operation failure instead of manufacturing quality gaps', async t => {
   const f = await fixture(t); let calls = 0;
   const reviewer = createModelingReviewer({ ...f, evaluate: async () => { calls++; throw new Error('upstream 503'); } });
   const options = researchOptions(f, (name, schema, prompt, images, options) => reviewer({ name, schema, prompt, images, ...options }));
   for (let n = 0; n < 2; n++) {
-    const result = await prepareModelingReferences(options);
-    assert.equal(result.record.issue.kind, 'VALIDATION_INFRASTRUCTURE_EXHAUSTED');
-    assert.equal(result.record.blocked[0].assetId, 'shrine');
+    await assert.rejects(prepareModelingReferences(options), error => error.kind === 'SERVICE_TRANSIENT');
   }
+  assert.equal(calls, 1);
+  await assert.rejects(prepareModelingReferences({ ...options, iteration: 2 }), error => error.kind === 'SERVICE_TRANSIENT');
   assert.equal(calls, 2);
-  await prepareModelingReferences({ ...options, iteration: 2 });
-  assert.equal(calls, 4);
 });
 
 test('oversized optional image does not invalidate other author evidence', async t => {

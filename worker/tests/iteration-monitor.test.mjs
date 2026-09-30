@@ -340,15 +340,17 @@ test('agent hard-failure markers are retained and a second completed round can r
     return success();
   };
   const result = await runProductionHarness({ ...f, onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
-  assert.equal(deliveries.length, 2); assert.equal(launches.length, 2);
+  assert.equal(deliveries.length, 2); assert.equal(launches.length, 1);
   assert.equal(deliveries[0].status, 'DELIVERED_WITH_GAPS');
   assert.ok(deliveries[0].issues.some(issue => issue.stage === 'production-blocker'));
   assert.equal(result.delivery.iteration, 2); assert.equal(result.qualityAccepted, true);
-  const saved = JSON.parse(await fs.readFile(path.join(deliveries[0].retainedProject, 'acceptance/hard-failure.json')));
+  const manifest = JSON.parse(await fs.readFile(deliveries[0].snapshotManifest));
+  const row = manifest.files.find(row => row.path === 'acceptance/hard-failure.json');
+  const saved = JSON.parse(await fs.readFile(path.join(path.dirname(f.project), 'storage-v2/objects', row.sha256.slice(0, 2), row.sha256)));
   assert.equal(saved.reason, 'Internal tool unavailable');
 });
 
-test('orchestrator outage still assesses existing files and next round produces a playable result', async t => {
+test('orchestrator outage preserves draft without starting a new content round', async t => {
   const f = await fixture(t), deliveries = [];
   process.env.CODEX_MAX_ATTEMPTS = '2';
   f.step = async (name, command, args, timeout, cwd, accepts, options) => {
@@ -363,16 +365,10 @@ test('orchestrator outage still assesses existing files and next round produces 
     }
     return success();
   };
-  const result = await runProductionHarness({ ...f, onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
-  assert.equal(deliveries.length, 2);
-  assert.equal(deliveries[0].status, 'RETAINED_INCOMPLETE');
-  assert.equal(deliveries[0].score, 0); assert.equal(deliveries[0].playable, false);
-  assert.ok(deliveries[0].issues.some(issue => issue.stage === 'stage-manifest'));
-  assert.equal(deliveries[0].issues.find(issue => issue.stage === 'production-orchestrator').upstreamAI.code, 'HTTP_503');
+  await assert.rejects(runProductionHarness({ ...f, onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } }), /503/);
+  assert.equal(deliveries.length, 0);
+  assert.equal(await fs.readFile(path.join(f.project, 'draft.txt'), 'utf8'), 'Retained work');
   assert.ok(f.progress.some(value => value.diagnostic?.category === 'upstream-ai' && /HTTP 503/.test(value.error)));
-  assert.equal(f.progress.at(-1).error, null);
-  assert.equal(result.delivery.iteration, 2); assert.equal(result.delivery.playable, true);
-  assert.equal(await fs.readFile(path.join(deliveries[0].retainedProject, 'draft.txt'), 'utf8'), 'Retained work');
 });
 
 test('publication callback failure cannot discard a finished round', async t => {
@@ -397,7 +393,7 @@ test('continuation preserves integrity and uncertain-stop fences before any late
   }
 });
 
-test('live delivery keeps iterating past a quality cap until an actual publishable result exists', async t => {
+test('live delivery preserves an incomplete result when the explicit execution budget ends', async t => {
   const f = await fixture(t), deliveries = [];
   process.env.CODEX_MAX_ATTEMPTS = '1';
   f.step = async name => {
@@ -406,7 +402,7 @@ test('live delivery keeps iterating past a quality cap until an actual publishab
   };
   const result = await runProductionHarness({ ...f, requirePublishableResult: true,
     onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
-  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries.length, 1);
   assert.equal(deliveries[0].playable, false); assert.equal(deliveries[0].score, 0);
-  assert.equal(result.delivery.iteration, 2); assert.equal(result.delivery.publishable, true);
+  assert.equal(result.delivery.iteration, 1); assert.equal(result.delivery.publishable, false);
 });

@@ -25,6 +25,7 @@ test('live CLI errors reach frontend progress, preserve raw logs and clear on re
   const progress = [];
   const job = { taskId: 'task', workspaceId: 'workspace', runId: 'run', objective: 'Fixture' };
   await executeJob(job, { root, signal: new AbortController().signal,
+    serviceRecoveryOptions: { maxWaitMs: 0 },
     reportProgress: async value => progress.push(normalizeProgress(value)),
     productionHarness: async ({ step }) => {
       await step('modeling-engineering-review-1', process.execPath, [script, 'exec', 'recover'], 10000);
@@ -59,6 +60,7 @@ test('terminal task failures keep the classified cause in progress and the contr
   const progress = [];
   const result = await executeJob({ taskId: 'task', workspaceId: 'workspace', runId: 'run', objective: 'Fixture' }, {
     root, signal: new AbortController().signal, reportProgress: async value => progress.push(normalizeProgress(value)),
+    serviceRecoveryOptions: { maxWaitMs: 0 },
     productionHarness: async ({ step }) => { await step('production-orchestrator-1', process.execPath, [script], 10000); },
   });
   assert.equal(result.status, 'FAIL');

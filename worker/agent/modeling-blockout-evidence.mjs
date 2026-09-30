@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { atomicJson, hashFile, hashValue, localPath, readJson } from './modeling-io.mjs';
 import { modelingFailure, verifyEvidence } from './modeling-execution.mjs';
+import { contentStore } from './workspace-storage.mjs';
 
 // The final author can clean its output directory. Keep independent bytes in host
 // task state before launching it; a hash alone cannot recover a deleted checkpoint.
@@ -16,15 +17,16 @@ export async function preserveBlockoutEvidence({ project, stateRoot, attemptId, 
     rows.push({ path: relative, sha256: row.sha256 });
   }
   await fs.mkdir(directory, { recursive: true });
+  const store = contentStore(path.dirname(project));
   for (const [index, row] of rows.entries()) {
     const original = await localPath(project, row.path, { existing: true });
-    const backup = await localPath(directory, `${index}.blob`);
-    try { await fs.copyFile(original, backup, constants.COPYFILE_EXCL); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    const retained = await store.put(original);
+    if (retained.sha256 !== row.sha256) throw modelingFailure('INTEGRITY_ERROR', 'Blockout changed while retaining checkpoint');
+    const backup = store.objectPath(retained.sha256);
     await verifyEvidence([{ file: backup, sha256: row.sha256 }, { file: original, sha256: row.sha256 }]);
   }
   const file = await localPath(directory, 'manifest.json');
-  const manifest = { protocol: 1, attemptId, rows };
+  const manifest = { protocol: 2, attemptId, rows };
   const existing = await readJson(file);
   if (existing && hashValue(existing) !== hashValue(manifest)) {
     throw modelingFailure('INTEGRITY_ERROR', 'Blockout backup identity changed.');
@@ -40,14 +42,14 @@ export async function verifyBlockoutEvidence({ project, stateRoot, evidence, sna
   await verifyEvidence([{ file, sha256: snapshot.sha256 }]);
   const manifest = await readJson(file);
   const expected = evidence.map(row => ({ path: path.relative(project, row.file).replaceAll('\\', '/'), sha256: row.sha256 }));
-  if (manifest?.protocol !== 1 || hashValue(manifest.rows) !== hashValue(expected)) {
+  if (![1, 2].includes(manifest?.protocol) || hashValue(manifest.rows) !== hashValue(expected)) {
     throw modelingFailure('INTEGRITY_ERROR', 'Blockout backup does not match the frozen evidence.');
   }
   const directory = path.dirname(file), missing = [];
   // Check the entire backup and all surviving originals before writing anything.
   for (const [index, row] of manifest.rows.entries()) {
     const original = await localPath(project, row.path);
-    const backup = await localPath(directory, `${index}.blob`);
+    const backup = manifest.protocol === 2 ? contentStore(path.dirname(project)).objectPath(row.sha256) : await localPath(directory, `${index}.blob`);
     await verifyEvidence([{ file: backup, sha256: row.sha256 }]);
     try { await fs.lstat(original); }
     catch (error) {

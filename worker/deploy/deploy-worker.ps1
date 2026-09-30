@@ -3,7 +3,8 @@ param(
   [string]$RepoRoot,
   [string]$WorkerRoot,
   [switch]$Update,
-  [switch]$CheckOnly
+  [switch]$CheckOnly,
+  [switch]$PrepareOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +91,14 @@ if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) { throw "Missing produc
 
 if ($CheckOnly) {
   Write-Host "Preflight passed: $branch $revision; runtime $WorkerRoot. No merge or worker start performed."
+  return
+}
+if ($PrepareOnly) {
+  if ($Update) { throw 'PrepareOnly requires the intended committed checkout; do not combine with Update.' }
+  if (-not (Test-Path -LiteralPath (Join-Path $WorkerRoot 'config\autostart.paused'))) { throw 'PrepareOnly requires autostart.paused during migration.' }
+  $record = [ordered]@{ status = 'PREPARED'; commit = $revision; branch = $branch; repository = $RepoRoot; workerRoot = $WorkerRoot; preparedAt = (Get-Date).ToString('o') }
+  $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $WorkerRoot 'deployment-prepared.json') -Encoding UTF8
+  Write-Host "Prepared committed release $revision. Worker polling remains stopped."
   return
 }
 if ($Update) {

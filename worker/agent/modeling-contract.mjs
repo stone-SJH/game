@@ -36,7 +36,11 @@ export const contractSchema = obj({
 });
 // Existing frozen v2 contracts omit traversal; generation always emits the nullable key.
 contractSchema.properties.traversal = maybe(traversalSchema);
-export const generatedContractSchema = { ...contractSchema, required: [...contractSchema.required, 'traversal'] };
+const generatedPrecision = key => ({ ...contractSchema.properties[key], properties: {
+  ...contractSchema.properties[key].properties, toleranceMeters: { ...number, minimum: 0.000001,
+    description: 'Positive engineering allowance in meters. Numerical float conversion error is measured separately by the host; never request exact zero.' } } });
+export const generatedContractSchema = { ...contractSchema, properties: { ...contractSchema.properties,
+  dimensions: generatedPrecision('dimensions'), pivot: generatedPrecision('pivot') }, required: [...contractSchema.required, 'traversal'] };
 
 export function defaultContract(overrides = {}) {
   return { version: 2, assetClass: 'static-prop', styleProfile: 'general',

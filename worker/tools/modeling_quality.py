@@ -3,8 +3,9 @@ import math
 import bpy
 from modeling_scene import bounds_of, dimensions, mesh_metrics, mesh_objects
 from modeling_traversal import check_traversal
+from modeling_precision import measurement
 
-VERSION = '2.1.0'
+VERSION = '2.2.0'
 
 
 def animation_samples(names, objects, render=None):
@@ -86,7 +87,8 @@ def check_scene(spec, manifest, exported=False):
     dims = dimensions(points)
     target = c['dimensions']['meters']
     tol = c['dimensions']['toleranceMeters']
-    gate('dimensions', target is not None and all(abs(a-b) <= tol for a, b in zip(dims, target)), target, dims, tol, target is not None)
+    dimension_check = measurement(dims, target or dims, tol)
+    gate('dimensions', target is not None and dimension_check['passed'], target, dims, dimension_check, target is not None)
     # V2 recipes author in meter coordinates. Exporters must not apply unit scale twice.
     gate('meterUnits', abs(bpy.context.scene.unit_settings.scale_length - 1) <= 1e-6, 1,
          bpy.context.scene.unit_settings.scale_length, 1e-6)
@@ -98,8 +100,9 @@ def check_scene(spec, manifest, exported=False):
         wanted = [(max(p[i] for p in points) + min(p[i] for p in points))/2 for i in range(3)]
         if mode == 'base-center':
             wanted[2] = min(p.z for p in points)
-    gate('pivot', bool(pivot is not None and wanted is not None and all(abs(a-b) <= c['pivot']['toleranceMeters'] for a,b in zip(pivot,wanted))),
-         wanted, pivot, c['pivot']['toleranceMeters'], mode != 'unknown')
+    pivot_check = measurement(pivot or [], wanted or [], c['pivot']['toleranceMeters'], max(dims or [0]))
+    gate('pivot', bool(pivot is not None and wanted is not None and pivot_check['passed']),
+         wanted, pivot, pivot_check, mode != 'unknown')
     materials = {m for o in objects for m in o.data.materials if m}
     invalid_materials = [o.name for o in objects if not o.data.materials or any(
         p.material_index >= len(o.data.materials) or o.data.materials[p.material_index] is None for p in o.data.polygons)]

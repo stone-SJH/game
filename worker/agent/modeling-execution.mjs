@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isExecutionFence } from './stage-failure.mjs';
+import { failureKind } from './service-recovery.mjs';
 import { atomicJson, hashFile, hashValue, readJson, localPath, setting, throwIfStopped } from './modeling-io.mjs';
 
 export const EXECUTION_POLICY_VERSION = 2;
@@ -11,7 +12,8 @@ export function modelingFailure(kind, message, extra = {}) {
 export function failureRecord(error, stage, signal) {
   const result = error?.result || {};
   const stopped = error?.stopConfirmed ?? result.stopConfirmed ?? null;
-  const kind = error?.kind || (stopped === false ? 'STOP_UNCONFIRMED' : signal?.aborted || result.canceled ? 'CANCELED' :
+  const infrastructure = failureKind(error);
+  const kind = (infrastructure !== 'CONTENT_GAP' && infrastructure) || error?.kind || (stopped === false ? 'STOP_UNCONFIRMED' : signal?.aborted || result.canceled ? 'CANCELED' :
     result.timedOut ? `${stage}_TIMEOUT` : result.exitCode != null && result.exitCode !== 0 ? `${stage}_PROCESS_ERROR` : `${stage}_UNKNOWN`);
   return { kind, message: String(error?.message || error).slice(0, 4000), exitCode: result.exitCode ?? null,
     timedOut: Boolean(result.timedOut), canceled: Boolean(signal?.aborted || result.canceled), stopConfirmed: stopped,
@@ -142,7 +144,7 @@ export function createExecutionStore(root, { signal, deadlineAt, now = Date.now 
           delete group.completed;delete group.result;delete group.resultEvidence;
           call.status = 'FAILED'; call.finishedAt = now(); call.error = failureRecord(error, stage, signal);
           const canRetry = !signal?.aborted && !call.error.canceled && call.error.stopConfirmed !== false &&
-            !isExecutionFence(error) && !['ENOSPC', 'EROFS', 'EIO'].includes(error.code) && retry(error);
+            !isExecutionFence(error) && !['RESOURCE_EXHAUSTED', 'SERVICE_CONFIGURATION', 'SERVICE_TRANSIENT'].includes(call.error.kind) && retry(error);
           if (!canRetry) group.terminalError = call.error;
           await save(state);
           throwIfStopped(error, signal);

@@ -114,43 +114,36 @@ test('quality review repairs only a concrete gap and then completes', async t =>
   assert.ok(!progress.some(value => value.error === 'All explicit quality criteria are met.'));
 });
 
-test('quality transport failures retain their actual upstream cause in progress and delivered rounds', async t => {
+for (const [code, message] of [
+  ['HTTP_503', 'unexpected status 503 Service Unavailable, url: http://43.106.115.130:8080/v1/responses, request id: test-request'],
+  ['STREAM_DISCONNECTED', 'stream disconnected before completion: stream closed before response.completed'],
+]) test('quality transport ' + code + ' preserves diagnostics without consuming a quality round', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-upstream-'));
   const project = path.join(root, 'project'), output = path.join(root, 'run');
   await fs.mkdir(project, { recursive: true }); await fs.mkdir(output);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   environment(t, { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '2', CODEX_RETRY_DELAY_MS: '1' });
   const progress = [], deliveries = [], calls = [];
-  const messages = ['unexpected status 503 Service Unavailable, url: http://43.106.115.130:8080/v1/responses, request id: test-request',
-    'stream disconnected before completion: stream closed before response.completed'];
   const step = async (name, command, args) => {
     calls.push(name);
     if (name.startsWith('production-orchestrator')) await seedDeliverables(project);
     if (name.startsWith('quality-review-')) {
-      const message = messages[Number(name.split('-').at(-1)) - 1];
       throw Object.assign(new Error(name + ' failed'), { result: { exitCode: 1, stopConfirmed: true,
         stdout: JSON.stringify({ type: 'turn.failed', error: { message } }), stderr: 'stale arg0 temp dirs, error 145' } });
     }
     return { exitCode: 0, stopConfirmed: true };
   };
-  await runProductionHarness({ job: { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
+  await assert.rejects(runProductionHarness({ job: { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
       objective: 'Make a polished game.' }, project, output, signal: new AbortController().signal, step, unreal: 'fixture',
     reportProgress: async value => progress.push(value),
-    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } });
-  assert.equal(deliveries.length, 2); // Existing iteration/retry behavior is unchanged.
-  assert.equal(calls.filter(name => name.startsWith('quality-review-')).length, 2);
-  assert.deepEqual(deliveries.map(record => record.quality.upstreamAI.code), ['HTTP_503', 'STREAM_DISCONNECTED']);
-  for (const record of deliveries) {
-    assert.equal(record.playable, true); assert.equal(record.qualityAccepted, false);
-    assert.match(record.quality.reason, /上游 AI 服务调用失败/);
-    assert.match(record.issues.find(issue => issue.stage === 'quality-review').reason, /quality-review-\d+ failed/);
-    const saved = JSON.parse(await fs.readFile(path.join(output, 'iteration-' + record.iteration + '-quality-review-gap.json')));
-    assert.equal(saved.upstreamAI.category, 'upstream-ai');
-    assert.equal(await fs.readFile(path.join(record.retainedProject, 'package/Windows/Game.exe'), 'utf8'), 'game');
-  }
-  assert.ok(progress.some(value => value.phase === 'retrying' && /HTTP 503/.test(value.error)));
-  assert.match(progress.at(-1).error, /响应流中断/); // Terminal budget path retains the cause too.
+    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } }),
+    error => error.kind === 'SERVICE_TRANSIENT' && error.upstreamAI.code === code);
+  assert.equal(deliveries.length, 0);
+  assert.equal(calls.filter(name => name.startsWith('quality-review-')).length, 1);
+  assert.equal(progress.at(-1).diagnostic.code, code);
   assert.doesNotMatch(progress.at(-1).error, /arg0|145/);
+  assert.equal(await fs.readFile(path.join(project, 'package/Windows/Game.exe'), 'utf8'), 'game');
+  assert.equal((await fs.readdir(output)).some(name => name.endsWith('-quality-review-gap.json')), false);
 });
 
 test('local quality response errors remain distinguishable from upstream outages', async t => {
@@ -322,9 +315,11 @@ test('planning exhaustion completes two playable rounds and delivers retained ga
   assert.ok(deliveries.every(row => row.score === 0 && row.issues.some(issue => issue.stage === 'modeling-planning')));
   assert.equal(calls.filter(name => name.startsWith('modeling-plan')).length, 1);
   assert.equal(calls.filter(name => name.startsWith('modeling-engineering')).length, 8);
-  assert.equal(calls.filter(name => name.startsWith('packaged-game-playtest')).length, 2);
+  assert.equal(calls.filter(name => name.startsWith('packaged-game-playtest')).length, 1);
   assert.equal(await fs.readFile(result.files.packageFile, 'utf8'), 'game');
-  const retainedGap = JSON.parse(await fs.readFile(path.join(result.delivery.retainedProject, 'plan/modeling-planning/iteration-1/gap.json'), 'utf8'));
+  const manifest = JSON.parse(await fs.readFile(result.delivery.snapshotManifest, 'utf8'));
+  const row = manifest.files.find(row => row.path === 'plan/modeling-planning/iteration-1/gap.json');
+  const retainedGap = JSON.parse(await fs.readFile(path.join(path.dirname(project), 'storage-v2/objects', row.sha256.slice(0, 2), row.sha256), 'utf8'));
   assert.deepEqual(retainedGap.draft, draft);
   const callCount = calls.length;
   const resumed = await runProductionHarness(options);

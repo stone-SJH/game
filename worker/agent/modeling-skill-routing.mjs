@@ -77,7 +77,8 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
   const file = path.join(stateRoot, `toolchain-${assetId}.json`);
   try { await fs.writeFile(file, JSON.stringify(toolchain), { flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
-  if (hashValue(await readJson(file)) !== hashValue(toolchain)) {
+  const previous = await readJson(file);
+  if (hashValue(previous) !== hashValue(toolchain) && !await (await import('./workspace-epoch.mjs')).compatiblePin(file, previous, toolchain)) {
     throw Object.assign(new Error('Active modeling task toolchain changed. Restore its pinned release or stop with evidence; budgets cannot restart under another toolchain.'), { hardFailure: true, kind: 'TOOLCHAIN_CHANGED' });
   }
 }
@@ -85,7 +86,10 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
 export async function modelingToolHashes() {
   const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
     'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs', 'agent/stage-failure.mjs', 'agent/artifact-publication.mjs',
-    'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs'];
+    'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs',
+    'agent/workspace-epoch.mjs', 'agent/workspace-storage.mjs', 'agent/workspace-lock.mjs', 'agent/service-recovery.mjs', 'agent/stage-cache.mjs',
+    'agent/agent.mjs', 'agent/progress-preview.mjs', 'agent/workspace-gc.mjs', 'agent/workspace-migration.mjs',
+    '../skills/yahahagame-production/SKILL.md', '../skills/yahahagame-production/references/production-contract.md'];
   for (const directory of ['agent', 'tools']) {
     for (const entry of await fs.readdir(path.join(repositoryRoot, 'worker', directory))) {
       if (/^modeling[-_].*\.(mjs|py)$/.test(entry)) files.push(`${directory}/${entry}`);

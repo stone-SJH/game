@@ -42,11 +42,11 @@ test('hard-failure detection ignores command text and accepts explicit markers',
 test('playable package archive contains the complete packaged directory', async t => {
   const root = await fixture(t);
   const packageRoot = path.join(root, 'package', 'Windows');
-  const archive = path.join(root, 'playable.zip');
+  let archive = path.join(root, 'playable.zip');
   await fs.mkdir(path.join(packageRoot, 'Warden', 'Content'), { recursive: true });
   await fs.writeFile(path.join(packageRoot, 'Warden.exe'), 'launcher');
   await fs.writeFile(path.join(packageRoot, 'Warden', 'Content', 'game.pak'), 'content');
-  await archivePackage(packageRoot, archive, new AbortController().signal);
+  archive = await archivePackage(packageRoot, archive, new AbortController().signal);
   const listing = await runCommand(process.platform === 'win32' ? '7z.exe' : 'tar', process.platform === 'win32' ? ['l', '-ba', path.basename(archive)] : ['-tf', path.basename(archive)], { cwd: path.dirname(archive), timeoutMs: 10000 });
   assert.equal(listing.exitCode, 0, listing.stderr);
   assert.match(listing.stdout, /Warden\.exe/);
@@ -227,7 +227,7 @@ test('production Codex attempts use an isolated temporary directory', async t =>
   assert.notEqual(record.temp, process.env.TEMP);
 });
 
-test('service failures retain scored rounds and publish the actual cause', async t => {
+test('service failures preserve diagnostics without manufacturing scored content rounds', async t => {
   const root = await fixture(t), { entrypoint } = await fakeCli(root, {
     exitCode: 1,
     stderr: 'WARNING: failed to clean up stale arg0 temp dirs: The directory is not empty. (os error 145)\nHTTP 503 Service Unavailable',
@@ -236,21 +236,21 @@ test('service failures retain scored rounds and publish the actual cause', async
   environment(t, { CODEX_CMD: entrypoint, CODEX_MAX_ATTEMPTS: '3', CODEX_RETRY_DELAY_MS: '1', CODEX_TIMEOUT_MS: '10000',
     ITERATION_SAME_FAILURE_LIMIT: '3', ITERATION_FAILURE_LIMIT: '8' });
   const job = { taskId: 'temp-failure-task', workspaceId: 'temp-failure-workspace', runId: 'run', objective };
-  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name });
-  assert.equal(result.status, 'PASS');
-  assert.equal(result.report.delivery.playable, false);
+  const result = await executeJob(job, { root, signal: new AbortController().signal, uploadFile: async name => name, serviceRecoveryOptions: { maxWaitMs: 0 } });
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.report.delivery, null);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
-  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 3);
+  assert.equal((await fs.readdir(output)).filter(file => /^production-orchestrator-\d+\.json$/.test(file)).length, 1);
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
-  assert.ok(report.delivery.issues.some(issue => /503 Service Unavailable/.test(issue.reason)));
-  assert.equal(report.iterationReviews.filter(review => review.kind === 'iteration-delivery').length, 3);
+  assert.match(report.failure, /503 Service Unavailable/);
+  assert.equal(report.iterationReviews.filter(review => review.kind === 'iteration-delivery').length, 0);
   const temps = new Set();
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 1; attempt++) {
     const record = JSON.parse(await fs.readFile(path.join(output, `production-orchestrator-${attempt}.stdout.jsonl`), 'utf8'));
     temps.add(record.temp);
     await assert.rejects(fs.stat(record.temp), { code: 'ENOENT' });
   }
-  assert.equal(temps.size, 3);
+  assert.equal(temps.size, 1);
 });
 
 test('telemetry includes the newest workspace files beyond the first directory entries', async t => {

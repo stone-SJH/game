@@ -260,14 +260,20 @@ test('deficient models are delivered and the next iteration refines the best Ble
   const first = await createModelingPipeline(f.options).prepare();
   assert.equal(first.assets[0].status, 'DCC_PROVISIONAL'); assert.equal(first.assets[1].status, 'DCC_READY');
   assert.equal(f.events.filter(event => event === 'build:fox').length, 2);
-  const previous = first.assets[0].directory;
+  let previous = first.assets[0].directory;
   const build = f.options.build;
   f.options.build = async context => {
-    if (context.spec.assetId === 'fox') { assert.equal(context.sourceFile, previous + '/source.blend'); assert.equal(context.previousAttemptDirectory, previous); }
-    return build(context);
+    if (context.spec.assetId === 'fox') {
+      assert.equal(context.sourceFile, 'art/working/fox/source.blend');
+      assert.equal(await fs.readFile(path.join(f.project, context.sourceFile), 'utf8'), 'retained artifact');
+      assert.equal(context.previousAttemptDirectory, previous);
+    }
+    await build(context);
+    if (context.spec.assetId === 'fox') previous = context.directory;
   };
   const second = await createModelingPipeline(f.options).prepare({ iteration: 2 });
   assert.equal(second.assets[0].status, 'DCC_PROVISIONAL');
+  assert.equal(f.events.filter(event => event === 'build:fox').length, 4);
   assert.equal(f.events.filter(event => event === 'image').length, 1);
   assert.equal(f.events.filter(event => event === 'tripo').length, 1);
 });
@@ -288,17 +294,10 @@ test('a Blender stage failure preserves the generated base for the next whole it
   assert.equal(f.events.filter(event => event === 'tripo').length, 1);
 });
 
-for (const failedStage of ['image', 'concept-review', 'tripo']) {
+for (const failedStage of ['image', 'tripo']) {
   test(failedStage + ' outage retains a stage GAP and completes the other asset without a primitive rebuild', async t => {
     const f = await pipelineFixture(t);
     if (failedStage === 'image') f.options.imageProvider = { generate: async () => ({ status: 'unavailable', reasonCode: 'image_timeout' }) };
-    if (failedStage === 'concept-review') {
-      const evaluate = f.options.evaluate;
-      f.options.evaluate = async context => {
-        if (context.name === 'modeling-concept-review') throw new Error('Review service unavailable');
-        return evaluate(context);
-      };
-    }
     if (failedStage === 'tripo') f.options.provider.generate = async () => ({ status: 'unavailable', reasonCode: 'provider_timeout' });
     const first = await createModelingPipeline(f.options).prepare();
     assert.equal(first.assets[0].status, 'NO_USABLE_ARTIFACT'); assert.equal(first.assets[1].status, 'DCC_READY');
@@ -307,6 +306,18 @@ for (const failedStage of ['image', 'concept-review', 'tripo']) {
     await createModelingPipeline(f.options).prepare(); assert.equal(f.events.length, calls);
   });
 }
+
+test('concept review service failure preserves its image and stops without a quality gap or rebuild', async t => {
+  const f = await pipelineFixture(t), evaluate = f.options.evaluate;
+  f.options.evaluate = async context => {
+    if (context.name === 'modeling-concept-review') throw new Error('Review service unavailable');
+    return evaluate(context);
+  };
+  for (let resume = 0; resume < 2; resume++) {
+    await assert.rejects(createModelingPipeline(f.options).prepare(), error => error.kind === 'SERVICE_TRANSIENT');
+  }
+  assert.deepEqual(f.events, ['image']);
+});
 
 test('unavailable image router configuration is pinned without globally failing unrelated modeling', async t => {
   const f = await fixture(t), before = process.env.MODELING_IMAGE_BASE_URL;
@@ -344,8 +355,9 @@ test('Tripo polling timeout resumes the same paid image task only after the whol
   assert.equal(posts, 2); assert.equal((await readJson(args.ledgerFile)).submissions, 1);
 });
 
-test('pipeline carries a timed-out Tripo task into the next iteration without generating another image', async t => {
+for (const revisionId of [undefined, 'revision-a']) test('pipeline carries a timed-out Tripo task across iterations without recharging (' + (revisionId || 'legacy') + ')', async t => {
   const f = await pipelineFixture(t), original = f.options.provider.generate, requests = [];
+  f.options.job.revisionId = revisionId;
   f.options.provider.generate = async args => {
     requests.push(args);
     if (requests.length === 1) {

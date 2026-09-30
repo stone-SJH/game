@@ -13,7 +13,7 @@ const artifactTypeSql = `CASE
   WHEN lower(a.name) ~ '(stderr|stdout|session|diagnostic|log)' OR lower(a.name) ~ '\\.(log|jsonl|txt|out|err)$' THEN 'log'
   WHEN lower(a.content_type) = 'application/json' OR lower(a.name) ~ '\\.json$' THEN 'report'
   ELSE 'other' END`;
-const phases = new Set(['preparing', 'planning', 'thinking', 'crafting', 'building', 'evaluating', 'completed', 'failed', 'canceled', 'working']);
+const phases = new Set(['preparing', 'planning', 'thinking', 'crafting', 'building', 'evaluating', 'completed', 'failed', 'canceled', 'working', 'waiting_service']);
 const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const integer = (value, max = 9999) => {
   const number = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
@@ -113,6 +113,8 @@ export function normalizeProgress(input, fallbackGoal = '') {
     steps: { completed, total },
     iteration: integer(input.iteration, 999),
     iterationTotal: integer(input.iterationTotal, 999),
+    waitReason: text(input.waitReason, 2000) || null,
+    nextRetryAt: Number.isFinite(Date.parse(input.nextRetryAt)) ? new Date(input.nextRetryAt).toISOString() : null,
     prompt: prompt || null,
     screenshots: files(input.screenshots, 2),
     projectFiles: files(input.projectFiles, 4),
@@ -124,7 +126,9 @@ export function normalizeProgress(input, fallbackGoal = '') {
 function progressSignature(value) {
   if (!value || typeof value !== 'object') return '';
   const { receivedAt, observedAt, ...stable } = value;
-  return JSON.stringify(stable);
+  const canonical = item => Array.isArray(item) ? item.map(canonical) : item && typeof item === 'object'
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])])) : item;
+  return JSON.stringify(canonical(stable));
 }
 function progressEventSignature(value) {
   if (!value || typeof value !== 'object') return '';
@@ -132,7 +136,7 @@ function progressEventSignature(value) {
   // Error text is sticky while commands and workspace snapshots change. Keep those updates in
   // jobs.progress, but avoid turning every telemetry snapshot into another failure event.
   const source = value.diagnostic && typeof value.diagnostic === 'object' ? value.diagnostic : {};
-  return JSON.stringify({
+  return progressSignature({
     phase: value.phase, status: value.status, goal: value.goal, step: value.step,
     steps: value.steps, iteration: value.iteration, iterationTotal: value.iterationTotal,
     error: value.error || source.message || null,
@@ -188,7 +192,7 @@ function iterationFailures(row) {
     if (!value) continue;
     // Commands and stages can vary while the worker repeats one sticky failure. Group by the
     // stable cause and retain the first useful command/output as the representative diagnostic.
-    const key = JSON.stringify({ message: value.message, category: value.category || null, exitCode: value.exitCode ?? null,
+    const key = JSON.stringify({ message: value.message, exitCode: value.exitCode ?? null,
       timedOut: value.timedOut === true, noOutput: value.noOutput === true });
     const existing = byKey.get(key);
     if (existing) {
@@ -471,12 +475,13 @@ export async function rerunTask(db, taskId, userId, input) {
     if ((await client.query("SELECT 1 FROM worker_allocations wa JOIN jobs j ON j.job_id=wa.job_id WHERE j.task_id=$1 AND wa.released_at IS NULL", [taskId])).rowCount) {
       throw problem(409, 'The previous worker execution is still shutting down.');
     }
-    const priorRun = (await client.query(`SELECT r.run_id,rev.input FROM task_runs r JOIN task_revisions rev USING(revision_id)
+    const priorRun = (await client.query(`SELECT r.run_id,r.revision_id,rev.input FROM task_runs r JOIN task_revisions rev USING(revision_id)
       WHERE r.task_id=$1 ORDER BY rev.revision_number DESC LIMIT 1`, [taskId])).rows[0];
     const revisionNumber = Number((await client.query('SELECT COALESCE(MAX(revision_number),0)+1 AS next FROM task_revisions WHERE task_id=$1', [taskId])).rows[0].next);
     const runId = id('run'), jobId = id('job'), revisionId = id('revision');
     const references = await selectedReferences(client, userId, input.references, revisionNumber);
-    const payload = { ...(task.payload || {}), followUpPrompt: prompt, parentRunId: priorRun?.run_id || null, workspacePolicy: 'continue-existing',
+    const payload = { ...(task.payload || {}), followUpPrompt: prompt, parentRunId: priorRun?.run_id || null,
+      parentRevisionId: priorRun?.revision_id || null, revisionId, budgetGrant: { revisionId, authorCallsPerAsset: 3, productionIterations: 10 }, workspacePolicy: 'continue-existing',
       references: [...(priorRun?.input?.payload?.references || []), ...references] };
     const revisionInput = { kind: task.kind, objective: task.objective, followUpPrompt: prompt, payload, references };
     const previous = (await client.query('SELECT input FROM task_revisions WHERE task_id=$1 ORDER BY revision_number', [taskId])).rows
@@ -494,6 +499,24 @@ export async function rerunTask(db, taskId, userId, input) {
     return { taskId, runId, jobId, workspaceId: (await client.query('SELECT workspace_id FROM workspaces WHERE task_id=$1', [taskId])).rows[0]?.workspace_id, status: 'QUEUED', references };
   });
 }
+export async function recoverTask(db, taskId, userId, input) {
+  if (!/^[a-zA-Z0-9-]{1,100}$/.test(input?.requestId || '')) throw problem(400, 'Recovery requestId required.');
+  return change(db, async client => {
+    const task = await ownedTask(client, taskId, userId);
+    const existing = (await client.query("SELECT j.job_id,j.run_id FROM jobs j WHERE j.task_id=$1 AND j.payload->>'recoveryRequestId'=$2", [taskId, input.requestId])).rows[0];
+    if (existing) return { taskId, runId: existing.run_id, jobId: existing.job_id, recovered: true };
+    if (!terminal.has(task.status) || new Date(task.deadline_at) <= new Date()) throw problem(409, 'Recovery requires a settled task with remaining original time budget. Use Continue for a new revision.');
+    if ((await client.query('SELECT 1 FROM worker_allocations a JOIN jobs j USING(job_id) WHERE j.task_id=$1 AND a.released_at IS NULL', [taskId])).rowCount) throw problem(409, 'Previous execution is not settled.');
+    const prior = (await client.query('SELECT j.*,r.revision_id FROM jobs j JOIN task_runs r USING(run_id) WHERE j.task_id=$1 ORDER BY j.created_at DESC LIMIT 1', [taskId])).rows[0];
+    const runId = id('run'), jobId = id('job');
+    const payload = { ...prior.payload, recoveryRequestId: input.requestId, parentRunId: prior.run_id, recovery: true };
+    await client.query("INSERT INTO task_runs(run_id,task_id,revision_id,status) VALUES($1,$2,$3,'QUEUED')", [runId, taskId, prior.revision_id]);
+    await client.query('INSERT INTO jobs(job_id,task_id,run_id,payload,objective) VALUES($1,$2,$3,$4,$5)', [jobId, taskId, runId, payload, prior.objective]);
+    await client.query("UPDATE tasks SET status='QUEUED',cancel_reason=NULL,result=NULL,updated_at=now() WHERE task_id=$1", [taskId]);
+    await event(client, taskId, 'TASK_RECOVERY_REQUESTED', { runId, revisionId: prior.revision_id, parentRunId: prior.run_id });
+    return { taskId, runId, jobId, revisionId: prior.revision_id, recovered: true };
+  });
+}
 export async function registerWorker(db, worker, input) {
   if (input.protocol !== 2 || !/^[a-zA-Z0-9-]{1,80}$/.test(input.bootId || '')) throw problem(400, 'Worker protocol 2 and bootId required.');
   return change(db, async client => {
@@ -508,13 +531,15 @@ export async function pollWorker(db, worker, input, leaseMs) {
     const current = (await client.query('SELECT * FROM workers WHERE worker_id=$1', [worker.worker_id])).rows[0];
     if (current.boot_id !== input.bootId || current.status !== 'ONLINE') throw problem(409, 'Register this worker boot first.');
     if ((await client.query('SELECT 1 FROM worker_allocations WHERE worker_id=$1 AND released_at IS NULL', [worker.worker_id])).rowCount) return { job: null };
-    const job = (await client.query(`SELECT j.*,t.kind,t.objective AS base_objective,t.deadline_at,w.workspace_id FROM jobs j
+    const job = (await client.query(`SELECT j.*,r.revision_id,rev.input_hash,t.kind,t.objective AS base_objective,t.deadline_at,w.workspace_id FROM jobs j
       JOIN tasks t ON t.task_id=j.task_id JOIN workspaces w ON w.task_id=t.task_id
+      JOIN task_runs r ON r.run_id=j.run_id JOIN task_revisions rev ON rev.revision_id=r.revision_id
       JOIN user_worker_bindings b ON b.user_id=t.user_id JOIN users u ON u.user_id=t.user_id
       WHERE b.worker_id=$1 AND u.status='ACTIVE' AND j.status='QUEUED' AND t.status='QUEUED'
       AND t.deadline_at>now() AND (w.worker_id IS NULL OR w.worker_id=$1)
+      AND w.maintenance IS NULL AND $3::jsonb @> w.required_capabilities
       AND (COALESCE(jsonb_array_length(j.payload->'references'),0)=0 OR $2::boolean)
-      ORDER BY j.created_at,j.job_id LIMIT 1`, [worker.worker_id, current.capabilities?.referenceFiles === 1])).rows[0];
+      ORDER BY j.created_at,j.job_id LIMIT 1`, [worker.worker_id, current.capabilities?.referenceFiles === 1, JSON.stringify(current.capabilities || {})])).rows[0];
     if (!job) return { job: null };
     const leaseToken = id('lease'), allocationId = id('allocation');
     const leaseUntil = new Date(Date.now() + leaseMs);
@@ -525,6 +550,8 @@ export async function pollWorker(db, worker, input, leaseMs) {
     await client.query('INSERT INTO worker_allocations(allocation_id,job_id,workspace_id,worker_id,boot_id,write_epoch) VALUES($1,$2,$3,$4,$5,$6)', [allocationId, job.job_id, job.workspace_id, worker.worker_id, input.bootId, workspace.write_epoch]);
     await event(client, job.task_id, 'STEP_STARTED', { workerId: worker.worker_id, jobId: job.job_id, runId: job.run_id });
     return { job: { protocol: 2, jobId: job.job_id, taskId: job.task_id, runId: job.run_id, workspaceId: job.workspace_id,
+      revisionId: job.revision_id, parentRevisionId: job.payload?.parentRevisionId || null, parentRunId: job.payload?.parentRunId || null,
+      inputHash: job.input_hash, budgetGrant: job.payload?.budgetGrant || null,
       allocationId, writeEpoch: workspace.write_epoch, leaseToken, leaseUntil: leaseUntil.toISOString(), deadlineAt: job.deadline_at,
       kind: job.kind, objective: job.objective || job.base_objective, payload: job.payload } };
   });

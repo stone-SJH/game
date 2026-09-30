@@ -2,11 +2,20 @@ import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJson, hashFile, hashValue, readJson } from './modeling-io.mjs';
-import { throwIfExecutionFenced } from './stage-failure.mjs';
+import { isExecutionFence } from './stage-failure.mjs';
+import { failureKind } from './service-recovery.mjs';
+import { contentStore } from './workspace-storage.mjs';
 
-export async function awaitArtifactPublication(publisher, { signal, retryDelayMs = 10000, onPending = async () => {} } = {}) {
+function throwIfExecutionFenced(error, signal) {
+  signal?.throwIfAborted();
+  if (isExecutionFence(error) || ['RESOURCE_EXHAUSTED', 'SERVICE_CONFIGURATION'].includes(failureKind(error))) throw error;
+}
+
+export async function awaitArtifactPublication(publisher, { signal, retryDelayMs = 10000, maxWaitMs = 900000, onPending = async () => {} } = {}) {
+  const started = Date.now();
   while (publisher.summary().requiredPending > 0) {
     signal?.throwIfAborted();
+    if (Date.now() - started >= maxWaitMs) throw Object.assign(new Error('Artifact service unavailable; pending publications retained for recovery.'), { kind: 'SERVICE_TRANSIENT' });
     await onPending(publisher.summary());
     await delay(retryDelayMs, undefined, { signal });
     await publisher.flush({ requiredOnly: true });
@@ -16,7 +25,8 @@ export async function awaitArtifactPublication(publisher, { signal, retryDelayMs
 
 // Publication is an independent, resumable delivery operation. Its availability
 // must not relabel production quality or discard a retained iteration.
-export async function createArtifactPublisher({ file, upload, signal, retryDelayMs = 1000, maxAttempts = 3 }) {
+export async function createArtifactPublisher({ file, upload, signal, workspace = path.dirname(file), retryDelayMs = 1000, maxAttempts = 3 }) {
+  const store = contentStore(workspace);
   const state = await readJson(file, null, 64 * 1024 * 1024) || { protocol: 1, items: {} };
   let queue = Promise.resolve();
   const serialized = operation => {
@@ -51,16 +61,14 @@ export async function createArtifactPublisher({ file, upload, signal, retryDelay
       let sha256, lastError;
       try { sha256 = await hashFile(source); }
       catch (error) { throwIfExecutionFenced(error, signal); lastError = String(error.message); }
-      const key = hashValue({ name, source, sha256: sha256 || null });
+      const key = hashValue({ name, sha256: sha256 || null });
       if (sha256 && !state.items[key]) {
-        const retained = path.join(path.dirname(file), 'publication-outbox', key);
         try {
-          await fs.mkdir(path.dirname(retained), { recursive: true });
-          try { await fs.copyFile(source, retained, fs.constants.COPYFILE_EXCL); }
-          catch (error) { if (error.code !== 'EEXIST') throw error; }
-          if (await hashFile(retained) !== sha256) throw new Error('Artifact changed while retaining its publication copy.');
+          const object = await store.put(source);
+          if (object.sha256 !== sha256) throw Object.assign(new Error('Artifact changed during retention'), { kind: 'INTEGRITY_ERROR' });
+          const retained = store.objectPath(sha256);
           state.items[key] = { name, source, path: retained, sha256, contentType, options: uploadOptions, required, attempts: 0, status: 'PENDING' };
-        } catch (error) { throwIfExecutionFenced(error, signal); lastError = String(error.message); }
+        } catch (error) { throwIfExecutionFenced(error, signal); throw error; }
       }
       const item = state.items[key] ||= { name, source, path: source, sha256: sha256 || null, contentType, options: uploadOptions, required, attempts: 0, status: 'PENDING', lastError };
       item.required ||= required;

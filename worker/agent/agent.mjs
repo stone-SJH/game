@@ -7,7 +7,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand, maintainLease } from './process-runner.mjs';
 import { artifactContentType, commandDiagnostic, runProductionHarness } from './production-harness.mjs';
 import { tripoAvailability } from './providers/tripo.mjs';
-import { agentEnvironment } from './modeling-io.mjs';
+import { agentEnvironment, hashFile, hashValue, readJson } from './modeling-io.mjs';
+import { contentStore, packageEntry, requireSpace } from './workspace-storage.mjs';
+import { recoverService } from './service-recovery.mjs';
+import { progressPreview } from './progress-preview.mjs';
+import { workspaceLock } from './workspace-lock.mjs';
+import { readWorkspaceEpoch } from './workspace-epoch.mjs';
 import { materializeReferences } from './references.mjs';
 import { createArtifactPublisher, awaitArtifactPublication } from './artifact-publication.mjs';
 import { throwIfExecutionFenced } from './stage-failure.mjs';
@@ -39,8 +44,15 @@ const projectImageRoots = [
   { path: 'art', maxDepth: Infinity },
 ];
 
-export async function archivePackage(packageRoot, destination, signal) {
-  await fsp.rm(destination, { force: true });
+export async function archivePackage(packageRoot, destination, signal, workspace = path.dirname(destination)) {
+  const store = contentStore(workspace);
+  const manifest = await store.snapshot(packageRoot, packageEntry);
+  const cacheFile = path.join(store.root, 'archives', `${manifest.id}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`);
+  const receiptFile = cacheFile + '.json';
+  const receipt = await readJson(receiptFile);
+  if (receipt && await hashFile(cacheFile) === receipt.sha256) return cacheFile;
+  await fsp.mkdir(path.dirname(cacheFile), { recursive: true });
+  await requireSpace(workspace, manifest.files.reduce((n, row) => n + row.size, 0) * 2);
   const windows = process.platform === 'win32';
   const sevenZip = windows ? findSevenZip() : null;
   const command = sevenZip || (windows ? 'tar.exe' : 'tar');
@@ -48,10 +60,10 @@ export async function archivePackage(packageRoot, destination, signal) {
   const temporaryName = `.yahahagame-package-${crypto.randomUUID()}${extension}`;
   const temporary = path.join(packageRoot, temporaryName);
   const args = sevenZip
-    ? ['a', '-tzip', '-mx=1', temporaryName, '.', `-xr!${temporaryName}`]
+    ? ['a', '-tzip', '-mx=1', '-mtc=off', '-mta=off', temporaryName, '.', '-xr!Saved', '-xr!.yahahagame-package-*']
     : windows
-      ? ['-a', '-c', '-f', temporaryName, `--exclude=./${temporaryName}`, '.']
-      : ['-czf', temporaryName, `--exclude=./${temporaryName}`, '.'];
+      ? ['-a', '-c', '-f', temporaryName, '--exclude=Saved', '--exclude=.yahahagame-package-*', '.']
+      : ['-czf', temporaryName, '--exclude=Saved', '--exclude=.yahahagame-package-*', '.'];
   const result = await runCommand(command, args, {
     cwd: packageRoot,
     signal,
@@ -62,9 +74,14 @@ export async function archivePackage(packageRoot, destination, signal) {
     throw Object.assign(new Error(`Playable package archive failed (exit ${result.exitCode}):\n${commandDiagnostic(result)}`),
       { result, stopConfirmed: result.stopConfirmed });
   }
-  try { await fsp.rename(temporary, destination); }
+  try {
+    const after = await store.snapshot(packageRoot, packageEntry);
+    if (after.id !== manifest.id) throw Object.assign(new Error('Package changed while archiving'), { kind: 'INTEGRITY_ERROR' });
+    await fsp.rename(temporary, cacheFile);
+    await atomicJson(receiptFile, { packageDigest: manifest.id, sha256: await hashFile(cacheFile) });
+  }
   finally { await fsp.rm(temporary, { force: true }); }
-  return destination;
+  return cacheFile;
 }
 
 function findSevenZip() {
@@ -116,7 +133,7 @@ async function workspaceSnapshot(project, output) {
     ...(await recentFiles(output, (file, name) => logExtensions.has(path.extname(name).toLowerCase()) || /log/i.test(name), 20)).map(file => ({ ...file, path: `run/${file.path}` })),
   ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 30);
   const screenshots = [
-    ...(await recentFiles(project, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12, projectImageRoots)).map(file => ({ ...file, path: `project/${file.path}` })),
+    ...(await recentFiles(project, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()) && !/[\\/]textures[\\/]/i.test(file), 12, projectImageRoots)).map(file => ({ ...file, path: `project/${file.path}` })),
     ...(await recentFiles(output, (file, name) => imageExtensions.has(path.extname(name).toLowerCase()), 12)).map(file => ({ ...file, path: `run/${file.path}` })),
   ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 20);
   return { projectFiles, logFiles, screenshots };
@@ -146,12 +163,24 @@ function toolFromOutput(value) {
 }
 
 export async function executeJob(job, ctx) {
+  const workspace = path.join(ctx.root, 'workspaces', job.workspaceId);
+  const required = await readJson(path.join(workspace, 'state-v2/migration-required.json'));
+  if (required && (await readWorkspaceEpoch(workspace))?.planHash !== required.planHash)
+    throw Object.assign(new Error('Workspace migration is staged but not activated. Deploy the controller and complete the verified migration before Continue.'), { kind: 'MIGRATION_REQUIRED' });
+  const release = await workspaceLock(workspace, { taskId: job.taskId, runId: job.runId, writeEpoch: job.writeEpoch });
+  let stopped = true;
+  try { const result = await executeOwnedJob(job, ctx); stopped = result.stopConfirmed !== false; return result; }
+  catch (error) { stopped = error.stopConfirmed !== false && error.result?.stopConfirmed !== false; throw error; }
+  finally { if (stopped) await release(); }
+}
+
+async function executeOwnedJob(job, ctx) {
   const { root, signal, uploadFile: rawUploadFile, reportProgress = () => {} } = ctx;
   const project = path.join(root, 'workspaces', job.workspaceId, 'project');
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   await fsp.mkdir(project, { recursive: true }); await fsp.mkdir(output, { recursive: true });
   const publisher = typeof rawUploadFile === 'function' ? await createArtifactPublisher({
-    file: path.join(output, 'artifact-publication.json'), upload: rawUploadFile, signal,
+    file: path.join(output, 'artifact-publication.json'), upload: rawUploadFile, signal, workspace: path.dirname(project),
     ...(ctx.publicationRetryDelayMs === undefined ? {} : { retryDelayMs: ctx.publicationRetryDelayMs }) }) : null;
   const uploadFile = publisher?.publish;
   const logs = [], artifactIds = [];
@@ -181,14 +210,18 @@ export async function executeJob(job, ctx) {
       if (signal.aborted) return;
       const snapshot = await getSnapshot();
       if (typeof uploadFile === 'function') {
-        for (const screenshot of snapshot.screenshots.slice(0, 4)) {
-          const key = `${screenshot.path}:${screenshot.updatedAt}`;
+        for (const screenshot of snapshot.screenshots.slice(0, 2)) {
+          const screenshotRoot = screenshot.path.startsWith('project/') ? project : output;
+          const screenshotRelative = screenshot.path.replace(/^(?:project|run)\//, '');
+          const key = await hashFile(path.join(screenshotRoot, screenshotRelative)).catch(() => null);
+          if (!key) continue;
           let artifactId = uploadedScreenshots.get(key);
           if (!artifactId) {
             const root = screenshot.path.startsWith('project/') ? project : output;
             const relative = screenshot.path.replace(/^(?:project|run)\//, '');
             try {
-              artifactId = await uploadFile(`worker-screenshot-${uploadedScreenshots.size}${path.extname(relative).toLowerCase()}`, path.join(root, relative), artifactContentType(relative));
+              const preview = await progressPreview(path.dirname(project), path.join(root, relative), key, signal);
+              artifactId = await uploadFile(`worker-screenshot-${preview.sha256.slice(0, 24)}${path.extname(preview.file).toLowerCase()}`, preview.file, artifactContentType(preview.file));
               uploadedScreenshots.set(key, artifactId);
             } catch { /* A screenshot may still be locked or disappear while a tool writes it. */ }
           }
@@ -212,6 +245,7 @@ export async function executeJob(job, ctx) {
   snapshotTimer.unref?.();
   async function step(name, command, args, timeoutMs, cwd = project, accepts, options = {}) {
     signal.throwIfAborted();
+    await requireSpace(project, 1024 ** 3);
     const monitorStep = name.startsWith('iteration-diagnosis');
     const codexStep = isAiInvocation(name, args);
     await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
@@ -219,7 +253,7 @@ export async function executeJob(job, ctx) {
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
     await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
-    let pendingOutput = '';
+    let pendingOutput = '', toolStarted = false;
     let upstreamIssue = null;
     const onStdout = chunk => {
       if (!codexStep) return;
@@ -238,6 +272,7 @@ export async function executeJob(job, ctx) {
           upstreamIssue = null;
           publish({ error: null, diagnostic: null }).catch(() => {});
         }
+        if (['mcp_tool_call', 'command_execution'].includes(event.item?.type)) toolStarted = true;
         if (event.item?.type === 'mcp_tool_call' && event.item.server === 'yahaha_blender') {
           const done = event.type === 'item.completed';
           publish({ tool: done ? 'AI / Codex' : 'Blender MCP', phase: done ? 'thinking' : 'crafting', command: String(event.item.tool || 'Blender MCP').slice(0, 180) }).catch(() => {});
@@ -251,9 +286,27 @@ export async function executeJob(job, ctx) {
       }
       if (pendingOutput.length > 2 * 1024 * 1024) pendingOutput = '';
     };
-    const result = await runCommand(command, args, { ...options, env: agentEnvironment(options.env || process.env), cwd, timeoutMs, signal,
+    let serviceAttempt = 0;
+    const result = await recoverService(path.join(path.dirname(project), 'service-state', `${hashValue({ revision: job.revisionId || job.runId, name })}.json`), async () => {
+      const suffix = serviceAttempt++ ? `-service-${serviceAttempt}` : '';
+      const value = await runCommand(command, args, { ...options, env: agentEnvironment(options.env || process.env), cwd, timeoutMs, signal,
       onStdout,
-      stdoutFile: path.join(output, `${name}.stdout.jsonl`), stderrFile: path.join(output, `${name}.stderr.log`) });
+      stdoutFile: path.join(output, `${name}${suffix}.stdout.jsonl`), stderrFile: path.join(output, `${name}${suffix}.stderr.log`) });
+      const passed = accepts ? await accepts(value) : !value.error && value.exitCode === 0 && !value.timedOut;
+      await atomicJson(stepFile, { name, ...value, status: passed ? 'COMPLETED' : 'FAILED', serviceAttempt });
+      if (!passed) {
+        logs.push({ name, ...value, passed, serviceAttempt });
+        const error = Object.assign(new Error(`${name} failed (exit ${value.exitCode}):\n${commandDiagnostic(value)}`), { result: value, retrySafe: !toolStarted });
+        const upstreamAI = diagnoseUpstreamAI(error, { stage: name, ai: codexStep });
+        if (upstreamAI) {
+          error.upstreamAI = upstreamAI;
+          await publish({ error: upstreamAI.message, diagnostic: { ...upstreamAI, exitCode: value.exitCode,
+            logFiles: [`${name}${suffix}.stdout.jsonl`, `${name}${suffix}.stderr.log`] } });
+        }
+        throw error;
+      }
+      return value;
+    }, { signal, deadlineAt: job.deadlineAt, onWaiting: publish, ...ctx.serviceRecoveryOptions });
     invalidateSnapshot();
     await atomicJson(stepFile, { name, ...result });
     if (!result.stopConfirmed) throw Object.assign(new Error(result.error), { stopConfirmed: false });
@@ -271,7 +324,7 @@ export async function executeJob(job, ctx) {
       throw error;
     }
     if (upstreamIssue) await publish({ error: null, diagnostic: null });
-    if (!monitorStep) await publish({ status: 'running', steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
+    if (!monitorStep) await publish({ status: 'running', waitReason: null, nextRetryAt: null, steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }
   const unreal = process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe';
@@ -285,6 +338,7 @@ export async function executeJob(job, ctx) {
       requirePublishableResult: ctx.requirePublishableResult === true,
       onModelingReport: async ({ file, record }) => {
         if (typeof uploadFile !== 'function') return;
+        if (!['DCC_READY', 'DCC_PROVISIONAL', 'NO_USABLE_ARTIFACT', 'ENGINE_READY', 'ENGINE_PROVISIONAL'].includes(record.status) && !record.accepted) return;
         try {
           const name = `modeling-${crypto.createHash('sha256').update(file).digest('hex').slice(0, 16)}-${path.basename(file)}`;
           const artifactId = await uploadFile(name, file, artifactContentType(file), { timeoutMs: 30000 });
@@ -319,10 +373,12 @@ export async function executeJob(job, ctx) {
         const name = playablePackageName(attempt);
         const archiveFile = path.join(output, name);
         try {
-          await archivePackage(packageRoot, archiveFile, signal);
-          const artifactId = await uploadFile(name, archiveFile, artifactContentType(archiveFile));
+          const archived = await archivePackage(packageRoot, archiveFile, signal, path.dirname(project));
+          const existing = playablePackages.find(item => item.path === archived);
+          if (existing) { existing.iterations ||= [existing.iteration]; existing.iterations.push(attempt); return; }
+          const artifactId = await uploadFile(name, archived, artifactContentType(archived));
           artifactIds.push(artifactId);
-          playablePackages.push({ iteration: attempt, name, path: name, artifactId });
+          playablePackages.push({ iteration: attempt, name, path: archived, artifactId });
           await publish({ phase: 'publishing', status: 'running', goal: job.objective, iteration: attempt, step: `playable package iteration ${attempt}`, packageArtifact: name });
         } catch (error) {
           throwIfExecutionFenced(error, signal);
@@ -330,16 +386,21 @@ export async function executeJob(job, ctx) {
           throw error;
         }
       } });
+    if (ctx.requirePublishableResult && (!production.files.packageFile || production.delivery?.playable === false)) {
+      throw new Error(`Production deliverables missing: ${production.missing?.join(', ') || 'a validated playable package'}. Retained the draft and bounded diagnostics.`);
+    }
     if (publisher) {
       for (const [role, file] of Object.entries(production.files)) artifactIds.push(await uploadFile(path.basename(file), file, artifactContentType(file),
         { required: ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport', 'iterationResult'].includes(role) }));
-      let retainedPackage = playablePackages.find(item => item.iteration === production.delivery?.iteration);
+      let retainedPackage = playablePackages.find(item => item.iteration === production.delivery?.iteration || item.iterations?.includes(production.delivery?.iteration));
+      let archiveAttempts = 0;
       while (ctx.requirePublishableResult && !retainedPackage) {
         signal.throwIfAborted();
+        if (++archiveAttempts > 3) throw new Error('Package archive retry budget exhausted; retained source and evidence.');
         const name = playablePackageName(production.delivery.iteration);
         try {
-          await (ctx.archivePackage || archivePackage)(path.dirname(production.files.packageFile), path.join(output, name), signal);
-          retainedPackage = { iteration: production.delivery.iteration, name, path: name };
+          const archived = await (ctx.archivePackage || archivePackage)(path.dirname(production.files.packageFile), path.join(output, name), signal, path.dirname(project));
+          retainedPackage = { iteration: production.delivery.iteration, name, path: archived || path.join(output, name) };
           playablePackages.push(retainedPackage);
         } catch (error) {
           throwIfExecutionFenced(error, signal);
@@ -347,7 +408,7 @@ export async function executeJob(job, ctx) {
           await delay(ctx.publicationRetryDelayMs ?? 10000, undefined, { signal });
         }
       }
-      if (retainedPackage) artifactIds.push(await uploadFile(retainedPackage.name, path.join(output, retainedPackage.path),
+      if (retainedPackage) artifactIds.push(await uploadFile(retainedPackage.name, path.isAbsolute(retainedPackage.path) ? retainedPackage.path : path.join(output, retainedPackage.path),
         artifactContentType(retainedPackage.path), { required: true }));
       await publisher.flush();
     }
@@ -423,7 +484,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     }
   }
   const identity = job => ({ jobId: job.jobId, taskId: job.taskId, leaseToken: job.leaseToken });
-  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, productionHarness: 1, telemetry: 1, referenceFiles: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
+  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, workspaceIteration: 2, artifactContent: 1, productionHarness: 1, telemetry: 1, referenceFiles: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
   if (prior) await sendResult(prior.job, prior.result);
   console.log(`worker ${workerId} registered (protocol 2)`);
   while (!signal?.aborted) {
@@ -457,10 +518,15 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
         for await (const chunk of fs.createReadStream(file, { signal: controller.signal })) hash.update(chunk);
         const sha = hash.digest('hex');
         const artifactId = `artifact-${crypto.createHash('sha256').update(`${job.jobId}:${name}:${sha}`).digest('hex')}`;
+        try {
+          const prepared = await post('/v1/worker/artifacts-prepare', { taskId: job.taskId, jobId: job.jobId, leaseToken: job.leaseToken,
+            artifactId, name, sha256: sha, sizeBytes: (await fsp.stat(file)).size });
+          if (!prepared.uploadRequired) return prepared.artifactId;
+        } catch (error) { if (error.status !== 404) throw error; } // Rolling deployment with a legacy controller.
         const response = await fetch(`${control}/v1/worker/artifacts/${job.taskId}/${artifactId}`, { method: 'POST', duplex: 'half',
           headers: { ...headers, 'x-boot-id': bootId, 'x-job-id': job.jobId, 'x-lease-token': job.leaseToken, 'x-artifact-name': name, 'x-artifact-sha256': sha, 'content-type': contentType },
           body: fs.createReadStream(file), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]) });
-        if (!response.ok) throw new Error(`Artifact upload failed (${response.status}).`);
+        if (!response.ok) throw Object.assign(new Error(`Artifact upload failed (${response.status}).`), { status: response.status });
         return (await response.json()).artifactId;
       } });
     } catch (error) {
