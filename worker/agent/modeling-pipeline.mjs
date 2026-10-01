@@ -51,7 +51,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
 
   function unavailableAsset(spec, issue) {
     return { assetId: spec.assetId, status: 'NO_USABLE_ARTIFACT', usable: false, files: [], spec, contract: spec.contract,
-      quality: { score: 0, accepted: false, gaps: [issue], repairInstructions: 'Retain this stage failure; finish the round using a documented temporary engine-native representation. Retry this stage in the next completed iteration.' },
+      quality: { score: 0, accepted: false, gaps: [issue], repairInstructions: issue.requiresInputChange
+        ? issue.reason + ' Continue other assets and scene work without claiming this asset is complete.'
+        : 'Retain this stage failure; finish the round using a documented temporary engine-native representation. Retry this stage in the next completed iteration.' },
       executionFile: execution.file };
   }
 
@@ -642,7 +644,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       const retained = state.bestCandidate;
       if (retained) await verifyEvidence(retained.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       round.stageGap = retained ? { ...retained, status: 'DCC_PROVISIONAL',
-        quality: { ...retained.quality, accepted: false, gaps: [...retained.quality.gaps, issue] } } : unavailableAsset(spec, issue);
+        quality: { ...retained.quality, accepted: false, gaps: [...retained.quality.gaps, issue],
+          ...(issue.requiresInputChange ? { repairInstructions: issue.reason } : {}) } } : unavailableAsset(spec, issue);
       state.failures.push(issue); await writeModelingState(stateFile, state);
       await report(round.stageGap, await localPath(project, 'plan/modeling/' + spec.assetId + '/' + short + '/iteration-' + productionIteration + '-image-gap.json'));
       return round.stageGap;

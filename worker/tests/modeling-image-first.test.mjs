@@ -6,7 +6,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import { imageGenerationSettings, imageGenerationCredential } from '../agent/modeling-image-settings.mjs';
 import { createModelingImageProvider, checkConceptPng } from '../agent/modeling-image-provider.mjs';
-import { prepareModelingConcept } from '../agent/modeling-concept.mjs';
+import { prepareModelingConcept, retainConceptInputRejection } from '../agent/modeling-concept.mjs';
 import { createTripoProvider } from '../agent/providers/tripo.mjs';
 import { selectModelingRoute, validateSchema } from '../agent/modeling-evaluation.mjs';
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
@@ -162,6 +162,62 @@ test('image service budget survives resumes and never becomes a quality GAP', as
   assert.equal(await readJson(path.join(f.project, 'art/modeling-concepts/fox/frozen/iteration-1/concept-review.json')), null);
 });
 
+test('an explicit content rejection retains safe evidence and is never retried as an outage', async t => {
+  const f = await fixture(t); let calls = 0;
+  const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    fetchImpl: async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: { code: 'moderation_blocked', message: 'private-image-key',
+        type: 'image_generation_user_error', nested: { auth: 'private-router-auth' } } }),
+      { status: 400, headers: { 'x-request-id': '7e3f7fb6-c6d6-4846-a31f-a78955b8b99a' } });
+    } });
+  for (let resume = 0; resume < 2; resume++) await assert.rejects(provider.generate(f.generation), error =>
+    error.kind === 'IMAGE_INPUT_REJECTED' && error.requiresInputChange && error.retrySafe === false &&
+    error.responseEvidence.code === 'moderation_blocked');
+  assert.equal(calls, 1);
+  const retained = await readJson(f.generation.stateFile);
+  assert.equal(retained.responseEvidence.requestId, '7e3f7fb6-c6d6-4846-a31f-a78955b8b99a');
+  assert.match(retained.responseEvidence.bodySha256, /^[a-f0-9]{64}$/);
+  assert.equal(retained.responseEvidence.truncated, false);
+  assert.doesNotMatch(JSON.stringify(retained), /private-image-key|private-router-auth|nested|message/);
+});
+
+test('untrusted, oversized and authentication responses cannot become a content rejection', async t => {
+  for (const [name, status, body] of [
+    ['authentication', 401, JSON.stringify({ error: { code: 'moderation_blocked' } })],
+    ['unknown', 400, JSON.stringify({ error: { code: 'private-image-key', message: 'moderation_blocked' } })],
+    ['oversized', 400, JSON.stringify({ error: { code: 'moderation_blocked', message: 'x'.repeat(17000) } })],
+  ]) {
+    const f = await fixture(t);
+    const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+      fetchImpl: async () => new Response(body, { status, headers: { 'x-request-id': 'private-image-key' } }) });
+    await assert.rejects(provider.generate(f.generation), error => error.kind === 'SERVICE_CONFIGURATION', name);
+    const retained = await readJson(f.generation.stateFile);
+    assert.ok(retained.responseEvidence.retainedBytes <= 16384);
+    assert.equal(retained.responseEvidence.truncated, name === 'oversized');
+    assert.doesNotMatch(JSON.stringify(retained), /private-image-key/);
+  }
+});
+
+test('content rejection blocks unchanged concept inputs across rounds, without asking for another draft', async t => {
+  const f = await fixture(t); let images = 0, reviews = 0;
+  const imageProvider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    fetchImpl: async () => { images++; return json({ error: { code: 'moderation_blocked' } }, 400); } });
+  const args = { spec, project: f.project, taskState: path.join(f.root, 'task'), short: 'frozen', iteration: 1,
+    job: {}, imageProvider, reportProgress: async () => {}, review: async () => { reviews++; } };
+  const first = await prepareModelingConcept(args);
+  assert.equal(first.status, 'GAP'); assert.equal(first.issue.kind, 'IMAGE_INPUT_REJECTED');
+  assert.equal(first.issue.requiresInputChange, true);
+  const next = await prepareModelingConcept({ ...args, iteration: 2 });
+  assert.equal(next.issue.kind, 'IMAGE_INPUT_REJECTED'); assert.equal(images, 1); assert.equal(reviews, 0);
+  await assert.rejects(retainConceptInputRejection({ ...args, error: { kind: 'SERVICE_CONFIGURATION' } }), /confirmed/);
+  const rejected = await readJson(first.evidence.find(row => row.file.includes('rejected-input-')).file);
+  assert.ok(rejected.evidence.some(row => row.file.endsWith('draft-1.json')));
+  await fs.appendFile(rejected.evidence.find(row => row.file.endsWith('draft-1.json')).file, 'changed');
+  await assert.rejects(prepareModelingConcept({ ...args, iteration: 3 }), error => error.kind === 'INTEGRITY_ERROR');
+  assert.equal(images, 1);
+});
+
 test('truncated concept PNG cannot be published or approved', () => {
   assert.deepEqual(checkConceptPng(png()), { width: 256, height: 256 });
   assert.throws(() => checkConceptPng(png().subarray(0, -4)), /PNG/);
@@ -274,6 +330,21 @@ test('pipeline runs image-review-Tripo-Blender and preserves rig/animation gates
   const prior = f.events.length; await createModelingPipeline(f.options).prepare(); assert.equal(f.events.length, prior);
   await fs.appendFile(path.join(f.project, first.assets[0].generation.concept.image.path), 'mutated');
   await assert.rejects(pipeline.verify(), error => error.kind === 'INTEGRITY_ERROR');
+});
+
+test('a content-rejected character does not abort other assets or become a completed character', async t => {
+  const f = await pipelineFixture(t); let submissions = 0;
+  f.options.imageProvider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    fetchImpl: async () => { submissions++; return json({ error: { code: 'moderation_blocked' } }, 400); } });
+  const pipeline = createModelingPipeline(f.options), first = await pipeline.prepare();
+  assert.equal(first.assets[0].status, 'NO_USABLE_ARTIFACT'); assert.equal(first.assets[0].quality.accepted, false);
+  assert.equal(first.assets[0].quality.gaps[0].requiresInputChange, true);
+  assert.match(first.assets[0].quality.repairInstructions, /do not automatically resubmit/);
+  assert.equal(first.assets[1].status, 'DCC_READY');
+  assert.equal(f.events.includes('tripo'), false); assert.equal(f.events.includes('build:fox'), false);
+  await pipeline.verify();
+  await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(submissions, 1);
 });
 
 test('rejected concepts retain a scored GAP, finish other assets and retry only in a later whole iteration', async t => {

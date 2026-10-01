@@ -132,3 +132,25 @@ from the committed deployment. Compare all original ledger/pin hashes and consum
 budgets, restart via the Git deployment workflow, restore autostart, and verify a
 fresh monitor snapshot. Leave the task for the operator to Continue; readiness
 verification is not a production attempt or a quality acceptance result.
+
+## Concept image content rejection
+
+An HTTP 400 with an explicit `moderation_blocked` or `content_policy_violation`
+code is an asset input rejection, not an authentication failure or transient outage.
+Keep the request state and bounded response metadata (code, request ID and body
+digest); arbitrary router messages and credentials are not stored. Other HTTP 400
+responses remain unclassified configuration failures rather than guessed retries.
+
+The concept stage retains an `IMAGE_INPUT_REJECTED` gap. The unchanged asset and
+reference inputs are blocked across iterations, before another brief or image call.
+Other assets and scene work can continue, but the blocked character is not accepted
+and must not be silently replaced by a claimed finished primitive model. Revised
+asset inputs or provider review are required; do not automatically rewrite a rejected
+prompt or switch providers to bypass content review.
+
+For an old failure that discarded its response body, a verified diagnostic response
+can be retained using `retainConceptInputRejection` during idle maintenance. Match
+the exact original request, asset specification and reference hashes, retain the
+diagnostic evidence inside the task workspace, and verify the original request,
+execution ledgers and budgets are unchanged. This adds a rejection receipt; it does
+not rewrite the old failed attempt or submit another generation request.

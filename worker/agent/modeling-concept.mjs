@@ -13,6 +13,35 @@ const reviewSchema = { type: 'object', additionalProperties: false, required: ['
     properties: { criterion: { type: 'string', enum: criteria }, status: { type: 'string', enum: ['PASS', 'GAP'] }, evidence: text } } },
   repairInstructions: { type: 'string', maxLength: 6000 } } };
 
+function inputRejectionFile(taskState, short, identity) {
+  if (!/^[a-zA-Z0-9-]+$/.test(short)) throw new Error('Invalid concept state identity.');
+  return path.join(taskState, 'concepts', short, 'rejected-input-' + identity + '.json');
+}
+
+// A rejection belongs to immutable asset/reference inputs, not one quality iteration.
+// This is also the maintenance entry point for a verified, retained provider response.
+export async function retainConceptInputRejection({ spec, project, taskState, short, error, evidence = [] }) {
+  if (error.kind !== 'IMAGE_INPUT_REJECTED' || error.responseEvidence?.httpStatus !== 400 ||
+      !['moderation_blocked', 'content_policy_violation'].includes(error.responseEvidence.code)) throw new Error('Expected a confirmed image input rejection.');
+  const references = await Promise.all(spec.referenceImages.map(file => localPath(project, file, { existing: true })));
+  const referenceEvidence = await fileEvidence(references);
+  await verifyEvidence(evidence);
+  const inputIdentity = hashValue({ spec, referenceEvidence });
+  const file = inputRejectionFile(taskState, short, inputIdentity);
+  const issue = { stage: 'modeling-concept', status: 'GAP', kind: 'IMAGE_INPUT_REJECTED', requiresInputChange: true,
+    reason: `Upstream content review rejected this concept (${error.responseEvidence.code}). Retain the evidence and wait for revised asset inputs; do not automatically resubmit the rejected input.`,
+    responseEvidence: error.responseEvidence };
+  let record = await readJson(file);
+  if (!record) {
+    record = { protocol: 1, inputIdentity, issue, evidence: [...evidence,
+      ...await fileEvidence(error.requestStateFile ? [error.requestStateFile] : [])], recordedAt: new Date().toISOString() };
+    await atomicJson(file, record);
+  }
+  if (record.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected concept inputs changed.'), { kind: 'INTEGRITY_ERROR' });
+  await verifyEvidence(record.evidence);
+  return { file, record };
+}
+
 // This is approval of a 2D generation input, never model/rig/engine acceptance.
 export async function prepareModelingConcept({ spec, project, taskState, short, iteration, job, imageProvider, review, signal, reportProgress }) {
   const directory = 'art/modeling-concepts/' + spec.assetId + '/' + short + '/iteration-' + iteration;
@@ -30,6 +59,15 @@ export async function prepareModelingConcept({ spec, project, taskState, short, 
     const record = { protocol: 1, identity, iteration, assetId: spec.assetId, attempts, evidence, ...result };
     await atomicJson(recordFile, record); return record;
   };
+  const inputIdentity = hashValue({ spec, referenceEvidence });
+  const rejectedFile = inputRejectionFile(taskState, short, inputIdentity);
+  const rejected = await readJson(rejectedFile);
+  if (rejected) {
+    if (rejected.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected concept inputs changed.'), { kind: 'INTEGRITY_ERROR' });
+    await verifyEvidence(rejected.evidence);
+    evidence.push(...await fileEvidence([rejectedFile]));
+    return finish({ status: 'GAP', score: 0, issue: rejected.issue });
+  }
   try {
     let visualBrief = spec.prompt;
     if (references.length) {
@@ -99,6 +137,11 @@ export async function prepareModelingConcept({ spec, project, taskState, short, 
       issue: { stage: 'modeling-concept', status: 'GAP', reason: 'Concept remains below the visual input standard after two distinct drafts. Retain both and retry after the whole iteration.' } });
   } catch (error) {
     throwIfExecutionFenced(error, signal);
+    if (error.kind === 'IMAGE_INPUT_REJECTED') {
+      const rejection = await retainConceptInputRejection({ spec, project, taskState, short, error, evidence });
+      evidence.push(...await fileEvidence([rejection.file]));
+      return finish({ status: 'GAP', score: 0, issue: rejection.record.issue });
+    }
     return finish({ status: 'GAP', score: 0, issue: stageIssue('modeling-concept', error) });
   }
 }

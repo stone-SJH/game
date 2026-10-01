@@ -7,8 +7,37 @@ import { imageGenerationSettings, imageGenerationCredential } from './modeling-i
 import { recoverService } from './service-recovery.mjs';
 
 const transientHttp = reason => /^image_http_(408|429|500|502|503|504)$/.test(reason || '');
-function imageServiceError(record) {
+const inputRejectionCodes = new Set(['moderation_blocked', 'content_policy_violation']);
+
+// Retain bounded, classified evidence, never arbitrary router messages or keys.
+async function imageHttpEvidence(response) {
+  const chunks = []; let bytes = 0, truncated = false;
+  try {
+    for await (const chunk of response.body || []) {
+      const buffer = Buffer.from(chunk), remaining = 16384 - bytes;
+      chunks.push(buffer.subarray(0, remaining)); bytes += Math.min(buffer.length, remaining);
+      if (buffer.length > remaining) { truncated = true; break; }
+    }
+  } catch { truncated = true; }
+  const body = Buffer.concat(chunks);
+  let value;
+  try { if (!truncated) value = JSON.parse(body.toString('utf8')); } catch { /* Non-JSON errors still retain a digest. */ }
+  const code = value?.error?.code;
+  const requestId = response.headers.get('x-request-id');
+  return { httpStatus: response.status, bodySha256: crypto.createHash('sha256').update(body).digest('hex'),
+    retainedBytes: bytes, truncated,
+    code: inputRejectionCodes.has(code) ? code : 'unclassified',
+    ...(typeof requestId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId) ? { requestId } : {}) };
+}
+
+function imageServiceError(record, requestStateFile) {
   const reason = record.reasonCode || 'image_submission_unknown';
+  if (record.responseEvidence?.httpStatus === 400 && inputRejectionCodes.has(record.responseEvidence.code)) {
+    return Object.assign(new Error(`Concept image input rejected by upstream content review (${record.responseEvidence.code}). Retain the evidence; do not automatically resubmit this input.`), {
+      kind: 'IMAGE_INPUT_REJECTED', requiresInputChange: true, retrySafe: false, stopConfirmed: true,
+      reasonCode: reason, responseEvidence: record.responseEvidence, requestStateFile,
+    });
+  }
   return Object.assign(new Error(`Concept image service unavailable: ${reason}. Retain the request and evidence.`), {
     kind: /^image_http_4\d\d$/.test(reason) && !transientHttp(reason) ? 'SERVICE_CONFIGURATION' : 'SERVICE_TRANSIENT',
     retrySafe: transientHttp(reason), stopConfirmed: true, reasonCode: reason,
@@ -58,7 +87,7 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
       }
       // A received retryable HTTP rejection can recover inside this operation.
       // A lost response/timeout has unknown billing status and is never resubmitted.
-      if (previous && !transientHttp(previous.reasonCode)) throw imageServiceError(previous);
+      if (previous && !transientHttp(previous.reasonCode)) throw imageServiceError(previous, stateFile);
       let key;
       try { key = await credential(config); }
       catch { return { status: 'unavailable', reasonCode: 'image_router_unavailable' }; }
@@ -70,7 +99,8 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
         const timeoutMs = Math.min(config.identity.timeoutMs, remaining);
         const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
         const history = previous ? [...(previous.history || []), { status: previous.status, reasonCode: previous.reasonCode,
-          startedAt: previous.startedAt, timeoutMs: previous.timeoutMs }] : [];
+          startedAt: previous.startedAt, timeoutMs: previous.timeoutMs,
+          ...(previous.responseEvidence ? { responseEvidence: previous.responseEvidence } : {}) }] : [];
         const record = { protocol: 1, requestHash, status: 'submission_intent', model: 'gpt-image-2', prompt,
           startedAt: new Date().toISOString(), timeoutMs, history };
         await atomicJson(stateFile, record);
@@ -81,8 +111,8 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
             const retryAfter = response.headers.get('retry-after');
             const retryAfterMs = /^\d+(?:\.\d+)?$/.test(retryAfter || '') ? Number(retryAfter) * 1000
               : Math.max(0, Date.parse(retryAfter) - Date.now()) || 0;
-            await response.body?.cancel();
-            throw Object.assign(new Error('Image API request failed.'), { reasonCode: 'image_http_' + response.status, retryAfterMs });
+            const responseEvidence = await imageHttpEvidence(response);
+            throw Object.assign(new Error('Image API request failed.'), { reasonCode: 'image_http_' + response.status, retryAfterMs, responseEvidence });
           }
           const chunks = []; let size = 0;
           for await (const chunk of response.body || []) {
@@ -104,9 +134,10 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
           // Router error bodies and exception strings can contain credentials.
           const failed = { ...record, status: 'unavailable',
             reasonCode: bounded.aborted ? 'image_timeout' : error.reasonCode || 'image_response_unavailable',
-            retryAfterMs: error.retryAfterMs || 0 };
+            retryAfterMs: error.retryAfterMs || 0,
+            ...(error.responseEvidence ? { responseEvidence: error.responseEvidence } : {}) };
           await atomicJson(stateFile, failed); previous = failed;
-          throw imageServiceError(failed);
+          throw imageServiceError(failed, stateFile);
         }
       }, { ...recoveryOptions, signal, deadlineAt, onWaiting });
     },
