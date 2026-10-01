@@ -13,6 +13,7 @@ import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { atomicJson, hashFile, readJson, agentEnvironment } from '../agent/modeling-io.mjs';
+import { modelingSourcePolicy, enforceSourcePolicy, sourcePolicyAttempts } from '../agent/modeling-source-policy.mjs';
 
 const criteria = ['subject-and-identity', 'anatomy-and-proportions', 'silhouette-and-detail', 'clean-single-subject-view', 'reference-fidelity'];
 const verdict = (status = 'PASS') => ({ criteria: criteria.map(criterion => ({ criterion, status, evidence: 'Observed full subject and visible limbs.' })),
@@ -263,6 +264,37 @@ async function pipelineFixture(t, { conceptGap = false, modelGap = false } = {})
     } };
   return { ...f, options, events };
 }
+
+test('an explicit external 3D prohibition overrides detailed organic routing and prevents every provider call', async t => {
+  const f = await pipelineFixture(t);
+  f.options.job.objective = '不得调用任何外部 3D 生成服务。全部建模在 Blender 完成。';
+  const forbidden = async () => { throw new Error('External provider must not be called'); };
+  f.options.provider = { availability: forbidden, balance: forbidden, generate: forbidden };
+  f.options.imageProvider = { generate: forbidden };
+  f.options.evaluate = async ({ prompt }) => advice(JSON.parse(prompt.split('\n').find(line => line.startsWith('Asset: ')).slice(7)), false);
+  f.options.build = async context => {
+    assert.equal(context.decision.route, 'blender_direct'); assert.equal(context.generatedRefinement, false); assert.equal(context.sourceFile, null);
+    f.events.push('direct:' + context.spec.assetId);
+    for (const name of ['source.blend', 'model.glb', 'recipe.py', 'asset-manifest.json', ...(context.spec.requireRig ? ['model.fbx'] : [])])
+      await fs.writeFile(path.join(f.project, context.directory, name), 'direct authored asset');
+    await atomicJson(path.join(f.project, context.directory, 'build-report.json'), { smallEditsOnly: false });
+  };
+  const result = await createModelingPipeline(f.options).prepare();
+  assert.deepEqual(result.assets.map(asset => asset.route), ['blender_direct', 'blender_direct']);
+  assert.deepEqual(f.events, ['direct:fox', 'direct:prop']);
+});
+
+test('source restriction retires generated candidates without resetting counters or consuming prohibited bases', () => {
+  assert.equal(modelingSourcePolicy({ objective: 'Do not call external 3D generation services.' }).external3DAllowed, false);
+  assert.equal(modelingSourcePolicy({}, { prompt: '禁止调用 Tripo。' }).external3DAllowed, false);
+  const candidate = { route: 'image_tripo_blender', generation: { base: 'retained.glb' } };
+  const state = { route: 'image_tripo_blender', bestCandidate: candidate, accepted: candidate, attempts: { image_tripo_blender: 2 }, pending: null };
+  assert.equal(enforceSourcePolicy(state, { external3DAllowed: false, reason: 'User ban' }, 3), true);
+  assert.equal(state.route, 'blender_direct'); assert.equal(state.bestCandidate, null); assert.deepEqual(state.attempts, { image_tripo_blender: 2 });
+  assert.deepEqual(state.sourcePolicyTransitions[0].bestCandidate, candidate);
+  assert.equal(sourcePolicyAttempts(state, { image_tripo_blender: 2, blender_direct: 1 }, 'blender_direct'), 3);
+  assert.equal(enforceSourcePolicy(state, { external3DAllowed: false }, 3), false);
+});
 
 test('pipeline runs image-review-Tripo-Blender and preserves rig/animation gates and generated evidence', async t => {
   const f = await pipelineFixture(t), pipeline = createModelingPipeline(f.options);

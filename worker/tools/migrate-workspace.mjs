@@ -3,7 +3,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { atomicJson, hashFile, hashValue, readJson, repositoryRoot } from '../agent/modeling-io.mjs';
-import { modelingToolHashes, pinToolchain } from '../agent/modeling-skill-routing.mjs';
+import { modelingToolHashes, pinToolchain, createSkillPlan } from '../agent/modeling-skill-routing.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { executionPolicy } from '../agent/modeling-execution.mjs';
 import { codexInvocation, readProductionPlans } from '../agent/production-harness.mjs';
@@ -11,9 +11,10 @@ import { planWorkspaceMigration, checkMigration, stageMigration, activateMigrati
 import { readWorkspaceEpoch } from '../agent/workspace-epoch.mjs';
 import { planContentGc, applyContentGc } from '../agent/workspace-gc.mjs';
 import { workspaceLock } from '../agent/workspace-lock.mjs';
+import { planPendingSettlement, applyPendingSettlement } from '../agent/modeling-maintenance.mjs';
 
 const run = promisify(execFile), [action, workspaceArg, ...args] = process.argv.slice(2);
-if (!workspaceArg || !['plan', 'stage', 'apply', 'resume-check', 'rollback', 'gc'].includes(action)) throw new Error('Usage: migrate-workspace.mjs plan|stage|apply|resume-check|rollback|gc WORKSPACE [--expect-plan-hash HASH]');
+if (!workspaceArg || !['plan', 'stage', 'apply', 'resume-check', 'rollback', 'gc', 'settle-pending'].includes(action)) throw new Error('Usage: migrate-workspace.mjs plan|stage|apply|resume-check|rollback|gc|settle-pending WORKSPACE [--expect-plan-hash HASH]');
 const workspace = path.resolve(workspaceArg), workerRoot = path.dirname(path.dirname(workspace));
 if (path.basename(path.dirname(workspace)) !== 'workspaces' || !/^workspace-[a-f0-9-]{36}$/.test(path.basename(workspace))) throw new Error('Expected an existing worker-owned workspace');
 const project = path.join(workspace, 'project');
@@ -51,7 +52,22 @@ async function verifyTarget(plan) {
   const current = await target();
   if (plan.targetCommit !== current.targetCommit || hashValue(plan.targetHarness) !== hashValue(current.targetHarness) || hashValue(plan.runtime) !== hashValue(current.runtime)) throw new Error('Target release/runtime changed after planning');
 }
-if (action === 'plan') {
+if (action === 'settle-pending') {
+  await quiescent();
+  const release = await workspaceLock(workspace, { operation: action });
+  try {
+    const file = path.join(audit, 'pending-settlement-plan.json');
+    if (args.includes('--apply')) {
+      const plan = await readJson(file);
+      if (!args.includes('--expect-plan-hash') || args[args.indexOf('--expect-plan-hash') + 1] !== plan?.planHash) throw new Error('Review the exact pending settlement plan hash');
+      console.log(JSON.stringify(await applyPendingSettlement(workspace, plan)));
+    } else {
+      const plan = await planPendingSettlement(workspace);
+      await atomicJson(file, plan);
+      console.log(JSON.stringify({ status: 'DRY_RUN', planFile: file, planHash: plan.planHash, repairs: plan.repairs.map(row => ({ path: row.path, failure: row.failure })) }));
+    }
+  } finally { await release(); }
+} else if (action === 'plan') {
   const current = await target();
   let ticket = null;
   if (!args.includes('--offline')) {
@@ -85,8 +101,22 @@ if (action === 'plan') {
     const file = path.join(workspace, relative);
     await pinToolchain(path.dirname(file), path.basename(file).slice('toolchain-'.length, -5), binding.target);
   }
+  const taskRoot = path.join(workspace, 'modeling-state/tasks', hashValue({ taskId: context.taskId, workspaceId: context.workspaceId }));
+  const modelingPlan = await readJson(path.join(taskRoot, 'plan.json'));
+  const verifiedSkillPlans = [];
+  for (const spec of modelingPlan?.assets || []) {
+    if (!spec.contract) continue;
+    const pin = await readJson(path.join(taskRoot, `toolchain-${spec.assetId}.json`));
+    if (!pin?.skillLockHash) throw new Error(`Missing retained skill pin for ${spec.assetId}`);
+    await createSkillPlan({ spec, project, pinnedLockHash: pin.skillLockHash });
+    verifiedSkillPlans.push(spec.assetId);
+  }
+  if (modelingPlan?.assets?.length) {
+    const pending = await planPendingSettlement(workspace);
+    if (pending.repairs.length) throw new Error('Confirmed failed pending attempts still need the reviewed settle-pending maintenance repair');
+  }
   const result = { status: 'READY_FOR_CONTINUE', planHash: epoch.planHash, targetCommit: epoch.targetCommit,
-    realContinueValidated: false, legacyPinsPreserved: true, productionStages: production.stageIds };
+    realContinueValidated: false, legacyPinsPreserved: true, verifiedSkillPlans, productionStages: production.stageIds };
   await atomicJson(path.join(audit, 'resume-check.json'), result); console.log(JSON.stringify(result));
 } else {
   await quiescent();
