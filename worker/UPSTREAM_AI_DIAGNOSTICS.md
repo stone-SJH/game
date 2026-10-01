@@ -58,6 +58,15 @@ observed failure; it does not infer the server's internal cause of a 503.
 
 ## Verification and rollout
 
+Concept-image generation also uses durable service recovery. Received HTTP 408/429/500/502/503/504
+responses back off within the same concept operation, honoring Retry-After and the original
+deadline. HTTP rejections and wait budgets survive restarts without consuming another quality
+round. Other HTTP 4xx responses are configuration failures, not asset-quality gaps. A timeout,
+lost response, invalid successful response or interrupted submission has unknown provider
+completion status and remains fenced from duplicate paid submission. Full response bodies and
+credentials are never copied into the recovery log. The previous image request/evidence stays
+available when recovery cannot continue.
+
 Run `node --test worker/tests/*.test.mjs` on Windows. The focused suites are
 `upstream-ai-diagnostics`, `upstream-ai-telemetry`, `upstream-ai-recovery`,
 `modeling-v2`, `quality-review` and `iteration-monitor`. Tests exercise real subprocess output and the existing

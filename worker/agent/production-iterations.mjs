@@ -45,7 +45,7 @@ export async function createProductionIterations({ job, project, policy }) {
       return { missing: [], files: state.best.files, qualityAccepted: state.best.qualityAccepted,
         delivery: { ...state.best.delivery, ...(reason ? { stoppedReason: reason } : {}) } };
     },
-    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling, playable = true }) {
+    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling, playable = true, productionCompleted = false }) {
       const iteration = state.iteration;
       const directory = path.join(root, 'deliveries', `iteration-${iteration}`);
       await fs.mkdir(directory, { recursive: true });
@@ -69,6 +69,7 @@ export async function createProductionIterations({ job, project, policy }) {
         }
       }
       const record = { protocol: 1, kind: 'iteration-delivery', taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId,
+        revisionId: job.revisionId || null, productionCompleted,
         iteration, status: !playable ? 'RETAINED_INCOMPLETE' : qualityAccepted ? 'ACCEPTED' : 'DELIVERED_WITH_GAPS', score, threshold, playable,
         publishable: playable && ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].every(role => files[role]),
         qualityAccepted, issues, quality, modeling, sourceWorkspace: project, retainedProject: null,
@@ -81,7 +82,9 @@ export async function createProductionIterations({ job, project, policy }) {
       state.rounds.push({ iteration, score, qualityAccepted, reportFile, snapshotId: manifest.id, packageDigest: packageManifest?.id || null });
       const priorPlayable = state.best?.delivery.playable !== false;
       const priorPublishable = state.best?.delivery.publishable === true;
-      if (!state.best || record.publishable && state.best.inherited || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
+      const previousRevision = state.best && (state.best.inherited || (job.revisionId
+        ? state.best.delivery.revisionId !== job.revisionId : state.best.delivery.runId !== job.runId));
+      if (!state.best || productionCompleted && (!state.best.delivery.productionCompleted || previousRevision) || record.publishable && state.best.inherited || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
         (playable && !priorPlayable || playable === priorPlayable &&
         (score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted))) state.best = retained;
       state.iteration++;

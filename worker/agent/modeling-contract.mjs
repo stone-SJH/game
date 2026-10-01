@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { MODEL_VIEWS } from './modeling-views.mjs';
 
 const obj = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const en = values => ({ type: 'string', enum: values });
@@ -103,7 +104,8 @@ export function preservesContract(original, revised) {
 }
 
 export function modelViews(spec) {
-  return spec.contract ? ['front', 'side', 'back', 'top', 'perspective', ...(spec.contract.assetClass === 'organic-static' ? ['lower-oblique'] : []), ...(spec.contract.asymmetric ? ['other-side', 'bottom'] : [])] : ['front', 'side', 'back', 'perspective'];
+  return spec.contract ? MODEL_VIEWS.filter(view => view === 'lower-oblique' ? spec.contract.assetClass === 'organic-static'
+    : ['other-side', 'bottom'].includes(view) ? spec.contract.asymmetric : true) : ['front', 'side', 'back', 'perspective'];
 }
 
 export function referenceFiles(spec) {

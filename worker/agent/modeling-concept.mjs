@@ -56,7 +56,7 @@ export async function prepareModelingConcept({ spec, project, taskState, short, 
       await reportProgress({ phase: 'crafting', tool: 'Concept image', step: spec.assetId + ': generate and independently inspect concept ' + attempt + '/2' });
       const result = await imageProvider.generate({ project, directory: directory + '/draft-' + attempt,
         stateFile: path.join(taskState, 'concepts', short, 'iteration-' + iteration, 'draft-' + attempt + '.json'),
-        prompt, requirementsHash: identity, signal, deadlineAt: job.deadlineAt });
+        prompt, requirementsHash: identity, signal, deadlineAt: job.deadlineAt, onWaiting: reportProgress });
       if (result.status !== 'ready') {
         attempts.push({ attempt, status: 'GAP', reasonCode: result.reasonCode });
         return finish({ status: 'GAP', issue: { stage: 'modeling-concept', status: 'GAP', reason: result.reasonCode }, score: 0 });

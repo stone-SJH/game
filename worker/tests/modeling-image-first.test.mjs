@@ -118,17 +118,49 @@ for (const mode of ['http', 'invalid-png', 'network', 'cancel']) {
     const f = await fixture(t), controller = new AbortController(); let calls = 0;
     const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential, fetchImpl: async () => {
       calls++;
-      if (mode === 'http') return json({ message: 'private-image-key' }, 503);
+      if (mode === 'http') return json({ message: 'private-image-key' }, 400);
       if (mode === 'invalid-png') return json({ data: [{ b64_json: Buffer.from('not an image').toString('base64') }] });
       if (mode === 'cancel') controller.abort(new Error('operator pause'));
       throw new Error('private-image-key');
     } });
     if (mode === 'cancel') await assert.rejects(provider.generate({ ...f.generation, signal: controller.signal }), /operator pause/);
-    else assert.equal((await provider.generate(f.generation)).status, 'unavailable');
-    assert.equal((await provider.generate(f.generation)).status, 'unavailable'); assert.equal(calls, 1);
+    else await assert.rejects(provider.generate(f.generation), error => error.kind === (mode === 'http' ? 'SERVICE_CONFIGURATION' : 'SERVICE_TRANSIENT'));
+    await assert.rejects(provider.generate(f.generation), error => error.retrySafe === false); assert.equal(calls, 1);
     assert.doesNotMatch(await fs.readFile(f.generation.stateFile, 'utf8'), /private-image-key/);
   });
 }
+
+test('image HTTP outages recover within one concept without spending a quality iteration', async t => {
+  const f = await fixture(t), waits = [], progress = []; let calls = 0, clock = Date.now();
+  const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    recoveryOptions: { now: () => clock, wait: async ms => { waits.push(ms); clock += ms; } },
+    fetchImpl: async () => {
+      calls++;
+      return calls < 3 ? json({ message: 'private-image-key' }, calls === 1 ? 502 : 503)
+        : json({ data: [{ b64_json: png().toString('base64') }] });
+    } });
+  const result = await provider.generate({ ...f.generation, onWaiting: async value => progress.push(value) });
+  assert.equal(result.status, 'ready'); assert.equal(calls, 3); assert.equal(result.history.length, 2);
+  assert.deepEqual(waits, [5000, 10000]); assert.ok(progress.every(row => row.phase === 'waiting_service'));
+  assert.equal((await provider.generate(f.generation)).sha256, result.sha256); assert.equal(calls, 3);
+  assert.doesNotMatch(await fs.readFile(f.generation.stateFile, 'utf8'), /private-image-key/);
+});
+
+test('image service budget survives resumes and never becomes a quality GAP', async t => {
+  const f = await fixture(t); let calls = 0, clock = Date.now();
+  const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    recoveryOptions: { now: () => clock, maxWaitMs: 5000, wait: async ms => { clock += ms; } },
+    fetchImpl: async () => { calls++; return json({}, 503); } });
+  await assert.rejects(provider.generate(f.generation), error => error.kind === 'SERVICE_TRANSIENT' && error.serviceBudgetExhausted);
+  assert.equal(calls, 2);
+  await assert.rejects(provider.generate(f.generation), error => error.kind === 'SERVICE_TRANSIENT' && error.serviceBudgetExhausted);
+  assert.equal(calls, 2);
+  const concept = { spec, project: f.project, taskState: path.join(f.root, 'task'), short: 'frozen', iteration: 1,
+    job: {}, imageProvider: { generate: async () => { throw Object.assign(new Error('image_http_502'), { kind: 'SERVICE_TRANSIENT' }); } },
+    reportProgress: async () => {}, review: async () => assert.fail('No image is available for review') };
+  await assert.rejects(prepareModelingConcept(concept), error => error.kind === 'SERVICE_TRANSIENT');
+  assert.equal(await readJson(path.join(f.project, 'art/modeling-concepts/fox/frozen/iteration-1/concept-review.json')), null);
+});
 
 test('truncated concept PNG cannot be published or approved', () => {
   assert.deepEqual(checkConceptPng(png()), { width: 256, height: 256 });

@@ -10,8 +10,17 @@ import { createSkillPlan, validateSkillPlan, selectSkills, pinToolchain } from '
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { createTripoProvider } from '../agent/providers/tripo.mjs';
 import { atomicJson, hashFile, hashValue, readJson, recordAuthorRecipe } from '../agent/modeling-io.mjs';
-import { serveBlender } from '../tools/blender-mcp-server.mjs';
+import { serveBlender, blenderTools } from '../tools/blender-mcp-server.mjs';
 import { validateUnrealModels } from '../agent/modeling-unreal.mjs';
+import { validateSchema } from '../agent/modeling-evaluation.mjs';
+
+test('organic asymmetric model preview passes the MCP schema with every required camera', () => {
+  const views = modelViews({ contract: defaultContract({ assetClass: 'organic-static', asymmetric: true }) });
+  assert.equal(views.length, 8); assert.ok(views.includes('lower-oblique'));
+  const schema = blenderTools.find(tool => tool.name === 'blender_render_views').inputSchema;
+  validateSchema({ source: 'blockout/source.blend', views }, schema);
+  assert.throws(() => validateSchema({ source: 'source.blend', views: ['invented-camera'] }, schema));
+});
 
 const spec = { assetId:'meter', description:'Meter prop', prompt:'Meter prop', requirements:['One red meter prop'],
   referenceImages:[], maxTriangles:1000, requireRig:false, requireClosedMesh:true, contract:defaultContract() };

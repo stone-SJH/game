@@ -85,7 +85,7 @@ export async function pinToolchain(stateRoot, assetId, toolchain) {
 
 export async function modelingToolHashes() {
   const files = ['agent/production-harness.mjs', 'agent/process-runner.mjs', 'agent/iteration-monitor.mjs',
-    'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/quality-review.mjs', 'agent/stage-failure.mjs', 'agent/artifact-publication.mjs',
+    'agent/iteration-quality.mjs', 'agent/production-iterations.mjs', 'agent/production-prompt.mjs', 'agent/quality-review.mjs', 'agent/stage-failure.mjs', 'agent/artifact-publication.mjs',
     'agent/asset-catalog.mjs', 'agent/providers/tripo.mjs', 'tools/blender-mcp-server.mjs',
     'agent/workspace-epoch.mjs', 'agent/workspace-storage.mjs', 'agent/workspace-lock.mjs', 'agent/service-recovery.mjs', 'agent/stage-cache.mjs',
     'agent/agent.mjs', 'agent/codex-service-session.mjs', 'agent/progress-preview.mjs', 'agent/workspace-gc.mjs', 'agent/workspace-migration.mjs',
