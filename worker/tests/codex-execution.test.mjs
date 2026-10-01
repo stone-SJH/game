@@ -287,13 +287,14 @@ test('CLI usage failure retains its diagnostics without claiming a playable pack
   try { result = await executeJob(job, { root, signal: controller.signal, uploadFile: async name => name }); }
   finally { clearTimeout(timeout); }
   assert.equal(controller.signal.aborted, false);
-  assert.equal(result.status, 'PASS');
-  assert.equal(result.report.delivery.playable, false);
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.report.delivery, null);
   const output = path.join(root, 'workspaces', job.workspaceId, 'runs', job.runId);
   const report = JSON.parse(await fs.readFile(path.join(output, 'production-report.json'), 'utf8'));
   assert.equal(report.logs.length, 1);
   assert.equal(report.logs[0].exitCode, 2);
-  assert.ok(report.delivery.issues.some(issue => /unexpected argument 'are'/.test(issue.reason)));
+  assert.equal(report.passed, false);
+  assert.match(report.failure, /unexpected argument 'are'/);
 });
 
 test('commands with no input receive EOF instead of waiting on an open pipe', async t => {

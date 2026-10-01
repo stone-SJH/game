@@ -17,6 +17,7 @@ import { materializeReferences } from './references.mjs';
 import { createArtifactPublisher, awaitArtifactPublication } from './artifact-publication.mjs';
 import { throwIfExecutionFenced } from './stage-failure.mjs';
 import { diagnoseUpstreamAI, isAiInvocation, upstreamAiEvent } from './modeling-upstream-ai.mjs';
+import { codexServiceSession } from './codex-service-session.mjs';
 
 async function atomicJson(file, value) {
   const temp = `${file}.tmp`;
@@ -249,11 +250,14 @@ async function executeOwnedJob(job, ctx) {
     const monitorStep = name.startsWith('iteration-diagnosis');
     const codexStep = isAiInvocation(name, args);
     await publish({ phase: phaseForStep(name), step: name, tool: monitorStep ? 'Iteration monitor' : codexStep ? 'AI / Codex' : toolForCommand(command), command: path.basename(command), status: 'running', goal: job.objective,
+      waitReason: null, nextRetryAt: null,
       ...(currentProgress.diagnostic?.category === 'upstream-ai' ? { error: null, diagnostic: null } : {}),
       prompt: options.input || currentProgress.prompt, steps: { completed: currentProgress.steps?.completed || 0, total: 3 } });
     const stepFile = path.join(output, `${name}.json`);
     await atomicJson(stepFile, { name, status: 'RUNNING', startedAt: new Date().toISOString(), command, args });
-    let pendingOutput = '', toolStarted = false;
+    const session = codexServiceSession(codexStep ? args : []);
+    const stepDeadline = Math.min(Date.now() + (timeoutMs || 120000), job.deadlineAt ? Date.parse(job.deadlineAt) : Infinity);
+    let pendingOutput = '';
     let upstreamIssue = null;
     const onStdout = chunk => {
       if (!codexStep) return;
@@ -262,17 +266,18 @@ async function executeOwnedJob(job, ctx) {
       while ((newline = pendingOutput.indexOf('\n')) !== -1) {
         const line = pendingOutput.slice(0, newline); pendingOutput = pendingOutput.slice(newline + 1);
         let event; try { event = JSON.parse(line); } catch { continue; }
+        session.observe(event);
         const diagnostic = upstreamAiEvent(event, name);
         if (diagnostic) {
           upstreamIssue = diagnostic;
-          publish({ error: diagnostic.message, diagnostic }).catch(() => {});
+          publish({ phase: 'waiting_service', status: 'running', error: null, diagnostic: null,
+            waitReason: diagnostic.message, nextRetryAt: null }).catch(() => {});
           continue;
         }
-        if (event.type === 'turn.completed' && upstreamIssue) {
+        if ((event.type === 'turn.completed' || event.type?.startsWith('item.')) && upstreamIssue) {
           upstreamIssue = null;
-          publish({ error: null, diagnostic: null }).catch(() => {});
+          publish({ phase: phaseForStep(name), error: null, diagnostic: null, waitReason: null, nextRetryAt: null }).catch(() => {});
         }
-        if (['mcp_tool_call', 'command_execution'].includes(event.item?.type)) toolStarted = true;
         if (event.item?.type === 'mcp_tool_call' && event.item.server === 'yahaha_blender') {
           const done = event.type === 'item.completed';
           publish({ tool: done ? 'AI / Codex' : 'Blender MCP', phase: done ? 'thinking' : 'crafting', command: String(event.item.tool || 'Blender MCP').slice(0, 180) }).catch(() => {});
@@ -288,27 +293,39 @@ async function executeOwnedJob(job, ctx) {
     };
     let serviceAttempt = 0;
     const result = await recoverService(path.join(path.dirname(project), 'service-state', `${hashValue({ revision: job.revisionId || job.runId, name })}.json`), async () => {
+      pendingOutput = '';
+      if (serviceAttempt) await publish({ phase: phaseForStep(name), status: 'running', error: null, diagnostic: null, waitReason: null, nextRetryAt: null });
+      const remainingMs = codexStep ? stepDeadline - Date.now() : timeoutMs;
+      if (codexStep && remainingMs <= 0) throw Object.assign(new Error('AI stage deadline exhausted; retained completed work.'),
+        { kind: 'SERVICE_TRANSIENT', serviceBudgetExhausted: true, retrySafe: false, stopConfirmed: true });
+      const invocation = codexStep ? session.invocation(serviceAttempt, remainingMs) : { args };
       const suffix = serviceAttempt++ ? `-service-${serviceAttempt}` : '';
-      const value = await runCommand(command, args, { ...options, env: agentEnvironment(options.env || process.env), cwd, timeoutMs, signal,
+      const value = await runCommand(command, invocation.args, { ...options, ...(invocation.input ? { input: invocation.input } : {}),
+      env: agentEnvironment(options.env || process.env), cwd, timeoutMs: remainingMs, signal,
       onStdout,
       stdoutFile: path.join(output, `${name}${suffix}.stdout.jsonl`), stderrFile: path.join(output, `${name}${suffix}.stderr.log`) });
       const passed = accepts ? await accepts(value) : !value.error && value.exitCode === 0 && !value.timedOut;
-      await atomicJson(stepFile, { name, ...value, status: passed ? 'COMPLETED' : 'FAILED', serviceAttempt });
+      await atomicJson(stepFile, { name, ...value, status: passed ? 'COMPLETED' : 'FAILED', serviceAttempt, threadId: session.threadId });
       if (!passed) {
         logs.push({ name, ...value, passed, serviceAttempt });
-        const error = Object.assign(new Error(`${name} failed (exit ${value.exitCode}):\n${commandDiagnostic(value)}`), { result: value, retrySafe: !toolStarted });
+        const error = Object.assign(new Error(`${name} failed (exit ${value.exitCode}):\n${commandDiagnostic(value)}`), { result: value, retrySafe: session.retrySafe(value) });
         const upstreamAI = diagnoseUpstreamAI(error, { stage: name, ai: codexStep });
         if (upstreamAI) {
-          error.upstreamAI = upstreamAI;
-          await publish({ error: upstreamAI.message, diagnostic: { ...upstreamAI, exitCode: value.exitCode,
-            logFiles: [`${name}${suffix}.stdout.jsonl`, `${name}${suffix}.stderr.log`] } });
+          error.upstreamAI = { ...upstreamAI, exitCode: value.exitCode,
+            logFiles: [`${name}${suffix}.stdout.jsonl`, `${name}${suffix}.stderr.log`] };
+          upstreamIssue = error.upstreamAI;
         }
         throw error;
       }
       return value;
-    }, { signal, deadlineAt: job.deadlineAt, onWaiting: publish, ...ctx.serviceRecoveryOptions });
+    }, { ...ctx.serviceRecoveryOptions, signal, deadlineAt: codexStep ? new Date(stepDeadline).toISOString() : job.deadlineAt,
+      onWaiting: patch => publish({ ...patch, error: null, diagnostic: null, waitReason: upstreamIssue?.message || patch.waitReason }) })
+      .catch(async error => {
+        if (error.upstreamAI) await publish({ error: error.upstreamAI.message, diagnostic: error.upstreamAI, waitReason: null, nextRetryAt: null });
+        throw error;
+      });
     invalidateSnapshot();
-    await atomicJson(stepFile, { name, ...result });
+    await atomicJson(stepFile, { name, ...result, serviceAttempt, threadId: session.threadId });
     if (!result.stopConfirmed) throw Object.assign(new Error(result.error), { stopConfirmed: false });
     signal.throwIfAborted();
     const passed = accepts ? await accepts(result) : !result.error && result.exitCode === 0 && !result.timedOut;
@@ -323,7 +340,7 @@ async function executeOwnedJob(job, ctx) {
       }
       throw error;
     }
-    if (upstreamIssue) await publish({ error: null, diagnostic: null });
+    if (upstreamIssue) await publish({ phase: phaseForStep(name), error: null, diagnostic: null, waitReason: null, nextRetryAt: null });
     if (!monitorStep) await publish({ status: 'running', waitReason: null, nextRetryAt: null, steps: { completed: Math.min(3, (currentProgress.steps?.completed || 0) + 1), total: 3 } });
     return result;
   }

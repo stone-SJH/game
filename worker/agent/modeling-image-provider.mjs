@@ -4,6 +4,17 @@ import crypto from 'node:crypto';
 import { atomicJson, hashFile, hashValue, localPath, readJson } from './modeling-io.mjs';
 import { modelingFailure, verifyEvidence } from './modeling-execution.mjs';
 import { imageGenerationSettings, imageGenerationCredential } from './modeling-image-settings.mjs';
+import { recoverService } from './service-recovery.mjs';
+
+const transientHttp = reason => /^image_http_(408|429|500|502|503|504)$/.test(reason || '');
+function imageServiceError(record) {
+  const reason = record.reasonCode || 'image_submission_unknown';
+  return Object.assign(new Error(`Concept image service unavailable: ${reason}. Retain the request and evidence.`), {
+    kind: /^image_http_4\d\d$/.test(reason) && !transientHttp(reason) ? 'SERVICE_CONFIGURATION' : 'SERVICE_TRANSIENT',
+    retrySafe: transientHttp(reason), stopConfirmed: true, reasonCode: reason,
+    retryAfterMs: record.retryAfterMs || 0,
+  });
+}
 
 export function checkConceptPng(bytes) {
   if (bytes.length < 45 || bytes.length > 20 * 1024 * 1024 ||
@@ -23,13 +34,14 @@ export function checkConceptPng(bytes) {
   return { width, height };
 }
 
-export function createModelingImageProvider({ fetchImpl = globalThis.fetch, settings = imageGenerationSettings, credential = imageGenerationCredential } = {}) {
+export function createModelingImageProvider({ fetchImpl = globalThis.fetch, settings = imageGenerationSettings, credential = imageGenerationCredential,
+  recoveryOptions = {} } = {}) {
   return {
     async availability() {
       try { const config = await settings(); return { enabled: Boolean(config.endpoint && await credential(config)), model: 'gpt-image-2' }; }
       catch { return { enabled: false, model: 'gpt-image-2', reasonCode: 'image_router_unavailable' }; }
     },
-    async generate({ project, directory, stateFile, prompt, requirementsHash, signal = new AbortController().signal, deadlineAt }) {
+    async generate({ project, directory, stateFile, prompt, requirementsHash, signal = new AbortController().signal, deadlineAt, onWaiting }) {
       signal.throwIfAborted();
       let config;
       try { config = await settings(); }
@@ -38,53 +50,65 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
         size: config.identity.size, quality: 'high', output_format: 'png' };
       if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 32000) throw new Error('Invalid concept generation prompt.');
       const requestHash = hashValue({ body, requirementsHash, router: config.identity });
-      const previous = await readJson(stateFile);
+      let previous = await readJson(stateFile);
       if (previous && previous.requestHash !== requestHash) throw modelingFailure('INTEGRITY_ERROR', 'Image generation input or router changed.');
       if (previous?.status === 'ready') {
         await verifyEvidence([{ file: await localPath(project, previous.imageFile), sha256: previous.sha256 }]);
         return previous;
       }
-      // The synchronous endpoint has no task query. Unknown paid submissions
-      // stay consumed after process death/timeout; a resume never repeats them.
-      if (previous) return { ...previous, status: 'unavailable', reasonCode: previous.reasonCode || 'image_submission_unknown' };
+      // A received retryable HTTP rejection can recover inside this operation.
+      // A lost response/timeout has unknown billing status and is never resubmitted.
+      if (previous && !transientHttp(previous.reasonCode)) throw imageServiceError(previous);
       let key;
       try { key = await credential(config); }
       catch { return { status: 'unavailable', reasonCode: 'image_router_unavailable' }; }
       if (!config.endpoint || !key) return { status: 'unavailable', reasonCode: 'image_router_unavailable' };
-      const remaining = deadlineAt ? Date.parse(deadlineAt) - Date.now() : Infinity;
-      if (!(remaining > 0)) return { status: 'unavailable', reasonCode: 'image_deadline_exhausted' };
-      const timeoutMs = Math.min(config.identity.timeoutMs, remaining);
-      const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const imageFile = directory + '/concept.png', file = await localPath(project, imageFile);
-      const record = { protocol: 1, requestHash, status: 'submission_intent', model: 'gpt-image-2', prompt,
-        startedAt: new Date().toISOString(), timeoutMs };
-      await atomicJson(stateFile, record);
-      try {
-        const response = await fetchImpl(config.endpoint, { method: 'POST', redirect: 'error', signal: bounded,
-          headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error('Image API request failed.'), { reasonCode: 'image_http_' + response.status }); }
-        const chunks = []; let size = 0;
-        for await (const chunk of response.body || []) {
-          size += chunk.length; if (size > 30 * 1024 * 1024) throw new Error('Image API response too large.');
-          chunks.push(Buffer.from(chunk));
+      return recoverService(stateFile + '.service.json', async () => {
+        const remaining = deadlineAt ? Date.parse(deadlineAt) - Date.now() : Infinity;
+        if (!(remaining > 0)) throw imageServiceError({ reasonCode: 'image_deadline_exhausted' });
+        const timeoutMs = Math.min(config.identity.timeoutMs, remaining);
+        const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+        const history = previous ? [...(previous.history || []), { status: previous.status, reasonCode: previous.reasonCode,
+          startedAt: previous.startedAt, timeoutMs: previous.timeoutMs }] : [];
+        const record = { protocol: 1, requestHash, status: 'submission_intent', model: 'gpt-image-2', prompt,
+          startedAt: new Date().toISOString(), timeoutMs, history };
+        await atomicJson(stateFile, record);
+        try {
+          const response = await fetchImpl(config.endpoint, { method: 'POST', redirect: 'error', signal: bounded,
+            headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          if (!response.ok) {
+            const retryAfter = response.headers.get('retry-after');
+            const retryAfterMs = /^\d+(?:\.\d+)?$/.test(retryAfter || '') ? Number(retryAfter) * 1000
+              : Math.max(0, Date.parse(retryAfter) - Date.now()) || 0;
+            await response.body?.cancel();
+            throw Object.assign(new Error('Image API request failed.'), { reasonCode: 'image_http_' + response.status, retryAfterMs });
+          }
+          const chunks = []; let size = 0;
+          for await (const chunk of response.body || []) {
+            size += chunk.length; if (size > 30 * 1024 * 1024) throw new Error('Image API response too large.');
+            chunks.push(Buffer.from(chunk));
+          }
+          const result = JSON.parse(Buffer.concat(chunks).toString('utf8')), encoded = result.data?.[0]?.b64_json;
+          if (result.data?.length !== 1 || typeof encoded !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('Image API did not return one base64 PNG.');
+          const bytes = Buffer.from(encoded, 'base64'), dimensions = checkConceptPng(bytes);
+          bounded.throwIfAborted();
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          const temporary = file + '.' + crypto.randomUUID() + '.tmp';
+          await fs.writeFile(temporary, bytes, { flag: 'wx' }); await fs.rename(temporary, file);
+          const ready = { ...record, status: 'ready', imageFile, sha256: await hashFile(file), ...dimensions };
+          await atomicJson(stateFile, ready); return ready;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (['EACCES', 'EPERM', 'ENOSPC', 'EROFS', 'EIO'].includes(error.code)) throw error;
+          // Router error bodies and exception strings can contain credentials.
+          const failed = { ...record, status: 'unavailable',
+            reasonCode: bounded.aborted ? 'image_timeout' : error.reasonCode || 'image_response_unavailable',
+            retryAfterMs: error.retryAfterMs || 0 };
+          await atomicJson(stateFile, failed); previous = failed;
+          throw imageServiceError(failed);
         }
-        const result = JSON.parse(Buffer.concat(chunks).toString('utf8')), encoded = result.data?.[0]?.b64_json;
-        if (result.data?.length !== 1 || typeof encoded !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('Image API did not return one base64 PNG.');
-        const bytes = Buffer.from(encoded, 'base64'), dimensions = checkConceptPng(bytes);
-        bounded.throwIfAborted();
-        await fs.mkdir(path.dirname(file), { recursive: true });
-        const temporary = file + '.' + crypto.randomUUID() + '.tmp';
-        await fs.writeFile(temporary, bytes, { flag: 'wx' }); await fs.rename(temporary, file);
-        const ready = { ...record, status: 'ready', imageFile, sha256: await hashFile(file), ...dimensions };
-        await atomicJson(stateFile, ready); return ready;
-      } catch (error) {
-        signal.throwIfAborted();
-        if (['EACCES', 'EPERM', 'ENOSPC', 'EROFS', 'EIO'].includes(error.code)) throw error;
-        // Router error bodies and exception strings can contain credentials.
-        const failed = { ...record, status: 'unavailable',
-          reasonCode: bounded.aborted ? 'image_timeout' : error.reasonCode || 'image_response_unavailable' };
-        await atomicJson(stateFile, failed); return failed;
-      }
+      }, { ...recoveryOptions, signal, deadlineAt, onWaiting });
     },
   };
 }

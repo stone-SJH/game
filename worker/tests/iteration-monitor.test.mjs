@@ -371,6 +371,33 @@ test('orchestrator outage preserves draft without starting a new content round',
   assert.ok(f.progress.some(value => value.diagnostic?.category === 'upstream-ai' && /HTTP 503/.test(value.error)));
 });
 
+for (const cause of ['Input exceeds maximum length (input_too_large)', 'HTTP 503 Service Unavailable']) {
+  test('a new revision cannot republish an inherited package after ' + cause, async t => {
+    const f = await fixture(t); process.env.CODEX_MAX_ATTEMPTS = '1';
+    const firstJob = { ...f.job, revisionId: 'first' };
+    const first = await runProductionHarness({ ...f, job: firstJob,
+      step: async name => { if (name.startsWith('production-orchestrator')) await seedDeliverables(f.project); return success(); } });
+    let publications = 0, reviews = 0;
+    const secondJob = { ...f.job, runId: 'next-run', revisionId: 'second', parentRevisionId: 'first' };
+    await assert.rejects(runProductionHarness({ ...f, job: secondJob,
+      step: async name => { assert.match(name, /^production-orchestrator/); throw failed(cause); },
+      onIterationPackage: async () => publications++, onIterationReview: async () => reviews++ }), error => error.message.includes(cause));
+    assert.equal(publications, 0); assert.equal(reviews, 0);
+    assert.equal(await fs.readFile(first.files.packageFile, 'utf8'), 'game');
+    const ledgers = await fs.readdir(path.join(path.dirname(f.project), 'production-state'));
+    const rounds = await Promise.all(ledgers.map(async dir => JSON.parse(await fs.readFile(path.join(path.dirname(f.project), 'production-state', dir, 'iterations.json'))).rounds.length));
+    assert.deepEqual(rounds.sort(), [0, 1]);
+  });
+}
+
+test('a successful no-op author cannot turn old acceptance evidence into a new revision', async t => {
+  const f = await fixture(t); process.env.CODEX_MAX_ATTEMPTS = '1';
+  await runProductionHarness({ ...f, job: { ...f.job, revisionId: 'first' },
+    step: async name => { if (name.startsWith('production-orchestrator')) await seedDeliverables(f.project); return success(); } });
+  await assert.rejects(runProductionHarness({ ...f, job: { ...f.job, runId: 'next-run', revisionId: 'second', parentRevisionId: 'first' },
+    step: async () => success() }), error => error.kind === 'REVISION_NOT_APPLIED');
+});
+
 test('publication callback failure cannot discard a finished round', async t => {
   const f = await fixture(t); process.env.CODEX_MAX_ATTEMPTS = '1';
   f.step = async name => { if (name.startsWith('production-orchestrator')) await seedDeliverables(f.project); return success(); };

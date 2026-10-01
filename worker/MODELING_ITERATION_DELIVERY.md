@@ -5,6 +5,22 @@ Delivery is distinct from acceptance: `DCC_PROVISIONAL`, `ENGINE_PROVISIONAL` an
 `DELIVERED_WITH_GAPS` retain the original requirements, negative checks and repair instructions.
 The control result can complete a delivery while explicitly reporting `qualityAccepted:false`.
 
+An iteration delivery now requires a completed production invocation. A rejected input or
+exhausted service recovery retains prior packages and evidence without publishing them as
+work on the new revision. Revision deliveries also require the current task/workspace/run
+identity in the acceptance report. Legacy and inherited best results require fresh production;
+their old scores cannot satisfy the new execution gate. Completed current rounds still retain
+honest quality gaps and the original finite budgets.
+
+Production prompts include bounded summaries and links to `plan/production-context.json`,
+`plan/modeling-results.json` and the full quality/iteration feedback. Historical failures stay
+in those evidence files instead of accumulating inside each new AI input. New feedback also
+summarizes stage and asset gaps rather than recursively embedding earlier tool logs.
+
+Organic asymmetric assets use all eight required cameras, including `lower-oblique`, through
+a shared host/MCP view contract. This allows an existing generated model to proceed from its
+saved blockout into preview and refinement without another provider submission.
+
 ```mermaid
 flowchart LR
   Research[Reference research] --> Models[Model and locally retry each asset]

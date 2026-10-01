@@ -37,7 +37,8 @@ test('live CLI errors reach frontend progress, preserve raw logs and clear on re
       return { files: {}, qualityAccepted: false, delivery: { iteration: 1, score: 0, threshold: 85, playable: false } };
     } });
   const recovered = progress.filter(value => value.step === 'modeling-engineering-review-1');
-  assert.ok(recovered.some(value => /正在重连（1\/5）/.test(value.error)));
+  assert.ok(recovered.some(value => value.phase === 'waiting_service' && /正在重连（1\/5）/.test(value.waitReason)));
+  assert.ok(recovered.every(value => !value.error && !value.diagnostic));
   assert.equal(recovered.at(-1).error, null); assert.equal(recovered.at(-1).diagnostic, null);
   const failed = progress.filter(value => value.step === 'quality-review-1');
   assert.ok(failed.some(value => value.diagnostic?.category === 'upstream-ai'));

@@ -5,10 +5,11 @@ import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { runCommand } from '../agent/process-runner.mjs';
 import { agentEnvironment, atomicJson, localPath, hashFile, readJson, repositoryRoot } from '../agent/modeling-io.mjs';
+import { MODEL_VIEWS } from '../agent/modeling-views.mjs';
 
 const sourceProperty = { type: 'string', minLength: 1, maxLength: 1000 };
 const schema = (properties, required) => ({ type: 'object', additionalProperties: false, properties, required });
-const viewNames = ['front', 'side', 'back', 'top', 'perspective', 'other-side', 'bottom'];
+const viewNames = MODEL_VIEWS;
 
 export const blenderTools = [
   { name: 'blender_health', description: 'Read Blender version. Each operation uses a fresh headless scene; save and reopen .blend files explicitly.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
@@ -17,18 +18,27 @@ export const blenderTools = [
   { name: 'blender_inspect', description: 'Open a saved task-relative blend/GLB/FBX and return measured scene data without saving it.',
     inputSchema: schema({ source: sourceProperty, objects: { type: 'array', maxItems: 100, items: sourceProperty }, collection: sourceProperty }, ['source']) },
   { name: 'blender_render_views', description: 'Render saved source with fixed QA cameras. Returns actual image content, source hash and camera metadata.',
-    inputSchema: schema({ source: sourceProperty, manifest: sourceProperty, views: { type: 'array', minItems: 1, maxItems: 7, items: { type: 'string', enum: viewNames } } }, ['source']) },
+    inputSchema: schema({ source: sourceProperty, manifest: sourceProperty, views: { type: 'array', minItems: 1, maxItems: viewNames.length, items: { type: 'string', enum: viewNames } } }, ['source']) },
   { name: 'blender_checkpoint', description: 'Copy a saved blend into an immutable host-named checkpoint after checking its expected SHA256. Reopen the returned copy to recover; never overwrite it.',
     inputSchema: schema({ source: sourceProperty, expectedHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, stage: { type: 'string', enum: ['blockout', 'geometry', 'materials', 'runtime-prep', 'final'] } }, ['source', 'expectedHash', 'stage']) },
 ];
 
 export function serveBlender({ workspace, blender, receiptFile, input = process.stdin, output = process.stdout }) {
   const pending = new Map(); let queue = Promise.resolve(), calls = [];
+  let receiptLoaded = false;
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   const send = value => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...value })}\n`);
   const stop = () => { for (const controller of pending.values()) controller.abort(); };
   lines.on('close', stop);
   async function call(name, args, signal) {
+    if (!receiptLoaded) {
+      const prior = receiptFile ? await readJson(receiptFile, null, 32 * 1024 * 1024) : null;
+      if (prior && (!Array.isArray(prior.calls) || prior.calls.some(call => call.stopConfirmed !== true))) {
+        throw new Error('Previous Blender receipt is invalid or process stop is unconfirmed.');
+      }
+      calls = prior?.calls || [];
+      receiptLoaded = true;
+    }
     let commandArgs, reportFile, sourceHash, source, scriptFile;
     const definition = blenderTools.find(t => t.name === name);
     if (!definition || !args || Array.isArray(args) || Object.keys(args).some(k => !Object.hasOwn(definition.inputSchema.properties, k))) throw new Error('Invalid Blender tool arguments.');
@@ -63,7 +73,7 @@ export function serveBlender({ workspace, blender, receiptFile, input = process.
         if (args.collection) commandArgs.push('--collection', args.collection);
       } else {
         const views = args.views || viewNames.slice(0, 5);
-        if (!Array.isArray(views) || !views.length || views.length > 7 || views.some(v => !viewNames.includes(v))) throw new Error('Invalid views.');
+        if (!Array.isArray(views) || !views.length || views.length > viewNames.length || views.some(v => !viewNames.includes(v))) throw new Error('Invalid views.');
         commandArgs.push('--directory', directory, '--views', views.join(','));
         if (args.manifest) commandArgs.push('--manifest', await localPath(workspace, args.manifest, { existing: true }));
       }
