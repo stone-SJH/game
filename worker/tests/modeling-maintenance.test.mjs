@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { atomicJson, readJson, hashFile, hashValue } from '../agent/modeling-io.mjs';
 import { readModelingState } from '../agent/modeling-state.mjs';
-import { planPendingSettlement, applyPendingSettlement } from '../agent/modeling-maintenance.mjs';
+import { planPendingSettlement, applyPendingSettlement, verifyRetainedModelingSkills } from '../agent/modeling-maintenance.mjs';
+import { createSkillPlan } from '../agent/modeling-skill-routing.mjs';
+import { defaultContract } from '../agent/modeling-contract.mjs';
 
 async function fixture(t) {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'settle-pending-'));
@@ -45,4 +47,27 @@ test('unconfirmed, live and changed execution evidence cannot be settled', async
   ledger.groups.group.calls[0].error.stopConfirmed = true; ledger.groups.group.calls[0].status = 'STARTED'; await atomicJson(f.execution, ledger);
   await assert.rejects(planPendingSettlement(f.workspace), /verify its process tree/);
   assert.deepEqual(await readModelingState(f.file), f.state);
+});
+
+test('resume verification uses recovered reference inputs without rewriting skills or starting a round', async t => {
+  const f = await fixture(t), project = path.join(f.workspace, 'project');
+  const job = await readJson(path.join(project, 'plan/production-context.json'));
+  const taskRoot = path.dirname(f.execution);
+  const base = { assetId: 'rock', referenceImages: [], contract: defaultContract() };
+  const enriched = { ...base, referenceImages: ['reference.png'] }, plan = { assets: [base] };
+  const image = path.join(project, 'reference.png'); await fs.writeFile(image, 'retained reference pixels');
+  const skills = await createSkillPlan({ spec: enriched, project });
+  await atomicJson(path.join(taskRoot, 'toolchain-rock.json'), { skillLockHash: skills.lockHash });
+  await atomicJson(f.file, { ...f.state, requirementsHash: 'frozen', spec: enriched });
+  await atomicJson(path.join(taskRoot, 'recovery.json'), { protocol: 1, taskId: job.taskId, workspaceId: job.workspaceId,
+    productionIdentity: 'b'.repeat(64), planHash: hashValue(plan), iteration: 1,
+    assets: [{ assetId: 'rock', baseHash: hashValue(base), statePath: path.relative(f.workspace, f.file),
+      requirementsHash: 'frozen', specHash: hashValue(enriched), referenceEvidence: [{ file: image, sha256: await hashFile(image) }] }] });
+  const files = [f.file, f.execution, path.join(project, 'tools/modeling-skills', skills.lockHash, 'skill-plan.json')];
+  const before = await Promise.all(files.map(hashFile));
+  await assert.rejects(createSkillPlan({ spec: base, project, pinnedLockHash: skills.lockHash }), { kind: 'INTEGRITY_ERROR' });
+  assert.deepEqual(await verifyRetainedModelingSkills({ workspace: f.workspace, job, plan }), ['rock']);
+  assert.deepEqual(await Promise.all(files.map(hashFile)), before);
+  await fs.appendFile(image, 'changed');
+  await assert.rejects(verifyRetainedModelingSkills({ workspace: f.workspace, job, plan }), { kind: 'INTEGRITY_ERROR' });
 });

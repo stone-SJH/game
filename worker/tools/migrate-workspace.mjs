@@ -3,7 +3,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { atomicJson, hashFile, hashValue, readJson, repositoryRoot } from '../agent/modeling-io.mjs';
-import { modelingToolHashes, pinToolchain, createSkillPlan } from '../agent/modeling-skill-routing.mjs';
+import { modelingToolHashes, pinToolchain } from '../agent/modeling-skill-routing.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { executionPolicy } from '../agent/modeling-execution.mjs';
 import { codexInvocation, readProductionPlans } from '../agent/production-harness.mjs';
@@ -11,7 +11,7 @@ import { planWorkspaceMigration, checkMigration, stageMigration, activateMigrati
 import { readWorkspaceEpoch } from '../agent/workspace-epoch.mjs';
 import { planContentGc, applyContentGc } from '../agent/workspace-gc.mjs';
 import { workspaceLock } from '../agent/workspace-lock.mjs';
-import { planPendingSettlement, applyPendingSettlement } from '../agent/modeling-maintenance.mjs';
+import { planPendingSettlement, applyPendingSettlement, verifyRetainedModelingSkills } from '../agent/modeling-maintenance.mjs';
 
 const run = promisify(execFile), [action, workspaceArg, ...args] = process.argv.slice(2);
 if (!workspaceArg || !['plan', 'stage', 'apply', 'resume-check', 'rollback', 'gc', 'settle-pending'].includes(action)) throw new Error('Usage: migrate-workspace.mjs plan|stage|apply|resume-check|rollback|gc|settle-pending WORKSPACE [--expect-plan-hash HASH]');
@@ -103,14 +103,7 @@ if (action === 'settle-pending') {
   }
   const taskRoot = path.join(workspace, 'modeling-state/tasks', hashValue({ taskId: context.taskId, workspaceId: context.workspaceId }));
   const modelingPlan = await readJson(path.join(taskRoot, 'plan.json'));
-  const verifiedSkillPlans = [];
-  for (const spec of modelingPlan?.assets || []) {
-    if (!spec.contract) continue;
-    const pin = await readJson(path.join(taskRoot, `toolchain-${spec.assetId}.json`));
-    if (!pin?.skillLockHash) throw new Error(`Missing retained skill pin for ${spec.assetId}`);
-    await createSkillPlan({ spec, project, pinnedLockHash: pin.skillLockHash });
-    verifiedSkillPlans.push(spec.assetId);
-  }
+  const verifiedSkillPlans = await verifyRetainedModelingSkills({ workspace, job: context, plan: modelingPlan });
   if (modelingPlan?.assets?.length) {
     const pending = await planPendingSettlement(workspace);
     if (pending.repairs.length) throw new Error('Confirmed failed pending attempts still need the reviewed settle-pending maintenance repair');

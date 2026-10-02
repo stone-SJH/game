@@ -3,6 +3,25 @@ import path from 'node:path';
 import { atomicJson, readJson, hashFile, hashValue, localPath } from './modeling-io.mjs';
 import { readModelingState, writeModelingState } from './modeling-state.mjs';
 import { createExecutionStore, verifyEvidence } from './modeling-execution.mjs';
+import { modelingTaskRoot, recoveredModelingReferences } from './modeling-recovery.mjs';
+import { createSkillPlan } from './modeling-skill-routing.mjs';
+
+export async function verifyRetainedModelingSkills({ workspace, job, plan }) {
+  if (!plan?.assets?.length) return [];
+  const project = path.join(workspace, 'project'), taskRoot = modelingTaskRoot(workspace, job);
+  // Recovery enriches the intake plan with its original verified references.
+  // Match production's inputs without starting research or a production round.
+  const recovery = await recoveredModelingReferences({ project, job, plan, iteration: null });
+  const verified = [];
+  for (const spec of recovery?.assets || plan.assets) {
+    if (!spec.contract) continue;
+    const pin = await readJson(path.join(taskRoot, `toolchain-${spec.assetId}.json`));
+    if (!pin?.skillLockHash) throw new Error(`Missing retained skill pin for ${spec.assetId}`);
+    await createSkillPlan({ spec, project, pinnedLockHash: pin.skillLockHash });
+    verified.push(spec.assetId);
+  }
+  return verified;
+}
 
 function settledState(state, row) {
   return { ...state, pending: null, maintenanceSettlements: [...(state.maintenanceSettlements || []), {

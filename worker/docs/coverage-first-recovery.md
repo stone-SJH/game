@@ -57,7 +57,10 @@ worker configuration privately, then use the existing migration `plan`, `stage`,
 `apply`, `resume-check` sequence with the reviewed plan hash. A successor epoch
 overlays compatible toolchain bindings while preserving historical pins and
 budgets. `resume-check` now verifies retained skill resources and checks that no
-failed pending reservation remains. `READY_FOR_CONTINUE` means these local
+failed pending reservation remains. It resolves the same hash-verified recovered
+references as production before checking skill membership; the initial intake
+plan may not yet contain those references. It starts no research or generation.
+`READY_FOR_CONTINUE` means these local
 prerequisites passed; `realContinueValidated: false` explicitly records that the
 user has not yet triggered a production run.
 
