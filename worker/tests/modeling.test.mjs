@@ -180,6 +180,7 @@ async function pipelineFixture(t, { enabled = true, generated = 'unavailable', v
       calls.push('provider'); return generated === 'ready' ? { status: 'ready', modelFile: 'generated.glb' } : { status: 'unavailable', reasonCode: 'insufficient_credits' };
     } },
     evaluate: async () => { calls.push('evaluate'); if (invalidEvaluator) throw new Error('invalid JSON'); return advice(enabled); },
+    searchAssets: async () => { calls.push('search:gap'); return { status: 'GAP', candidates: [], evidence: [] }; },
     build: async ({ directory, decision }) => {
       calls.push(`build:${decision.route}`);
       await fs.writeFile(path.join(f.project, directory, 'source.blend'), 'fixture source');
@@ -228,10 +229,10 @@ test('third-party outage completes via Blender and accepted models survive retri
   const summary = await f.pipeline.prepare();
   assert.equal(summary.assets[0].originalRoute, 'tripo_then_blender');
   assert.equal(summary.assets[0].route, 'blender_direct');
-  assert.deepEqual(f.calls, ['evaluate', 'provider', 'build:blender_direct', 'check:blender_direct']);
+  assert.deepEqual(f.calls, ['evaluate', 'provider', 'search:gap', 'build:blender_direct', 'check:blender_direct']);
   const restarted = createModelingPipeline(f.options);
   assert.equal((await restarted.prepare()).assets[0].reused, true);
-  assert.equal(f.calls.length, 4);
+  assert.equal(f.calls.length, 5);
 });
 
 test('generated output failing visual quality goes directly to Blender with the same requirements', async t => {

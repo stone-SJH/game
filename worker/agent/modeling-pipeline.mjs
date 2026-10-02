@@ -21,7 +21,8 @@ import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
 import { readModelingState, writeModelingState, modelingFailureSummary } from './modeling-state.mjs';
 import { recoveredModelingReferences } from './modeling-recovery.mjs';
 import { createModelingImageProvider } from './modeling-image-provider.mjs';
-import { prepareModelingConcept } from './modeling-concept.mjs';
+import { prepareModelingConcept, readConceptInputRejection } from './modeling-concept.mjs';
+import { searchModelingAsset, canSearchAfterGenerationFailure } from './modeling-search-fallback.mjs';
 import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
 import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from './workspace-epoch.mjs';
 import { workingSource } from './modeling-working-source.mjs';
@@ -30,7 +31,7 @@ import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResp
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
   provider = createTripoProvider(), imageProvider = createModelingImageProvider(), probe = discoverModelingCapabilities,
-  build, check, checkBase, evaluate, blenderMcp = callBlenderMcp,
+  build, check, checkBase, evaluate, blenderMcp = callBlenderMcp, searchAssets = searchModelingAsset,
 }) {
   const stateRoot = path.join(path.dirname(project), 'modeling-state');
   const planFile = path.join(output, 'modeling-plan.json');
@@ -593,8 +594,12 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (revisionBudget) state.revisionBudgets[job.revisionId] ||= { attempts: { ...priorRevisionRound?.attempts } };
     const authorAttempts = revisionBudget ? state.revisionBudgets[job.revisionId].attempts : round.attempts;
     const otherAttempts = revisionBudget ? await otherRevisionAttempts(stateRoot, stateFile, spec.assetId, job.revisionId) : {};
-    const consumedAttempts = route => sourcePolicyAttempts(state, Object.fromEntries([...new Set([...Object.keys(authorAttempts), ...Object.keys(otherAttempts)])]
-      .map(key => [key, (authorAttempts[key] || 0) + (otherAttempts[key] || 0)])), route, sourcePolicy);
+    const consumedAttempts = route => {
+      const totals = Object.fromEntries([...new Set([...Object.keys(authorAttempts), ...Object.keys(otherAttempts)])]
+        .map(key => [key, (authorAttempts[key] || 0) + (otherAttempts[key] || 0)]));
+      return state.searchFallback && route === 'reuse_blender' ? Object.values(totals).reduce((a, b) => a + b, 0)
+        : sourcePolicyAttempts(state, totals, route, sourcePolicy);
+    };
     if (repair && (!state.pending || state.pending.phase === 'ACCEPTED')) {
       state.bestCandidate ||= state.accepted;
       state.accepted = null; state.pending = null; state.lastRepair = repairKey;
@@ -628,7 +633,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         state.previousAttemptDirectory = state.bestCandidate.directory;
         state.feedback = state.bestCandidate.review;
       }
-      if (productionIteration > 1 && state.bestCandidate && availability.enabled && !providerDisabledReason && !state.providerAttempted) {
+      if (productionIteration > 1 && state.bestCandidate && !state.searchFallback && availability.enabled && !providerDisabledReason && !state.providerAttempted) {
         state.decision = await assess(spec, [], availability, [], { ...state.bestCandidate.quality,
           completedIterations: productionIteration - 1, previousRoute: state.route, recentFailures: state.failures.slice(-3) });
         state.route = state.decision.route;
@@ -680,15 +685,67 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       await report(round.stageGap, await localPath(project, 'plan/modeling/' + spec.assetId + '/' + short + '/iteration-' + productionIteration + '-image-gap.json'));
       return round.stageGap;
     };
+    const searchSource = async (kind, failure) => {
+      if (!canSearchAfterGenerationFailure(failure, { signal, external3DAllowed: sourcePolicy.external3DAllowed })) return null;
+      // A later timeout or missing key must not erase an earlier content refusal.
+      if (await readConceptInputRejection({ spec, project, taskState, short })) return null;
+      return searchAssets({ spec, project, job, iteration: productionIteration, kind, failure, review: reviewer, signal,
+        reportProgress, external3DAllowed: sourcePolicy.external3DAllowed });
+    };
+    const searchImage = async failure => {
+      const found = await searchSource('image', failure), candidate = found?.candidates?.[0];
+      if (found?.status !== 'FOUND' || !candidate) return null;
+      await verifyEvidence(found.evidence);
+      return { status: 'ready', sourced: true, imageFile: candidate.file, sha256: candidate.sha256,
+        provenance: candidate, evidence: found.evidence };
+    };
+    const searchModel = async failure => {
+      const found = await searchSource('model', failure);
+      if (found?.status !== 'FOUND') return false;
+      await verifyEvidence(found.evidence);
+      for (const candidate of found.candidates) {
+        const assetId = 'source-' + candidate.sha256.slice(0, 20);
+        if (state.rejectedSources.includes(assetId)) continue;
+        let preview;
+        try { preview = await sourcePreview(candidate.file, candidate.sha256, spec.assetId); }
+        catch (error) {
+          throwIfExecutionFenced(error, signal);
+          state.failures.push({ stage: 'searched-model-preview', reason: String(error.message).slice(0, 1000) });
+          await writeModelingState(stateFile, state); continue;
+        }
+        const source = { assetId, path: candidate.file, sha256: candidate.sha256, description: candidate.suitability,
+          source: candidate.sourceUrl, license: candidate.license + ': ' + candidate.licenseUrl,
+          previewImages: preview.previewImages, attribution: candidate.attribution };
+        await registerModelingAsset(project, source);
+        state.searchFallback = { ...found, selected: source, evidence: [...found.evidence, ...preview.evidence] };
+        state.source = source; candidates = [source];
+        state.route = 'reuse_blender';
+        state.decision = { route: 'reuse_blender', sourceAssetId: assetId,
+          editPlan: ['Import the licensed searched model and refine it against every original requirement.'],
+          reason: 'Generation unavailable; use an acquired source with retained provenance. Original acceptance gates still apply.' };
+        state.previousAttemptDirectory = null; sourceFile = null;
+        await writeModelingState(stateFile, state);
+        await reportProgress({ phase: 'crafting', tool: 'Asset search fallback', step: `${spec.assetId}: acquired model; continue Blender refinement and original validation` });
+        return true;
+      }
+      return false;
+    };
     while (true) {
       signal.throwIfAborted();
       if (state.route === 'image_tripo_blender' && !sourceFile) {
         try {
-          if (!availability.enabled) return await retainImageGap({
-            stage: 'modeling-image-to-3d', status: 'GAP', reason: availability.reasonCode || 'Tripo unavailable; keep existing work and retry in the next whole iteration.' });
+          const rejectedInput = await readConceptInputRejection({ spec, project, taskState, short });
+          if (rejectedInput) return await retainImageGap(rejectedInput.record.issue);
+          if (!availability.enabled) {
+            if (await searchModel({ reasonCode: availability.reasonCode })) continue;
+            return await retainImageGap({ stage: 'modeling-image-to-3d', status: 'GAP', reason: availability.reasonCode || 'Tripo unavailable; no usable searched model.' });
+          }
           const concept = round.concept || await prepareModelingConcept({ spec, project, taskState, short, iteration: productionIteration,
-            job, imageProvider, review: reviewer, signal, reportProgress });
-          if (concept.status !== 'APPROVED') return await retainImageGap(concept.issue);
+            job, imageProvider, review: reviewer, signal, reportProgress, fallbackImage: searchImage });
+          if (concept.status !== 'APPROVED') {
+            if (await searchModel({ reasonCode: concept.issue?.reason, ...concept.issue })) continue;
+            return await retainImageGap(concept.issue);
+          }
           await verifyEvidence(concept.evidence);
           round.concept = concept;
           round.providerIteration ||= productionIteration;
@@ -699,19 +756,30 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
             ledgerFile: path.join(taskState, 'image-tripo-ledger-' + providerIteration + '.json'),
             assetId: spec.assetId, prompt: spec.prompt, requirementsHash, image: { ...concept.image, approval: concept.approval },
             resumePolling: providerIteration < productionIteration, signal, deadlineAt: job.deadlineAt });
-          if (result.status !== 'ready') return await retainImageGap({ stage: 'modeling-image-to-3d', status: 'GAP', reason: result.reasonCode });
+          if (result.status !== 'ready') {
+            if (await searchModel(result)) continue;
+            return await retainImageGap({ stage: 'modeling-image-to-3d', status: 'GAP', reason: result.reasonCode });
+          }
           await verifyEvidence([{ file: await localPath(project, result.modelFile), sha256: result.sha256 }]);
           sourceFile = result.modelFile;
           round.generatedBase = { ...result, imageHash: concept.image.sha256 };
           state.previousAttemptDirectory = null;
           await writeModelingState(stateFile, state);
         } catch (error) {
+          if (canSearchAfterGenerationFailure(error, { signal, external3DAllowed: sourcePolicy.external3DAllowed })) {
+            if (await searchModel(error)) continue;
+            return await retainImageGap({ ...stageIssue('modeling-image-to-3d', error),
+              reason: 'Generation unavailable and no usable searched source was acquired: ' + error.reasonCode });
+          }
           throwIfExecutionFenced(error, signal);
           return await retainImageGap(stageIssue('modeling-image-to-3d', error));
         }
       }
       if (state.route === 'tripo_then_blender' && !sourceFile) {
-        if (!availability.enabled || providerDisabledReason) { await fallback(providerDisabledReason || availability.reasonCode || 'provider_disabled'); continue; }
+        if (!availability.enabled || providerDisabledReason) {
+          if (await searchModel({ reasonCode: providerDisabledReason || availability.reasonCode })) continue;
+          await fallback(providerDisabledReason || availability.reasonCode || 'provider_disabled'); continue;
+        }
         state.providerAttempted = true;
         await writeModelingState(stateFile, state);
         await reportProgress({ phase: 'crafting', tool: 'Tripo', step: `Generating ${spec.assetId}` });
@@ -726,7 +794,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           result = { status: 'unavailable', reasonCode: 'provider_call_unavailable' };
         }
         await report(result, path.join(output, `modeling-provider-${spec.assetId}-${short}.json`));
-        if (result.status !== 'ready') { providerDisabledReason = result.reasonCode || 'provider_unavailable'; await fallback(providerDisabledReason); continue; }
+        if (result.status !== 'ready') {
+          if (await searchModel(result)) continue;
+          providerDisabledReason = result.reasonCode || 'provider_unavailable'; await fallback(providerDisabledReason); continue;
+        }
         sourceFile = result.modelFile;
         try {
           const base = await generatedBase(spec, sourceFile);
@@ -741,9 +812,11 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         }
       }
       if (state.route === 'reuse_blender' && !sourceFile) {
-        const candidate = candidates.find(item => item.assetId === state.decision.sourceAssetId);
+        const candidate = state.searchFallback?.selected?.assetId === state.decision.sourceAssetId
+          ? state.searchFallback.selected : candidates.find(item => item.assetId === state.decision.sourceAssetId);
         if (!candidate) { await fallback('source_changed_or_missing'); continue; }
-        const relative = `art/models/${spec.assetId}/${short}/reused-source${path.extname(candidate.path)}`;
+        if (state.searchFallback) await verifyEvidence(state.searchFallback.evidence);
+        const relative = `art/models/${spec.assetId}/${short}/reused-source${state.searchFallback ? '-' + candidate.sha256.slice(0, 20) : ''}${path.extname(candidate.path)}`;
         const copy = await localPath(project, relative);
         await fs.mkdir(path.dirname(copy), { recursive: true });
         try { await fs.copyFile(await localPath(project, candidate.path, { existing: true }), copy, fs.constants.COPYFILE_EXCL); }
@@ -755,7 +828,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       const route = state.route;
       const limit = route === 'blender_direct' ? 3 : 2;
       if (!state.pending && consumedAttempts(route) >= limit) {
-        if (route === 'blender_direct' || route === 'image_tripo_blender') {
+        if (route === 'blender_direct' || route === 'image_tripo_blender' || state.searchFallback && route === 'reuse_blender') {
           if (state.bestCandidate) {
             await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
             round.delivered = state.bestCandidate.attemptId;
@@ -858,6 +931,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         const paths = [`${directory}/source.blend`, `${directory}/model.glb`, `${directory}/build-report.json`,
           ...(spec.contract ? [`${directory}/recipe.py`, `${directory}/asset-manifest.json`, ...(spec.contract.runtime.profile.startsWith('fbx') ? [`${directory}/model.fbx`] : [])] : []),
           ...(context.stageArtifacts || []),
+          ...(route === 'reuse_blender' ? state.searchFallback?.evidence || [] : []).map(item => path.relative(project, item.file).replaceAll('\\', '/')),
           ...(route === 'image_tripo_blender' ? [round.generatedBase.modelFile,
             ...round.concept.evidence.map(item => path.relative(project, item.file).replaceAll('\\', '/'))] : []),
           ...(validation.dependencies || []),
@@ -871,9 +945,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           executionFile: execution.file,
           status: validation.passed ? 'DCC_READY' : 'DCC_PROVISIONAL',
           ...(spec.contract ? { contract: spec.contract, spec, skillLockHash: skillPlan.lockHash } : {}),
-          ...(route === 'image_tripo_blender' ? { generation: { model: 'gpt-image-2', concept: round.concept,
+          ...(route === 'reuse_blender' && state.searchFallback ? { acquisition: { method: 'search', ...state.searchFallback.selected, evidence: state.searchFallback.evidence } } : {}),
+          ...(route === 'image_tripo_blender' ? { generation: { model: round.concept.generationModel ?? (round.concept.imageSource ? null : 'gpt-image-2'), concept: round.concept,
             base: round.generatedBase, acceptance: 'Concept approval guides appearance; original DCC and engine gates still apply.' } } : {}),
-          source: state.source || (route === 'image_tripo_blender' ? 'Reviewed GPT Image 2 concept, Tripo image-to-3D and Blender refinement' :
+          source: state.source || (route === 'image_tripo_blender' ? (round.concept.imageSource ? 'Reviewed licensed searched image, Tripo image-to-3D and Blender refinement' : 'Reviewed GPT Image 2 concept, Tripo image-to-3D and Blender refinement') :
             state.providerAttempted ? 'Tripo attempted; see provider report and effective route' : 'Task authored'), failures: modelingFailureSummary(state.failures, stateFile) };
         await workingSource(project, candidate);
         if (!validation.passed) {
@@ -892,8 +967,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         state.accepted = candidate;
         await registerModelingAsset(project, { path: `${directory}/source.blend`, sha256: files[0].sha256,
           description: spec.description, previewImages: validation.previews || [],
-          source: route === 'reuse_blender' ? state.source.source : route === 'image_tripo_blender' ? 'Reviewed GPT Image 2 concept, Tripo image-to-3D and Blender refinement' : route === 'tripo_then_blender' ? 'Tripo generation with Blender cleanup' : 'Task authored in Blender',
-          license: route === 'reuse_blender' ? state.source.license : ['tripo_then_blender', 'image_tripo_blender'].includes(route) ? 'Generation provider account terms' : 'Task authored',
+          source: route === 'reuse_blender' ? state.source.source : route === 'image_tripo_blender' ? (round.concept.imageSource ? round.concept.imageSource.sourceUrl + '; Tripo image-to-3D and Blender refinement' : 'Reviewed GPT Image 2 concept, Tripo image-to-3D and Blender refinement') : route === 'tripo_then_blender' ? 'Tripo generation with Blender cleanup' : 'Task authored in Blender',
+          license: route === 'reuse_blender' ? state.source.license : round.concept?.imageSource ? round.concept.imageSource.license + '; generation provider account terms' : ['tripo_then_blender', 'image_tripo_blender'].includes(route) ? 'Generation provider account terms' : 'Task authored',
+          ...(route === 'reuse_blender' && state.searchFallback ? { attribution: state.searchFallback.selected.attribution } : route === 'image_tripo_blender' && round.concept?.imageSource ? { attribution: round.concept.imageSource.attribution } : {}),
           modelingMetadata: { requirements: spec.requirements, requirementsHash, route, evidenceDirectory },
         });
         state.pending.phase = 'ACCEPTED';

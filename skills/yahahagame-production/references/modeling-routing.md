@@ -101,9 +101,34 @@ including when Blender failed before producing a usable export. An unknown submi
 never retried blindly. Tripo defaults to a 20-minute total wait and 2-minute individual requests.
 Credits,
 authentication, rate limits, service errors, timeout, malformed output, download errors, and
-quality gaps in the legacy route return a recorded `blender_direct` fallback. In the image route,
-retain the stage GAP and complete the whole iteration. Cancellation or unconfirmed process
+quality gaps in the legacy route return a recorded `blender_direct` fallback when no eligible
+searched source is acquired. In the image route, retain the stage GAP and complete the whole iteration.
+Cancellation or unconfirmed process
 shutdown propagates to the worker instead of starting a fallback.
+
+### Licensed resource search after service failure
+
+Identified image timeouts, interrupted responses, temporary HTTP failures and unavailable image
+configuration may search existing images. A downloaded image must pass the same independent
+concept review before Tripo receives it. If no image is acquired, or 3D generation is unavailable,
+the host may search downloadable models and enter `reuse_blender` after real Blender inspection.
+All original identity, geometry, rigging, animation and engine gates still apply. Search is input
+acquisition, never acceptance; an unsuitable result remains a GAP.
+
+Only public self-contained GLB models and PNG/JPEG/WebP images with asset-specific CC0-1.0,
+CC-BY-4.0 or CC-BY-3.0 evidence are currently supported. Images are normalized to PNG without
+generative changes. Preserve original downloads, source URLs, authors, attribution, license
+evidence and file hashes under `art/sourced-assets/`. Do not infer permission from a site footer.
+Successful acquisition is reused across rounds; an unsuccessful search is bounded per controller
+revision. Existing paid task IDs, submission ledgers and consumed author budgets remain intact.
+Exhausting searched-model refinement retains the best candidate and its gaps without cycling
+back to paid generation. A searched image is recorded as such, never as a generated concept.
+
+Explicit content-review rejection and unclassified errors are not infrastructure failures.
+Never search to circumvent a provider refusal. A retained `IMAGE_INPUT_REJECTED` receipt also
+blocks search after later timeouts or missing credentials. Revised acceptable asset inputs are
+required. Cancellation, unconfirmed tools, evidence corruption and external-source restrictions
+remain fences. See `worker/docs/modeling-search-fallback.md` for verification and deployment.
 
 The image route sends `model=gpt-image-2` to the configured local
 `/v1/images/generations` API. It never uses Tripo text-to-image. By default it reads the selected

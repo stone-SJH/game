@@ -321,6 +321,91 @@ async function pipelineFixture(t, { conceptGap = false, modelGap = false } = {})
   return { ...f, options, events };
 }
 
+async function searchedSource(f, kind) {
+  const file = 'searched.' + (kind === 'image' ? 'png' : 'glb');
+  await fs.writeFile(path.join(f.project, file), kind === 'image' ? png() : glb());
+  await fs.writeFile(path.join(f.project, 'search-license.txt'), 'Fixture source CC-BY-4.0');
+  const sha256 = await hashFile(path.join(f.project, file));
+  return { status: 'FOUND', candidates: [{ file, sha256, sourceUrl: 'https://assets.example.org/fox',
+    license: 'CC-BY-4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+    attribution: 'Fox by fixture creator, CC-BY-4.0', suitability: 'Fox for refinement' }],
+  evidence: [{ file: path.join(f.project, file), sha256 },
+    { file: path.join(f.project, 'search-license.txt'), sha256: await hashFile(path.join(f.project, 'search-license.txt')) }] };
+}
+
+test('image timeout searches an image, independently reviews it and retains its actual provenance through Tripo', async t => {
+  const f = await pipelineFixture(t), source = await searchedSource(f, 'image');
+  f.options.imageProvider = { generate: async () => { f.events.push('timeout'); throw Object.assign(new Error('Image response timed out'),
+    { kind: 'SERVICE_TRANSIENT', stopConfirmed: true, reasonCode: 'image_timeout' }); } };
+  f.options.searchAssets = async ({ kind }) => { assert.equal(kind, 'image'); f.events.push('search:image'); return source; };
+  const first = await createModelingPipeline(f.options).prepare();
+  assert.deepEqual(f.events, ['timeout', 'search:image', 'review', 'tripo', 'build:fox', 'build:prop']);
+  assert.equal(first.assets[0].status, 'DCC_READY');
+  assert.equal(first.assets[0].generation.model, null);
+  assert.equal(first.assets[0].generation.concept.imageSource.sourceUrl, source.candidates[0].sourceUrl);
+  assert.ok(first.assets[0].files.some(row => row.path === 'search-license.txt'));
+  await createModelingPipeline(f.options).prepare();
+  assert.equal(f.events.filter(row => row === 'search:image').length, 1);
+});
+
+test('a searched image failing the original visual review never reaches Tripo or triggers model search', async t => {
+  const f = await pipelineFixture(t, { conceptGap: true }), source = await searchedSource(f, 'image');
+  f.options.imageProvider = { generate: async () => ({ status: 'unavailable', reasonCode: 'image_timeout' }) };
+  f.options.searchAssets = async ({ kind }) => { assert.equal(kind, 'image'); f.events.push('search:image'); return source; };
+  const first = await createModelingPipeline(f.options).prepare();
+  assert.equal(first.assets[0].status, 'NO_USABLE_ARTIFACT');
+  assert.equal(first.assets[0].quality.gaps[0].kind, 'SEARCH_IMAGE_VISUAL_GAP');
+  assert.deepEqual(f.events, ['search:image', 'review', 'build:prop']);
+});
+
+for (const modelGap of [false, true]) test('3D timeout refines a searched model without recharging or resetting original gates (gap=' + modelGap + ')', async t => {
+  const f = await pipelineFixture(t, { modelGap }), source = await searchedSource(f, 'model');
+  let paidState;
+  f.options.provider.generate = async args => {
+    paidState = args.stateFile; f.events.push('tripo:timeout');
+    const result = { status: 'unavailable', reasonCode: 'provider_timeout', taskId: 'already_paid' };
+    await atomicJson(paidState, result); return result;
+  };
+  f.options.searchAssets = async ({ kind }) => { assert.equal(kind, 'model'); f.events.push('search:model'); return source; };
+  f.options.step = async (name, command, args) => {
+    assert.match(name, /^modeling-source-preview-/); f.events.push('preview');
+    const report = args[args.indexOf('--report') + 1];
+    await atomicJson(report, { source: args[args.indexOf('--candidate') + 1] });
+    for (const view of ['front', 'side', 'back', 'perspective']) await fs.writeFile(path.join(path.dirname(report), view + '.png'), png());
+  };
+  const build = f.options.build;
+  f.options.build = async context => {
+    if (context.spec.assetId === 'fox') {
+      assert.equal(context.decision.route, 'reuse_blender'); assert.equal(context.generatedRefinement, false);
+      assert.ok(context.sourceFile); assert.equal(context.spec.requireRig, true);
+      assert.deepEqual(context.spec.contract.runtime.animations, ['Walk']);
+    }
+    // Retain the artifact-writing fixture; its original image-route assertion is separate.
+    await build({ ...context, generatedRefinement: context.spec.assetId === 'fox' });
+  };
+  const first = await createModelingPipeline(f.options).prepare();
+  const asset = first.assets[0];
+  assert.equal(asset.route, 'reuse_blender'); assert.equal(asset.acquisition.method, 'search');
+  assert.equal(asset.status, modelGap ? 'DCC_PROVISIONAL' : 'DCC_READY');
+  assert.ok(asset.files.some(row => row.path === 'search-license.txt'));
+  assert.equal(f.events.filter(row => row === 'build:fox').length, modelGap ? 2 : 1);
+  const count = f.events.length; await createModelingPipeline(f.options).prepare(); assert.equal(f.events.length, count);
+  assert.equal((await readJson(paidState)).taskId, 'already_paid');
+  await createModelingPipeline(f.options).verify();
+});
+
+test('a retained content rejection still blocks search when provider configuration later fails', async t => {
+  const f = await pipelineFixture(t);
+  f.options.imageProvider = createModelingImageProvider({ settings: f.settings, credential: f.credential,
+    fetchImpl: async () => json({ error: { code: 'moderation_blocked' } }, 400) });
+  f.options.searchAssets = async () => { throw new Error('Must never search a rejected request'); };
+  await createModelingPipeline(f.options).prepare();
+  f.options.provider.availability = async () => ({ enabled: false, reasonCode: 'key_file_missing' });
+  const second = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(second.assets[0].quality.gaps[0].requiresInputChange, true);
+  assert.equal(f.events.includes('tripo'), false);
+});
+
 test('an explicit external 3D prohibition overrides detailed organic routing and prevents every provider call', async t => {
   const f = await pipelineFixture(t);
   f.options.job.objective = '不得调用任何外部 3D 生成服务。全部建模在 Blender 完成。';
