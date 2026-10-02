@@ -62,3 +62,46 @@ test('missing peripheral terrain gets a separate contract without changing the f
   } });
   assert.equal(result.revisions, 5); assert.deepEqual(result.assets[0], core); assert.equal(result.assets[1].assetId, 'terrain');
 });
+
+test('native systems without render geometry do not stall formal asset coverage', async t => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), 'coverage-systems-'));
+  t.after(() => fs.rm(project, { recursive: true, force: true }));
+  await fs.writeFile(path.join(project, 'rock.blend'), 'authored rock');
+  await fs.writeFile(path.join(project, 'rock.fbx'), 'exported rock');
+  const rock = { label: 'rock', actorClass: 'StaticMeshActor', mesh: '/Game/Rock', category: 'authored',
+    materials: ['M_Rock'], formalBlenderSource: 'rock.blend',
+    immutableFBX: { path: 'rock.fbx', sha256: await hashFile(path.join(project, 'rock.fbx')) } };
+  const systems = ['SkyAtmosphere', 'DirectionalLight', 'SkyLight', 'PointLight', 'SpotLight', 'RectLight',
+    'ExponentialHeightFog', 'PostProcessVolume', 'PlayerStart', 'CameraActor', 'CineCameraActor'].map(actorClass => ({
+    label: actorClass, actorClass, mesh: null, materials: [], renderMeshComponentCount: 0,
+    editorMeshComponents: /Camera/.test(actorClass) ? [{ editorOnly: true, hiddenInGame: true, visible: true }] : [],
+  }));
+  const report = { ...job, iteration: 1, actors: [rock, ...systems], engineNativeProvisionalActors: [],
+    missingOrDefaultMaterialActors: [], finalBlenderSourceCompliance: 'PASS' };
+  const file = path.join(project, 'acceptance/scene-coverage.json');
+  await atomicJson(file, report);
+  const coverage = await readSceneCoverage(project, job, 1);
+  assert.equal(coverage.status, 'PASS'); assert.deepEqual(coverage.sourceProblems, []);
+  assert.equal(coverageStalled([1, 2, 3].map(() => ({ coverage }))), false);
+  assert.equal((await readSceneCoverage(project, { ...job, runId: 'next-run' }, 1)).status, 'GAP');
+
+  // Material/source exemptions cannot conceal missing evidence or runtime geometry.
+  const camera = systems.find(actor => actor.actorClass === 'CameraActor');
+  for (const change of [
+    { actorClass: 'StaticMeshActor', category: 'camera', sourceRequired: false },
+    { actorClass: 'BP_Camera_C' }, { mesh: '/Game/VisibleCameraHousing' }, { mesh: undefined },
+    { renderMeshComponentCount: 1 }, { renderMeshComponentCount: undefined },
+    { editorMeshComponents: undefined }, { editorMeshComponents: [{}] },
+    { editorMeshComponents: [{ editorOnly: false, hiddenInGame: false, visible: true }] },
+  ]) {
+    report.actors = [rock, { ...camera, ...change }];
+    await atomicJson(file, report);
+    const result = await readSceneCoverage(project, job, 1);
+    assert.equal(result.status, 'GAP', JSON.stringify(change));
+    assert.deepEqual(result.sourceProblems, ['CameraActor']);
+  }
+  report.actors = [rock, ...systems];
+  await atomicJson(file, report);
+  await fs.appendFile(path.join(project, 'rock.fbx'), 'changed');
+  assert.deepEqual((await readSceneCoverage(project, job, 1)).sourceProblems, ['rock']);
+});
