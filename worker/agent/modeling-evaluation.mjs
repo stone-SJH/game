@@ -28,6 +28,13 @@ export const modelingPlanSchema = object({
 });
 export const modelingPlanV2Schema = object({ reason: string, assets: { type: 'array', maxItems: 30,
   items: object({ ...assetSpecSchema.properties, contract: generatedContractSchema }) } });
+// Repairs must be able to represent frozen legacy contracts, including zero
+// tolerances. New contracts still use the stricter generation schema.
+const { traversal: optionalTraversal, ...legacyContractProperties } = contractSchema.properties;
+export const modelingRevisionSchema = object({ reason: string, assets: { type: 'array', maxItems: 30,
+  items: object({ ...assetSpecSchema.properties, contract: { anyOf: [
+    object({ ...legacyContractProperties, traversal: optionalTraversal }), object(legacyContractProperties),
+  ] } }) } });
 const prediction = object({ criterion: string, achievable: { type: 'boolean' }, evidence: string });
 const predictions = { type: 'array', minItems: 1, maxItems: 30, items: prediction };
 export const modelingDecisionSchema = object({
@@ -110,7 +117,7 @@ function completePredictions(predictions, spec) {
   return predictions.length === spec.requirements.length && new Set(predictions.map(item => item.criterion)).size === spec.requirements.length && predictions.every(item => spec.requirements.includes(item.criterion));
 }
 
-export function selectModelingRoute(advice, { spec, candidates, providerEnabled, hasReferenceImages = false }) {
+export function selectModelingRoute(advice, { spec, candidates, providerEnabled, hasReferenceImages = false, external3DAllowed = true }) {
   validateSchema(advice, modelingDecisionSchema);
   if (!completePredictions(advice.direct.qualityByCriterion, spec)) throw new Error('Missing direct quality predictions.');
   const ids = new Set();
@@ -123,6 +130,8 @@ export function selectModelingRoute(advice, { spec, candidates, providerEnabled,
   const reusable = advice.candidates.filter(candidate => candidate.canMeetQuality && candidate.editPlan.length && candidate.qualityByCriterion.every(item => item.achievable) &&
     candidates.find(source => source.assetId === candidate.assetId)?.previewImages.length).sort((a, b) => b.similarity - a.similarity)[0];
   if (reusable && advice.confidence >= 0.7) return { route: 'reuse_blender', sourceAssetId: reusable.assetId, editPlan: reusable.editPlan, reason: reusable.reason };
+  if (!external3DAllowed) return { route: 'blender_direct', editPlan: advice.direct.plan,
+    reason: 'User constraints prohibit external 3D generation; author directly in Blender.' };
   if (prefersImageModeling(spec, advice)) return { route: 'image_tripo_blender',
     editPlan: ['Generate and independently approve a detailed concept image', 'Generate the 3D base from the approved image',
       'Preserve the generated detail while repairing topology, materials, rig, weights, animations and exports in Blender'],

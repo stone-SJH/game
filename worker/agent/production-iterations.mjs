@@ -5,6 +5,7 @@ import { fileEvidence, verifyEvidence, modelingFailure } from './modeling-execut
 import { loadModelingRecovery } from './modeling-recovery.mjs';
 import { contentStore, checkpointEntry, packageEntry } from './workspace-storage.mjs';
 import { readWorkspaceEpoch } from './workspace-epoch.mjs';
+import { coverageImproved } from './modeling-coverage.mjs';
 
 export async function createProductionIterations({ job, project, policy }) {
   const recovery = job.revisionId ? null : await loadModelingRecovery(project, job);
@@ -45,7 +46,7 @@ export async function createProductionIterations({ job, project, policy }) {
       return { missing: [], files: state.best.files, qualityAccepted: state.best.qualityAccepted,
         delivery: { ...state.best.delivery, ...(reason ? { stoppedReason: reason } : {}) } };
     },
-    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling, playable = true, productionCompleted = false }) {
+    async complete({ deliverables, score, threshold, qualityAccepted, issues, quality, modeling, playable = true, productionCompleted = false, coverage = null }) {
       const iteration = state.iteration;
       const directory = path.join(root, 'deliveries', `iteration-${iteration}`);
       await fs.mkdir(directory, { recursive: true });
@@ -69,7 +70,7 @@ export async function createProductionIterations({ job, project, policy }) {
         }
       }
       const record = { protocol: 1, kind: 'iteration-delivery', taskId: job.taskId, workspaceId: job.workspaceId, runId: job.runId,
-        revisionId: job.revisionId || null, productionCompleted,
+        revisionId: job.revisionId || null, productionCompleted, coverage,
         iteration, status: !playable ? 'RETAINED_INCOMPLETE' : qualityAccepted ? 'ACCEPTED' : 'DELIVERED_WITH_GAPS', score, threshold, playable,
         publishable: playable && ['projectFile', 'scenePreview', 'packageFile', 'acceptanceReport'].every(role => files[role]),
         qualityAccepted, issues, quality, modeling, sourceWorkspace: project, retainedProject: null,
@@ -79,14 +80,14 @@ export async function createProductionIterations({ job, project, policy }) {
       await atomicJson(reportFile, record); files.iterationResult = reportFile;
       const evidence = await fileEvidence([...Object.values(files), ...(packageManifest?.files || []).map(row => path.join(snapshotRoot, row.path))]);
       const retained = { files, evidence, qualityAccepted, delivery: record };
-      state.rounds.push({ iteration, score, qualityAccepted, reportFile, snapshotId: manifest.id, packageDigest: packageManifest?.id || null });
+      state.rounds.push({ iteration, score, qualityAccepted, reportFile, snapshotId: manifest.id, packageDigest: packageManifest?.id || null, coverage });
       const priorPlayable = state.best?.delivery.playable !== false;
       const priorPublishable = state.best?.delivery.publishable === true;
       const previousRevision = state.best && (state.best.inherited || (job.revisionId
         ? state.best.delivery.revisionId !== job.revisionId : state.best.delivery.runId !== job.runId));
       if (!state.best || productionCompleted && (!state.best.delivery.productionCompleted || previousRevision) || record.publishable && state.best.inherited || record.publishable && !priorPublishable || record.publishable === priorPublishable &&
         (playable && !priorPlayable || playable === priorPlayable &&
-        (score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted))) state.best = retained;
+        (score > state.best.delivery.score || qualityAccepted && !state.best.qualityAccepted || coverageImproved(state.best.delivery.coverage, coverage)))) state.best = retained;
       state.iteration++;
       state.protocol = 2;
       await atomicJson(file, state);

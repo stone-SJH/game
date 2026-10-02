@@ -3,7 +3,9 @@ import path from 'node:path';
 import { atomicJson, readJson, localPath, hashValue, hashFile, repositoryRoot, agentEnvironment, throwIfStopped, recordAuthorRecipe } from './modeling-io.mjs';
 import { buildAssetCatalog, registerModelingAsset } from './asset-catalog.mjs';
 import { blenderExecutable, blenderMcpArgs, discoverModelingCapabilities, callBlenderMcp } from './modeling-capabilities.mjs';
-import { modelingPlanSchema, modelingPlanV2Schema, decisionSchemaFor, visualSchemaFor, validateSpecs, modelingPrompt, selectModelingRoute, reviewPasses, prefersImageModeling } from './modeling-evaluation.mjs';
+import { modelingPlanSchema, modelingPlanV2Schema, modelingRevisionSchema, decisionSchemaFor, visualSchemaFor, validateSpecs, modelingPrompt, selectModelingRoute, reviewPasses, prefersImageModeling } from './modeling-evaluation.mjs';
+import { modelingSourcePolicy, generatedCandidate, enforceSourcePolicy, sourcePolicyAttempts, otherRevisionAttempts } from './modeling-source-policy.mjs';
+import { readSceneCoverage, extendCoveragePlan } from './modeling-coverage.mjs';
 import { createTripoProvider, canResumeTripoImageTask } from './providers/tripo.mjs';
 import { preservesContract, modelViews, referenceFiles } from './modeling-contract.mjs';
 import { createSkillPlan, validateSkillPlan, pinToolchain, modelingToolHashes } from './modeling-skill-routing.mjs';
@@ -42,7 +44,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     onRepair: ({ name }) => reportProgress({ phase: 'planning', tool: 'Internal modeling repair', step: `Repairing internal ${name} handoff with retained evidence` }) });
   let capabilities, sequence = 0, expectedPlanHash, expectedEngineeringHash, accepted = [], providerDisabledReason = null;
   let engineeringContext = null, referenceResearch = null;
-  let planningGap = null;
+  let planningGap = null, sceneCoverage = null;
   let productionIteration = 1;
   const v2Enabled = process.env.MODELING_HARNESS_V2_ENABLED === '1';
   const skillPlans = new Map();
@@ -143,8 +145,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         try { request = JSON.parse(requestRaw); validateRevision(request); }
         catch (error) {
           throwIfExecutionFenced(error, signal);
-          request = await reviewer('modeling-revision', current?.assets.some(asset => asset.contract) ? modelingPlanV2Schema : modelingPlanSchema,
-            `Repair this internal revision request. Preserve all original assets and obligations. Do not invent missing measurements or remove requested additions. If it cannot be resolved, keep the unresolved constraints. Original plan: ${JSON.stringify(current)}\nRaw request: ${requestRaw}\nFindings: ${error.message}`, [],
+          request = await reviewer('modeling-revision', current?.assets.some(asset => asset.contract) ? modelingRevisionSchema : modelingPlanSchema,
+            `Repair this internal revision request. Preserve all original assets and obligations. Copy existing contracts EXACTLY, including zero tolerances; do not regenerate them using new-contract defaults. Keep each prompt within 1024 characters: summarize the current action and move additional obligations into requirements instead of appending iteration history. The raw request remains retained evidence. Do not invent missing measurements or remove requested additions. If it cannot be resolved, keep the unresolved constraints. Original plan: ${JSON.stringify(current)}\nRaw request: ${requestRaw}\nFindings: ${error.message}`, [],
             { key: `modeling-revision:iteration-${productionIteration}`, maxCalls: 2, timeoutMs: policy.intakeMs, validate: validateRevision });
         }
         current = { ...request, revisions: (current.revisions || 0) + 1 };
@@ -250,6 +252,23 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       current = { ...result, revisions: 0 };
       await atomicJson(planFile, current);
     }
+    if (sceneCoverage && !sceneCoverage.complete) {
+      const coverageFile = path.join(taskState, `coverage-plan-${productionIteration}.json`);
+      const retained = await readJson(coverageFile);
+      if (retained) {
+        if (![retained.baselineHash, hashValue(retained.appliedPlan)].includes(hashValue(current)))
+          throw modelingFailure('INTEGRITY_ERROR', 'Coverage plan baseline changed during resumption.');
+        current = retained.appliedPlan;
+      } else {
+        try {
+          const expanded = await extendCoveragePlan({ current, coverage: sceneCoverage, review: reviewer, iteration: productionIteration, timeoutMs: policy.intakeMs });
+          if (expanded !== current) {
+            await report({ baselineHash: hashValue(current), appliedPlan: expanded, coverage: sceneCoverage }, coverageFile);
+            current = expanded;
+          }
+        } catch (error) { throwIfExecutionFenced(error, signal); pipelineIssues.push(stageIssue('modeling-coverage-plan', error)); }
+      }
+    }
     const visible = { reason: current.reason, assets: current.assets };
     validateSpecs(visible);
     await atomicJson(taskPlanFile, current);
@@ -268,15 +287,18 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   }
 
   async function assess(spec, candidates, availability, excluded = [], previousQuality = null) {
-    const eligible = candidates.filter(item => !excluded.includes(item.assetId));
+    const sourcePolicy = modelingSourcePolicy(job, spec);
+    availability = { ...availability, enabled: availability.enabled && sourcePolicy.external3DAllowed };
+    const eligible = candidates.filter(item => !excluded.includes(item.assetId) && (sourcePolicy.external3DAllowed || !generatedCandidate(item)));
     const labels = [...spec.referenceImages, ...eligible.flatMap(item => item.previewImages)];
     let images = [], imageError = false;
     try { images = await imagesFor(labels); } catch { imageError = true; }
-    const conservativeRoute = prefersImageModeling(spec) ? 'image_tripo_blender' : 'blender_direct';
+    const conservativeRoute = sourcePolicy.external3DAllowed && prefersImageModeling(spec) ? 'image_tripo_blender' : 'blender_direct';
     if (imageError) return { route: conservativeRoute, editPlan: [], reason: 'Reference images unavailable; retain a stage gap for detailed subjects.', evaluatorUnavailable: true };
     const prompt = modelingPrompt({ spec, candidates: eligible, capabilities, providerEnabled: availability.enabled, imageLabels: labels }) +
+      (sourcePolicy.external3DAllowed ? '' : `\nBinding source restriction: ${sourcePolicy.reason} This overrides the general organic/character image route preference.`) +
       (previousQuality ? `\nPrevious completed iteration quality: ${JSON.stringify(previousQuality)}. Reassess the strategy for the recorded gaps, including 3D generation when available and compatible with the original contract. Preserve passing features.` : '');
-    const context = { spec, candidates: eligible, providerEnabled: availability.enabled, hasReferenceImages: images.length > 0 };
+    const context = { spec, candidates: eligible, providerEnabled: availability.enabled, hasReferenceImages: images.length > 0, external3DAllowed: sourcePolicy.external3DAllowed };
     try {
       const advice = await reviewer('modeling-evaluation', decisionSchemaFor(spec, eligible), prompt, images,
         { maxCalls: 2, validate: value => selectModelingRoute(value, context), identity: { assetId: spec.assetId } });
@@ -305,7 +327,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         const blockoutEvidence = await fileEvidence(blockoutFiles);
         const result = await execution.run({ key: `preview:${context.attemptId}`, stage: 'PREVIEW', input: { views: modelViews(context.spec) },
           evidence: blockoutEvidence, timeoutMs: 300000 }, ({ timeoutMs }) => blenderMcp({ project, tool: 'blender_render_views', signal: bounded, timeoutMs: Math.min(timeoutMs, remaining()),
-          receiptFile: `${context.receiptFile}.preview.json`, input: { source: `${blockoutDirectory}/source.blend`, manifest: `${blockoutDirectory}/asset-manifest.json`, views: modelViews(context.spec) } }));
+          receiptFile: `${context.receiptFile}.preview.json`, input: { source: `${blockoutDirectory}/source.blend`, manifest: `${blockoutDirectory}/asset-manifest.json`, views: modelViews(context.spec) } }))
+          .catch(error => { error.modelingStage = 'PREVIEW'; error.kind ||= 'PREVIEW_INFRASTRUCTURE'; throw error; });
         const preview = JSON.parse(result.content[0].text);
         if (preview.sourceHash !== await hashFile(await localPath(project, `${blockoutDirectory}/source.blend`))) throw new Error('Blockout preview source changed.');
         const images = preview.views.map(view => path.relative(project, view.file).replaceAll('\\', '/'));
@@ -513,6 +536,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   }
 
   async function produce(spec, availability) {
+    const sourcePolicy = modelingSourcePolicy(job, spec);
+    availability = { ...availability, enabled: availability.enabled && sourcePolicy.external3DAllowed };
     const referenceHashes = [];
     for (const image of referenceFiles(spec)) referenceHashes.push(await hashFile(await localPath(project, image, { existing: true })));
     const pinnedToolchain = spec.contract ? await readJson(path.join(taskState, `toolchain-${spec.assetId}.json`)) : null;
@@ -531,9 +556,11 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     const stateFile = path.join(stateRoot, short, 'state.json');
     let state = await readModelingState(stateFile);
     if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
+    if (state && enforceSourcePolicy(state, sourcePolicy, productionIteration)) await writeModelingState(stateFile, state);
     const repairRequest = await readJson(path.join(project, 'plan/modeling-repair-request.json'));
     const repairKey = hashValue({ revision: job.revisionId || productionIteration, assetId: spec.assetId, reason: repairRequest?.reason || '' });
-    const repair = repairRequest?.assetIds?.includes(spec.assetId) && typeof repairRequest.reason === 'string' && repairRequest.reason.trim() &&
+    const coverageTarget = sceneCoverage?.targets.some(target => target.assetId === spec.assetId);
+    const repair = (!sceneCoverage || sceneCoverage.complete || coverageTarget) && repairRequest?.assetIds?.includes(spec.assetId) && typeof repairRequest.reason === 'string' && repairRequest.reason.trim() &&
       (!job.revisionId || repairRequest.revisionId === job.revisionId) && state?.lastRepair !== repairKey;
     if (state?.accepted && state.requirementsHash === requirementsHash && !repair) {
       const evidence = [];
@@ -565,6 +592,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     state.revisionBudgets ||= {};
     if (revisionBudget) state.revisionBudgets[job.revisionId] ||= { attempts: { ...priorRevisionRound?.attempts } };
     const authorAttempts = revisionBudget ? state.revisionBudgets[job.revisionId].attempts : round.attempts;
+    const otherAttempts = revisionBudget ? await otherRevisionAttempts(stateRoot, stateFile, spec.assetId, job.revisionId) : {};
+    const consumedAttempts = route => sourcePolicyAttempts(state, Object.fromEntries([...new Set([...Object.keys(authorAttempts), ...Object.keys(otherAttempts)])]
+      .map(key => [key, (authorAttempts[key] || 0) + (otherAttempts[key] || 0)])), route, sourcePolicy);
     if (repair && (!state.pending || state.pending.phase === 'ACCEPTED')) {
       state.bestCandidate ||= state.accepted;
       state.accepted = null; state.pending = null; state.lastRepair = repairKey;
@@ -588,7 +618,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (state.productionIteration !== productionIteration) {
       if (state.pending) throw modelingFailure('ITERATION_BOUNDARY_INVALID', 'An unfinished modeling attempt must resume in its original production iteration.');
       state.productionIteration = productionIteration;
-      if (state.imageRouteUpgrade && !state.imageRouteUpgrade.appliedIteration &&
+      if (sourcePolicy.external3DAllowed && state.imageRouteUpgrade && !state.imageRouteUpgrade.appliedIteration &&
           productionIteration >= state.imageRouteUpgrade.earliestIteration) {
         state.route = state.imageRouteUpgrade.route;
         state.decision = { ...state.decision, route: state.route, reason: state.imageRouteUpgrade.reason };
@@ -724,7 +754,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       }
       const route = state.route;
       const limit = route === 'blender_direct' ? 3 : 2;
-      if (!state.pending && (authorAttempts[route] || 0) >= limit) {
+      if (!state.pending && consumedAttempts(route) >= limit) {
         if (route === 'blender_direct' || route === 'image_tripo_blender') {
           if (state.bestCandidate) {
             await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
@@ -734,7 +764,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
             return state.bestCandidate;
           }
           const missing = { assetId: spec.assetId, status: 'NO_USABLE_ARTIFACT', usable: false, files: [], spec, contract: spec.contract,
-            quality: { score: 0, accepted: false, gaps: modelingFailureSummary(state.failures, stateFile), repairInstructions: 'No technically usable model was produced. Preserve the task and use an explicitly documented temporary representation for this iteration.' },
+            quality: { score: 0, accepted: false, gaps: [...modelingFailureSummary(state.failures, stateFile),
+              { kind: 'AUTHOR_BUDGET_EXHAUSTED', route, consumed: consumedAttempts(route), limit }], repairInstructions: 'No technically usable model was produced within the retained author allowance. Preserve attempts and evidence; do not reset the budget by editing prompts.' },
             executionFile: execution.file, stateFile };
           await report(missing, await localPath(project, `plan/modeling/${spec.assetId}/${short}/iteration-${productionIteration}.json`));
           return missing;
@@ -851,7 +882,11 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           await writeModelingState(stateFile, state);
           await report(candidate, await localPath(project, `${evidenceDirectory}/evidence.json`));
           if (cleanupFallback) { await fallback('generated_model_quality_gap'); continue; }
-          if (context.reviewUnavailable) { round.delivered = candidate.attemptId; await writeModelingState(stateFile, state); return state.bestCandidate; }
+          if (context.reviewUnavailable || sceneCoverage && !sceneCoverage.complete && coverageTarget) {
+            // A usable textured replacement closes a coverage gap. Defer further
+            // visual refinement until all scene instances have formal assets.
+            round.delivered = candidate.attemptId; await writeModelingState(stateFile, state); return state.bestCandidate;
+          }
           continue;
         }
         state.accepted = candidate;
@@ -866,7 +901,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         await report(state.accepted, await localPath(project, `${evidenceDirectory}/evidence.json`));
         return state.accepted;
       } catch (error) {
-        const stage = ['AUTHORING', 'FINAL_PENDING'].includes(state.pending?.phase) ? 'AUTHOR' : 'VALIDATION';
+        const stage = error.modelingStage || (['AUTHORING', 'FINAL_PENDING'].includes(state.pending?.phase) ? 'AUTHOR' : 'VALIDATION');
         state.failures.push({ attemptId, route, phase: state.pending?.phase, at: new Date().toISOString(), ...failureRecord(error, stage, signal) });
         // A confirmed failed call consumed its reservation. Preserve its files
         // and ledger, but do not leave an active author blocking the next revision.
@@ -877,7 +912,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         }
         await writeModelingState(stateFile, state);
         throwIfExecutionFenced(error, signal);
-        if (stage === 'VALIDATION') {
+        if (stage === 'VALIDATION' || stage === 'PREVIEW') {
           const issue = stageIssue(`modeling-validation:${spec.assetId}`, error);
           let retained = state.bestCandidate;
           if (retained) {
@@ -910,6 +945,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       if (productionIteration !== nextIteration) providerPreflight = null;
       productionIteration = iteration = nextIteration;
       pipelineIssues = [];
+      sceneCoverage = await readSceneCoverage(project, job);
       await execution.assertSettled();
       await pinToolchain(path.join(taskState, 'execution-policy'), 'runtime', {
         policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(),
@@ -938,7 +974,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       if (recovery?.skipResearch) {
         // Offline migration already verified this round's artifacts. Unrelated
         // capability/provider outages must not suppress their delivery again.
-        accepted = recovery.handoffs;
+        accepted = recovery.handoffs.map(asset => !modelingSourcePolicy(job, asset.spec).external3DAllowed && generatedCandidate(asset)
+          ? unavailableAsset(asset.spec, { kind: 'SOURCE_POLICY', status: 'GAP', reason: 'The retained generated source violates the task source restriction; preserve it as historical evidence only.' }) : asset);
       } else if (current.assets.length) {
         const probeRecord = await readJson(path.join(taskState, `capabilities-${iteration}.json`));
         if (probeRecord) capabilities = probeRecord;
@@ -962,7 +999,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           pipelineIssues.push(issue);
           accepted = prepared.assets.map(spec => unavailableAsset(spec, issue));
         } else {
-          let availability = await provider.availability();
+          let availability = prepared.assets.some(spec => modelingSourcePolicy(job, spec).external3DAllowed)
+            ? await provider.availability() : { enabled: false, reasonCode: 'user_source_policy' };
           if (current.assets.some(s => s.contract) && availability.enabled) {
             providerPreflight ||= await provider.balance({ signal });
             availability = { ...availability, enabled: providerPreflight.status === 'ready', reasonCode: providerPreflight.reasonCode || null };
@@ -970,7 +1008,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           }
           const ledger = await readJson(path.join(output, 'tripo-ledger.json'));
           if (ledger?.disabled) providerDisabledReason = ledger.reasonCode;
-          for (const spec of prepared.assets) {
+          const orderedAssets = [...prepared.assets].sort((a, b) => Number(sceneCoverage?.targets.some(row => row.assetId === b.assetId)) - Number(sceneCoverage?.targets.some(row => row.assetId === a.assetId)));
+          for (const spec of orderedAssets) {
             const gapFile = path.join(taskState, `asset-gap-${iteration}-${hashValue(spec)}.json`);
             const priorGap = await readJson(gapFile);
             if (priorGap) { accepted.push(priorGap); continue; }

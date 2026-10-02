@@ -74,6 +74,17 @@ When deploying, use the repository-owned Git deployment scripts and record the e
 not create or upload a tar release from a cloud role. Preserve active tasks, allocations, worker
 journals and artifacts unless the task explicitly authorizes a tested migration.
 
+## Task toolchain compatibility gate
+
+When a worker change alters a pinned modeling harness or runtime, the fix is not ready for
+continued task iteration until the affected retained tasks have a verified compatible toolchain.
+Compare against each task's active epoch, commit the target release, and use the repository's
+workspace migration plan/stage/apply/resume-check flow for an authorized migration. Validate
+the retained skill plans and toolchain bindings before restarting the worker. Keep historical
+pins, execution journals, consumed budgets and artifacts intact. If the change is incompatible,
+implement and test an explicit repair; never bypass pin checks or reset budgets to make it run.
+Report code-only validation separately from deployed task readiness.
+
 ## Worker autostart gate
 
 For subsequent worker changes and deployments, verify the installed Windows autostart

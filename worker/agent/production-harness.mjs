@@ -21,6 +21,7 @@ import { createStageCache } from './stage-cache.mjs';
 import { contentStore, packageEntry } from './workspace-storage.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { promptText, issueSummary, modelingHandoffSummary, productionFeedbackSummary, currentProductionResult } from './production-prompt.mjs';
+import { readSceneCoverage, coverageInstructions, coverageStalled } from './modeling-coverage.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -490,11 +491,14 @@ export async function runProductionHarness({ job, project, output, signal, step,
       }
     }
     const feedbackBrief = productionFeedbackSummary(feedback);
+    const coverageBefore = await readSceneCoverage(project, job, iteration);
+    if (coverageBefore) await writeJson(path.join(project, 'plan/scene-coverage-status.json'), coverageBefore);
     const basePrompt = [
       `You are the YahahaGame production worker. Read and follow this skill file and its production-contract reference before editing: ${skillPath}`,
       `This is production iteration ${iteration}, execution attempt ${attempt}; inspect existing files and improve the current result. Finish a playable round even when some stage quality targets remain unmet.`,
       ...(completed ? [`Best retained iteration: ${completed.delivery.iteration}, score ${completed.delivery.score}/100, checkpoint ${completed.delivery.snapshotManifest || completed.delivery.retainedProject}. The host retains immutable bytes outside the working project; never copy the whole project for a production iteration.`] : []),
       `Task objective: ${promptText(job.objective, 16000)}`,
+      coverageInstructions(coverageBefore),
       'Read the COMPLETE objective and references in plan/production-context.json before editing. The latest follow-up takes precedence. This prompt is a bounded summary; linked records preserve all requirements.',
       `Work only inside this task workspace: ${project}`,
       ...(context.references.length ? [
@@ -570,7 +574,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
           'For UE 5.8 FBX/Interchange custom collision, FbxImportUI.auto_generate_collision=false disables collision entirely in its converter. Keep that flag true, one_convex_hull_per_ucx=true, verify each authored UCX proxy becomes a convex hull, and import explicit LOD files with StaticMeshEditorSubsystem.import_lod. The host checks the exact hull count and LOD budgets. Use the saved test map for real material/orientation evidence.',
         ] : []),
         ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [] : [
-          'Do not change accepted model source/export files. For a new/changed model, write a full replacement plan/modeling-request.json using the modeling-specs.json schema. Continue this round with accepted assets or documented temporary engine-native representations; the host repairs and applies the revision at the next complete iteration.',
+          'Do not change accepted model source/export files. For a new/changed model, write a full replacement plan/modeling-request.json using the modeling-specs.json schema. Keep prompts within 1024 characters, with additional obligations in requirements; never append iteration history. Copy existing technical contracts exactly, including zero tolerances. Add separate asset contracts for missing terrain/coverage outside a frozen envelope. Continue this round with accepted assets or documented temporary engine-native representations; the host repairs and applies the revision at the next complete iteration.',
         ]),
       ].join('\n') : basePrompt;
       codexTemp = await createCodexTempDirectory();
@@ -698,6 +702,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
         });
       }
       stage = 'quality-review';
+      const coverage = await readSceneCoverage(project, job, iteration);
+      if (coverage) {
+        await writeJson(path.join(project, 'plan/scene-coverage-status.json'), coverage);
+        if (coverage.status !== 'PASS') issues.push({ stage: 'scene-coverage', kind: 'SCENE_COVERAGE_INCOMPLETE', status: 'GAP',
+          reason: coverage.reason, remaining: coverage.remaining, evidence: coverage.evidence });
+      }
       const reviewedQuality = await observe(stage, () => runQualityReview(iteration));
       const reviewFailure = issues.find(issue => issue.stage === stage);
       const quality = reviewedQuality || {
@@ -718,10 +728,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
       await reportProgress({ phase: 'retaining', step: 'Retaining changed content and checkpoint manifest',
         error: qualityAccepted ? null : iterationError, diagnostic: upstreamFailure || null });
       const delivered = await iterations.complete({ deliverables: { ...deliverables, files: existingFiles }, score,
-        threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults, playable, productionCompleted: true });
+        threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults, playable, productionCompleted: true, coverage });
       try { await onIterationReview({ file: delivered.file, record: delivered.record }); }
       catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `iteration-${iteration}-publication-gap.json`), stageIssue('iteration-publication', error)); }
       if (playable && score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
+      if (coverageStalled(iterations.rounds)) throw Object.assign(new Error('Scene coverage has not improved in three completed iterations. Retained all checkpoints; repair the unresolved asset/tool chain before spending another iteration.'),
+        { kind: 'COVERAGE_STALLED', productionIncomplete: true });
       if (iterations.rounds.length >= roundLimit || (maxAttempts > 0 && attempt >= maxAttempts) ||
           delivered.record.packageDigest && iterations.rounds.length >= 3 && iterations.rounds.slice(-3).every(row => row.score === score && row.packageDigest === delivered.record.packageDigest)) {
         return await iterations.best('Iteration budget reached; retained the best available result with its measured score, playability and gaps.');

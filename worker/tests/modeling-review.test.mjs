@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { validateUnrealModels } from '../agent/modeling-unreal.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
-import { atomicJson, hashFile, readJson } from '../agent/modeling-io.mjs';
+import { atomicJson, hashFile, hashValue, readJson } from '../agent/modeling-io.mjs';
 import { readModelingState, writeModelingState } from '../agent/modeling-state.mjs';
 
 const spec = { assetId: 'fixture', description: 'A red fixture', prompt: 'A red fixture', requirements: ['Red body'],
@@ -383,4 +383,48 @@ test('later revisions queue behind unresolved requirements and survive same-roun
   assert.deepEqual((await createModelingPipeline(f.options).prepare({ iteration: 3 })).assets.map(asset => asset.assetId), ['fixture', 'addition']);
   await createModelingPipeline(f.options).prepare({ iteration: 3 });
   assert.deepEqual((await createModelingPipeline(f.options).prepare({ iteration: 4 })).assets.map(asset => asset.assetId), ['fixture', 'addition', 'later']);
+});
+
+test('repairing an overlong revision prompt preserves legacy zero tolerances and original obligations', async t => {
+  const f = await fixture(t, [validReview('PASS')]);
+  const original = { ...spec, contract: defaultContract({ traversal: null, pivot: { mode: 'base-center', meters: null, toleranceMeters: 0 } }) };
+  const task = path.join(f.root, 'modeling-state/tasks', hashValue({ taskId: 'task', workspaceId: 'workspace' }));
+  await atomicJson(path.join(task, 'plan.json'), { reason: 'Frozen', assets: [original] });
+  await atomicJson(path.join(f.options.project, 'plan/modeling-request.json'), { reason: 'Coverage repair', assets: [{ ...original, prompt: 'Retained history. '.repeat(100) }] });
+  let repairs = 0;
+  f.options.probe = async () => ({ blenderMcpAvailable: false });
+  f.options.evaluate = async ({ name, schema }) => {
+    assert.equal(name, 'modeling-revision'); repairs++;
+    assert.equal(schema.properties.assets.items.properties.contract.anyOf[0].properties.pivot.properties.toleranceMeters.minimum, 0);
+    return { reason: 'Compact the current action; retain frozen obligations', assets: [{ ...original, prompt: 'Replace the remaining visible temporary geometry.' }] };
+  };
+  await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  const result = await readJson(path.join(task, 'revision-outcome-2.json'));
+  assert.equal(result.status, 'APPLIED'); assert.equal(repairs, 1);
+  assert.deepEqual(result.appliedPlan.assets[0].contract, original.contract);
+  assert.deepEqual(result.appliedPlan.assets[0].requirements, original.requirements);
+  assert.ok(JSON.parse(result.rawRequest).assets[0].prompt.length > 1024);
+});
+
+test('changing a repair prompt cannot restart the same revision asset author budget', async t => {
+  const f = await fixture(t, [validReview('PASS')]); f.options.job.revisionId = 'bounded';
+  f.options.build = async () => { f.counts.author++; throw new Error('Invalid authored output'); };
+  await createModelingPipeline(f.options).prepare();
+  assert.equal(f.counts.author, 3);
+  await atomicJson(path.join(f.options.project, 'plan/modeling-request.json'), { reason: 'Repair', assets: [{ ...spec, prompt: 'Correct the shape in this revision' }] });
+  const result = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(result.assets[0].status, 'NO_USABLE_ARTIFACT'); assert.equal(f.counts.author, 3);
+});
+
+test('coverage-first hands off one usable replacement per missing asset before spending attempts on detail', async t => {
+  const f = await fixture(t, [validReview('GAP')]);
+  f.options.job.objective = '先将场景所有白模、placeholder、地形全部建模和做材质，然后再逐个提升细节质量。';
+  f.options.job.modelingSpecs.push({ ...spec, assetId: 'other' });
+  await atomicJson(path.join(f.options.project, 'acceptance/scene-coverage.json'), { taskId: 'task', workspaceId: 'workspace', runId: 'old', iteration: 1,
+    actors: ['fixture', 'other'].map(assetId => ({ label: assetId, assetId, category: 'visible-engine-native-temporary' })),
+    engineNativeProvisionalActors: ['fixture', 'other'], missingOrDefaultMaterialActors: [], finalBlenderSourceCompliance: 'GAP' });
+  f.options.check = async () => ({ passed: false, kind: 'VISUAL_GAP', smallEditsOnly: true, feedback: validReview('GAP') });
+  const result = await createModelingPipeline(f.options).prepare();
+  assert.deepEqual(result.assets.map(asset => asset.status), ['DCC_PROVISIONAL', 'DCC_PROVISIONAL']);
+  assert.equal(f.counts.author, 2);
 });
