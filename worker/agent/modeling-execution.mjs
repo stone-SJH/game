@@ -13,8 +13,10 @@ export function failureRecord(error, stage, signal) {
   const result = error?.result || {};
   const stopped = error?.stopConfirmed ?? result.stopConfirmed ?? null;
   const infrastructure = failureKind(error);
-  const kind = (infrastructure !== 'CONTENT_GAP' && infrastructure) || error?.kind || (stopped === false ? 'STOP_UNCONFIRMED' : signal?.aborted || result.canceled ? 'CANCELED' :
-    result.timedOut ? `${stage}_TIMEOUT` : result.exitCode != null && result.exitCode !== 0 ? `${stage}_PROCESS_ERROR` : `${stage}_UNKNOWN`);
+  const kind = stopped === false ? 'STOP_UNCONFIRMED' : infrastructure === 'RESOURCE_EXHAUSTED' ? infrastructure :
+    signal?.aborted || result.canceled ? 'CANCELED' : result.timedOut ? `${stage}_TIMEOUT` :
+    (infrastructure !== 'CONTENT_GAP' && infrastructure) || error?.kind ||
+    (result.exitCode != null && result.exitCode !== 0 ? `${stage}_PROCESS_ERROR` : `${stage}_UNKNOWN`);
   return { kind, message: String(error?.message || error).slice(0, 4000), exitCode: result.exitCode ?? null,
     timedOut: Boolean(result.timedOut), canceled: Boolean(signal?.aborted || result.canceled), stopConfirmed: stopped,
     ...(error?.executionFence ? { executionFence: true } : {}),

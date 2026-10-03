@@ -26,6 +26,7 @@ import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './mod
 import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from './workspace-epoch.mjs';
 import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
+import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -390,7 +391,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       ...(context.phase === 'blockout' ? [] : ['Write build-report.json with smallEditsOnly (true only for actual local edits), editsApplied and limitations. Report actual work; this report does not authorize acceptance.']),
       ...(context.phase === 'final' ? [`Place any required joint/material closeups or assembly/LOD evidence directly under ${directory}/evidence/ (at most 12 PNG/JPEG/WebP images; use contact sheets). Explain their source and limitations in self-check.json. These are author-supplied supplements, not independent host acceptance.`,
         'Use the actual Windows PowerShell shell syntax for local commands; do not use bash heredocs. Write scripts with PowerShell here-strings or the available file editing tool.'] : []),
-      ...(context.phase === 'final' ? ['Perform one bounded self-check of required files, exportable materials, binding and evaluated motion, then return. The host owns formal QA; do not loop over packaging or redundant full renders.'] : []),
+      ...(context.phase === 'final' ? ['Perform one bounded self-check of required files, exportable materials, binding and evaluated motion, then return. The host owns formal QA; do not loop over packaging or redundant full renders.',
+        'Optional cache cleanup is not a deliverable. Leave __pycache__ in place. If a tool command is rejected by policy, preserve the rejection and skip optional cleanup; never retry it through another shell or script. Finish the required outputs and return promptly.'] : []),
       'The host handles provider credentials and generation. Do not call third-party generation APIs, start child agents, change decisions, edit existing source resources, integrate into UE, or package a game in this attempt.',
     ].join('\n');
     const timeoutMs = cleanup ? policy.cleanupMs : policy.buildMs;
@@ -599,16 +601,27 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       delete round.delivered; delete round.stageGap;
       await writeModelingState(stateFile, state);
     }
-    if (job.revisionId && state.bestCandidate && !state.pending && !repair) {
+    async function recoverFinal(pending = null) {
+      pending ||= await retainedFinalForValidation({ project, stateRoot: taskState, state, execution });
+      if (!pending) return false;
+      state.pending = pending;
+      state.finalAuthorRecoveries ||= {};
+      state.finalAuthorRecoveries[pending.attemptId] = pending.recovery;
+      await writeModelingState(stateFile, state);
+      await reportProgress({ phase: 'crafting', tool: 'Retained asset validation', step: `${spec.assetId}: validate completed exports after author timeout; no new author attempt` });
+      return true;
+    }
+    const retainedFinal = await retainedFinalForValidation({ project, stateRoot: taskState, state, execution });
+    if (job.revisionId && state.bestCandidate && !state.pending && !repair && !retainedFinal) {
       await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       await workingSource(project, state.bestCandidate);
       return { ...state.bestCandidate, reused: true, reuseReason: 'Unchanged asset contract; validate the existing candidate before requesting a scoped repair.' };
     }
-    if (round.stageGap) {
+    if (round.stageGap && !retainedFinal) {
       await verifyEvidence(round.stageGap.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       return round.stageGap;
     }
-    if (round.delivered && state.bestCandidate) {
+    if (round.delivered && state.bestCandidate && !retainedFinal) {
       await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       return { ...state.bestCandidate, reused: true };
     }
@@ -616,7 +629,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (state.productionIteration !== productionIteration) {
       if (state.pending) throw modelingFailure('ITERATION_BOUNDARY_INVALID', 'An unfinished modeling attempt must resume in its original production iteration.');
       state.productionIteration = productionIteration;
-      if (sourcePolicy.external3DAllowed && state.imageRouteUpgrade && !state.imageRouteUpgrade.appliedIteration &&
+      if (!retainedFinal && sourcePolicy.external3DAllowed && state.imageRouteUpgrade && !state.imageRouteUpgrade.appliedIteration &&
           productionIteration >= state.imageRouteUpgrade.earliestIteration) {
         state.route = state.imageRouteUpgrade.route;
         state.decision = { ...state.decision, route: state.route, reason: state.imageRouteUpgrade.reason };
@@ -626,13 +639,14 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         state.previousAttemptDirectory = state.bestCandidate.directory;
         state.feedback = state.bestCandidate.review;
       }
-      if (productionIteration > 1 && state.bestCandidate && availability.enabled && !providerDisabledReason && !state.providerAttempted) {
+      if (!retainedFinal && productionIteration > 1 && state.bestCandidate && availability.enabled && !providerDisabledReason && !state.providerAttempted) {
         state.decision = await assess(spec, [], availability, [], { ...state.bestCandidate.quality,
           completedIterations: productionIteration - 1, previousRoute: state.route, recentFailures: state.failures.slice(-3) });
         state.route = state.decision.route;
       }
       await writeModelingState(stateFile, state);
     }
+    if (retainedFinal) await recoverFinal(retainedFinal);
     await report({ ...state, taskId: job.taskId, runId: job.runId, workspaceId: job.workspaceId }, decisionMirror);
     let sourceFile = state.pending?.sourceFile || (state.bestCandidate && !['tripo_then_blender', 'image_tripo_blender'].includes(state.route) ? await workingSource(project, state.bestCandidate) : null);
     if (state.route === 'image_tripo_blender') {
@@ -908,6 +922,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           state.pending = null;
         }
         await writeModelingState(stateFile, state);
+        if (stage === 'AUTHOR' && !signal.aborted && await recoverFinal()) continue;
         throwIfExecutionFenced(error, signal);
         if (stage === 'VALIDATION' || stage === 'PREVIEW') {
           const issue = stageIssue(`modeling-validation:${spec.assetId}`, error);
