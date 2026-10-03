@@ -23,13 +23,16 @@ const calls = fs.readFileSync(records, 'utf8').trim().split('\\n').length;
 const send = event => console.log(JSON.stringify(event));
 if (mode !== 'missing-session') send({type:'thread.started',thread_id:${JSON.stringify(threadId)}});
 if (calls === 1) {
+  if (mode === 'quoted-503') send({type:'item.completed',item:{id:'read-contract',type:'command_execution',
+    command:'Get-Content production-contract.md',exit_code:0,status:'completed',
+    aggregated_output:'Authentication/configuration errors and ENOSPC stop new tool work.'}});
   const item = { id:'tool-1',type:mode === 'file-change' ? 'file_change' : 'mcp_tool_call',server:'yahaha_blender',tool:'blender_run_python' };
   send({type:'item.started',item});
   fs.writeFileSync('source.blend', 'saved-once', {flag:'wx'});
   if (mode !== 'unfinished-tool') send({type:'item.completed',item:{...item,status:'completed'}});
 }
-if (calls < 3 || mode !== 'recover') {
-  const message = mode === 'auth' ? 'HTTP 401 authentication failed' : calls === 1 ? 'exceeded retry limit, last status: 429 Too Many Requests' : 'stream disconnected before completion';
+if (calls < 3 || !['recover', 'quoted-503'].includes(mode)) {
+  const message = mode === 'auth' ? 'HTTP 401 authentication failed' : mode === 'quoted-503' ? 'HTTP 503 Service Unavailable' : calls === 1 ? 'exceeded retry limit, last status: 429 Too Many Requests' : 'stream disconnected before completion';
   send({type:'turn.failed',error:{message}}); process.exitCode = 1;
 } else {
   if (!args.includes('resume') || args[args.indexOf('resume') + 1] !== ${JSON.stringify(threadId)}) throw new Error('Wrong session');
@@ -78,6 +81,26 @@ test('429 after Blender work and a later stream failure resume the same stage wi
   assert.match(await fs.readFile(path.join(output, name + '.stdout.jsonl'), 'utf8'), /429/);
   assert.match(await fs.readFile(path.join(output, name + '-service-2.stdout.jsonl'), 'utf8'), /stream disconnected/);
   assert.match(await fs.readFile(path.join(output, name + '-service-3.stdout.jsonl'), 'utf8'), /turn.completed/);
+});
+
+test('503 after reading a contract mentioning ENOSPC resumes the same conversation within the existing author budget', async t => {
+  const f = await fixture(t, 'quoted-503');
+  assert.equal((await f.run()).status, 'PASS');
+  const calls = (await fs.readFile(f.records, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.length, 3);
+  for (const call of calls.slice(1)) assert.deepEqual(call.args.slice(-3), ['resume', threadId, '-']);
+  assert.deepEqual(f.waits, [5000, 10000]);
+  assert.equal(await fs.readFile(path.join(f.root, 'workspaces/workspace/project/source.blend'), 'utf8'), 'saved-once');
+  const ledger = JSON.parse(await fs.readFile(path.join(f.root, 'execution/execution.json'), 'utf8'));
+  const group = Object.values(ledger.groups)[0];
+  assert.equal(group.calls.length, 1);
+  assert.equal(group.completed, true);
+  assert.ok(f.progress.some(p => p.phase === 'waiting_service' && p.nextRetryAt));
+  const stateRoot = path.join(f.root, 'workspaces/workspace/service-state');
+  const [stateFile] = await fs.readdir(stateRoot);
+  const state = JSON.parse(await fs.readFile(path.join(stateRoot, stateFile), 'utf8'));
+  assert.equal(state.attempts, 3);
+  assert.equal(state.waitedMs, 15000);
 });
 
 for (const mode of ['auth', 'missing-session', 'unfinished-tool']) test(`${mode} cannot replay a tool-bearing invocation`, async t => {

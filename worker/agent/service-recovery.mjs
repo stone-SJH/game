@@ -1,15 +1,36 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJson, readJson } from './modeling-io.mjs';
 
+function failureMessage(error) {
+  const result = error?.result || {};
+  let sawEvents = false, latest = '';
+  for (const line of String(result.stdout || '').split(/\r?\n/)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (typeof event?.type !== 'string') continue;
+    sawEvents = true;
+    if (event.type === 'turn.completed') latest = '';
+    if (event.type === 'error' || event.type === 'turn.failed') latest = event.message || event.error?.message || '';
+  }
+  // Command wrappers copy stdout into error.message, including truncated JSONL.
+  // Only CLI failure events are evidence; tools and model prose can quote errors.
+  return sawEvents ? `${result.error || ''}\n${result.stderr || ''}\n${latest}` :
+    `${error?.message || ''}\n${result.error || ''}\n${result.stderr || ''}\n${result.stdout || ''}`;
+}
+
 export function failureKind(error) {
-  const message = `${error?.message || ''}\n${error?.result?.stderr || ''}\n${error?.result?.stdout || ''}`;
   if (error?.stopConfirmed === false || error?.result?.stopConfirmed === false) return 'STOP_UNCONFIRMED';
   if (['RESOURCE_EXHAUSTED', 'SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION'].includes(error?.kind)) return error.kind;
-  if (['ENOSPC', 'EDQUOT', 'EROFS', 'EIO'].includes(error?.code) || /ENOSPC|no space left on device|disk full/i.test(message)) return 'RESOURCE_EXHAUSTED';
-  const status = error?.status || error?.statusCode || Number(error?.upstreamAI?.code?.match(/^HTTP_(\d{3})$/)?.[1]);
-  if ([401, 403, 404].includes(status) || /invalid_api_key|authentication failed|model_not_found|unsupported model/i.test(message)) return 'SERVICE_CONFIGURATION';
+  const resourceError = /ENOSPC|no space left on device|disk full/i;
+  if (['ENOSPC', 'EDQUOT', 'EROFS', 'EIO'].includes(error?.code) || resourceError.test(error?.result?.error || '')) return 'RESOURCE_EXHAUSTED';
+  const status = Number(error?.status || error?.statusCode || error?.upstreamAI?.httpStatus || error?.upstreamAI?.code?.match(/^HTTP_(\d{3})$/)?.[1]);
+  if ([401, 403, 404].includes(status)) return 'SERVICE_CONFIGURATION';
   if (['STREAM_DISCONNECTED', 'CONNECTION_RESET', 'REQUEST_TIMEOUT', 'DNS_ERROR', 'CONNECTION_REFUSED', 'REQUEST_SEND_FAILED'].includes(error?.upstreamAI?.code) ||
-      [408, 429, 500, 502, 503, 504].includes(status) || /(?:HTTP|status|response|upstream|upload failed)[^\r\n]{0,40}\b(?:429|502|503|504)\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|overloaded|service unavailable|upstream.*error/i.test(message)) return 'SERVICE_TRANSIENT';
+      [408, 429, 500, 502, 503, 504].includes(status)) return 'SERVICE_TRANSIENT';
+  const message = failureMessage(error);
+  if (resourceError.test(message)) return 'RESOURCE_EXHAUSTED';
+  if (/invalid_api_key|authentication failed|model_not_found|unsupported model/i.test(message)) return 'SERVICE_CONFIGURATION';
+  if (/(?:HTTP|status|response|upstream|upload failed)[^\r\n]{0,40}\b(?:429|502|503|504)\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|overloaded|service unavailable|upstream.*error/i.test(message)) return 'SERVICE_TRANSIENT';
   return error?.kind || 'CONTENT_GAP';
 }
 
