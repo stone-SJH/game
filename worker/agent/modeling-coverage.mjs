@@ -4,6 +4,17 @@ import { readJson, hashValue, hashFile, localPath } from './modeling-io.mjs';
 import { modelingRevisionSchema, validateSpecs, validateSchema } from './modeling-evaluation.mjs';
 import { generatedContractSchema } from './modeling-contract.mjs';
 
+const nonGeometryClasses = new Set(['SkyAtmosphere', 'DirectionalLight', 'SkyLight', 'PointLight', 'SpotLight', 'RectLight',
+  'ExponentialHeightFog', 'PostProcessVolume', 'PlayerStart', 'CameraActor', 'CineCameraActor']);
+
+function nonGeometrySystemActor(actor) {
+  // A category or sourceRequired=false alone cannot exempt visible geometry.
+  // Native camera proxies may exist, but each must be excluded from runtime rendering.
+  return nonGeometryClasses.has(actor.actorClass) && actor.mesh === null && actor.renderMeshComponentCount === 0 &&
+    Array.isArray(actor.editorMeshComponents) && actor.editorMeshComponents.every(component =>
+      component?.editorOnly === true || component?.hiddenInGame === true || component?.visible === false);
+}
+
 export function coverageFirst(job = {}) {
   const text = [job.objective, job.payload?.followUpPrompt].filter(Boolean).join('\n');
   return /(?:先|优先)[^\n。]{0,180}(?:白模|placeholder|占位|全场)[^\n。]{0,180}(?:再|然后|细节|精修)|(?:first|before)[^.\n]{0,160}(?:placeholder|blockout|coverage)[^.\n]{0,160}(?:detail|refin)|(?:placeholder|blockout)[^.\n]{0,100}before[^.\n]{0,60}(?:detail|refin)/i.test(text);
@@ -33,7 +44,8 @@ export async function readSceneCoverage(project, job, iteration) {
   const missing = record.missingOrDefaultMaterialActors || [];
   const current = record.runId === job.runId && record.iteration === iteration;
   const sourceProblems = [], hashes = new Map();
-  for (const actor of record.actors.filter(actor => !actor.hiddenInGame && !['allowed-distant-silhouette', 'intentional-ember-fx'].includes(actor.category))) {
+  for (const actor of record.actors.filter(actor => !actor.hiddenInGame && !nonGeometrySystemActor(actor) &&
+    !['allowed-distant-silhouette', 'intentional-ember-fx'].includes(actor.category))) {
     try {
       if (!/\.blend$/i.test(actor.formalBlenderSource || '') || !actor.materials?.length || actor.materials.some(name => /defaultmaterial|worldgridmaterial/i.test(name))) throw new Error('Missing source/material');
       await localPath(project, actor.formalBlenderSource, { existing: true });
@@ -58,6 +70,7 @@ export function coverageInstructions(coverage) {
     'COVERAGE FIRST is a binding stage gate. Complete the geometry, UVs, baked materials and saved-map replacement of EVERY visible placeholder and temporary terrain before detail refinement.',
     `Host coverage status: ${JSON.stringify(coverage)}. Read the referenced full inventory and plan/scene-coverage-status.json.`,
     'Write acceptance/scene-coverage.json for this task/workspace/run/iteration with actors covering EVERY saved-map instance, label, assetId, mesh, category, hiddenInGame, formalBlenderSource, immutableFBX and materials; include engineNativeProvisionalActors, missingOrDefaultMaterialActors, finalBlenderSourceCompliance (PASS only with complete verified source/material mapping). A material binding alone is not formal source compliance.',
+    'For native lights, atmosphere/fog, post-process volumes, player starts and cameras, record actorClass, mesh:null, renderMeshComponentCount and editorMeshComponents with editorOnly/hiddenInGame/visible flags from the saved map. Blender source is inapplicable only when no runtime render mesh exists and every editor proxy is excluded from runtime rendering. Keep these actors in the inventory; category or sourceRequired alone cannot exempt geometry.',
     'For temporary terrain beyond a frozen core envelope, add a separate asset contract with its own measured placement, seams, collision and budgets. Preserve the core contract. Do not repeatedly refine the core in place of replacing the remaining terrain.',
     'During coverage, reuse unaffected assets. Produce replacement assets and update every affected instance, then recheck visibility, sources, seams and traversal. Keep the playable checkpoint and report remaining gaps; do not spend this phase on unrelated detail, lighting polish or another unchanged package.',
   ].join('\n');

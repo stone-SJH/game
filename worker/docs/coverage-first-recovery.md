@@ -13,6 +13,15 @@ allowed distant silhouettes do not count as placeholders. An older inventory
 guides repairs but cannot validate a new round. `plan/scene-coverage-status.json`
 contains the host result and the outstanding instance-to-asset mapping.
 
+Native lights, atmosphere/fog, post-process volumes, player starts and cameras
+stay in the saved-map inventory but need no Blender source when their exact
+`actorClass` is recognized, `mesh` is null, `renderMeshComponentCount` is zero,
+and every entry in `editorMeshComponents` is editor-only, hidden in game, or
+invisible. Missing component evidence and unknown classes remain source gaps.
+Category labels and `sourceRequired: false` alone never exempt visible geometry.
+This avoids falsely stalling completed asset coverage on engine system actors;
+the independent visual quality and acceptance gates still apply.
+
 Missing terrain outside a frozen core receives a separate contract. The coverage
 planner must copy every existing asset exactly; additions use current contract
 validation. During this phase each technically usable replacement is handed off
