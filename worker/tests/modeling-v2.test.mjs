@@ -12,6 +12,7 @@ import { createTripoProvider } from '../agent/providers/tripo.mjs';
 import { atomicJson, hashFile, hashValue, readJson, recordAuthorRecipe } from '../agent/modeling-io.mjs';
 import { serveBlender, blenderTools } from '../tools/blender-mcp-server.mjs';
 import { validateUnrealModels } from '../agent/modeling-unreal.mjs';
+import { readModelingState } from '../agent/modeling-state.mjs';
 import { validateSchema } from '../agent/modeling-evaluation.mjs';
 
 test('organic asymmetric model preview passes the MCP schema with every required camera', () => {
@@ -58,6 +59,56 @@ async function fixture(t) {
   await fs.mkdir(project);await fs.mkdir(output);
   return {root,project,output};
 }
+
+test('a final author timeout validates retained exports in the same attempt and retains the failed call', async t => {
+  const f = await fixture(t); let authors = 0, checks = 0;
+  const job = { taskId: 'final-timeout', workspaceId: 'workspace', runId: 'run', modelingSpecs: [spec] };
+  const pipeline = createModelingPipeline({ ...f, job, signal: new AbortController().signal,
+    invocation: { command: process.execPath, args: [] },
+    probe: async () => ({ blenderMcpAvailable: true, blenderVersion: 'fixture' }),
+    provider: { availability: async () => ({ enabled: false }) }, evaluate: async () => { throw new Error('Use local route'); },
+    step: async (name, command, args, timeout, cwd, ignored, options) => {
+      authors++;
+      const directory = options.input.match(/Exact output directory \(relative\): ([^.]+)\./)[1];
+      const blockout = directory.endsWith('/blockout');
+      for (const file of ['source.blend', 'recipe.py', ...blockout ? [] : ['model.glb']])
+        await fs.writeFile(path.join(f.project, directory, file), 'fixture');
+      await atomicJson(path.join(f.project, directory, 'asset-manifest.json'), { objects: [] });
+      if (!blockout) await atomicJson(path.join(f.project, directory, 'build-report.json'), { smallEditsOnly: true });
+      const encoded = args.find(value => typeof value === 'string' && value.startsWith('mcp_servers.yahaha_blender='));
+      const serverArgs = JSON.parse(encoded.match(/args=(\[.*\]), required=/)[1]);
+      const receiptFile = serverArgs[serverArgs.indexOf('--receipt') + 1], scriptFile = `${directory}/recipe.py`;
+      await atomicJson(receiptFile, { calls: [{ tool: 'blender_run_python', exitCode: 0, stopConfirmed: true,
+        scriptFile, scriptHash: await hashFile(path.join(f.project, scriptFile)) }] });
+      if (!blockout) throw Object.assign(new Error('Host author deadline reached'), { result: { exitCode: 1, timedOut: true, stopConfirmed: true } });
+      return { exitCode: 0, stopConfirmed: true };
+    },
+    blenderMcp: async ({ tool, input }) => {
+      const sourceHash = await hashFile(path.join(f.project, input.source));
+      if (tool === 'blender_checkpoint') return { content: [{ type: 'text', text: JSON.stringify({ file: input.source, sourceHash }) }] };
+      const views = [];
+      for (const name of input.views) {
+        const file = path.join(f.project, path.dirname(input.source), `${name}.png`);
+        await fs.writeFile(file, 'image fixture'); views.push({ file });
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ sourceHash, views }) }] };
+    },
+    check: async context => {
+      checks++; assert.ok(context.artifactEvidence.length); assert.match(context.attemptId, /blender_direct-1$/);
+      return { passed: true, smallEditsOnly: true };
+    },
+  });
+  const result = await pipeline.prepare();
+  assert.equal(result.assets[0].status, 'DCC_READY'); assert.equal(authors, 2); assert.equal(checks, 1);
+  const stateDir = (await fs.readdir(path.join(f.root, 'modeling-state'))).find(name => /^[a-f0-9]{20}$/.test(name));
+  const state = await readModelingState(path.join(f.root, 'modeling-state', stateDir, 'state.json'));
+  assert.equal(state.attempts.blender_direct, 1); assert.equal(state.failures.at(-1).kind, 'AUTHOR_TIMEOUT');
+  assert.equal(Object.keys(state.finalAuthorRecoveries).length, 1);
+  const ledger = await readJson(result.executionFile || path.join(f.root, 'modeling-state/tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }), 'execution.json'));
+  const final = Object.values(ledger.groups).find(g => g.key.endsWith('-final'));
+  assert.equal(final.completed, undefined); assert.equal(final.calls.length, 1); assert.equal(final.calls[0].status, 'FAILED');
+  assert.equal((await pipeline.prepare()).assets[0].reused, true); assert.equal(authors, 2); assert.equal(checks, 1);
+});
 
 test('v2 contracts preserve legacy plans and reject invalid dimensions, rig and LOD targets',()=>{
   assert.equal(validateSpecs({reason:'v2',assets:[spec]}).assets.length,1);

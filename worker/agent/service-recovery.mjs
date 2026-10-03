@@ -20,9 +20,13 @@ function failureMessage(error) {
 
 export function failureKind(error) {
   if (error?.stopConfirmed === false || error?.result?.stopConfirmed === false) return 'STOP_UNCONFIRMED';
-  if (['RESOURCE_EXHAUSTED', 'SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION'].includes(error?.kind)) return error.kind;
   const resourceError = /ENOSPC|no space left on device|disk full/i;
   if (['ENOSPC', 'EDQUOT', 'EROFS', 'EIO'].includes(error?.code) || resourceError.test(error?.result?.error || '')) return 'RESOURCE_EXHAUSTED';
+  if (error?.kind === 'RESOURCE_EXHAUSTED') return error.kind;
+  // A host-enforced process deadline is terminal, even when stderr quotes an
+  // earlier service error. Let the caller attach its stage-specific timeout.
+  if (error?.result?.timedOut || error?.result?.canceled) return 'CONTENT_GAP';
+  if (['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION'].includes(error?.kind)) return error.kind;
   const status = Number(error?.status || error?.statusCode || error?.upstreamAI?.httpStatus || error?.upstreamAI?.code?.match(/^HTTP_(\d{3})$/)?.[1]);
   if ([401, 403, 404].includes(status)) return 'SERVICE_CONFIGURATION';
   if (['STREAM_DISCONNECTED', 'CONNECTION_RESET', 'REQUEST_TIMEOUT', 'DNS_ERROR', 'CONNECTION_REFUSED', 'REQUEST_SEND_FAILED'].includes(error?.upstreamAI?.code) ||
