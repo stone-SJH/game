@@ -30,16 +30,20 @@ test('added references resume the original skill archive without reading current
   assert.deepEqual(await Promise.all(files.map(hashFile)), before);
 });
 
-test('new assets with references still pin reference-fit and retain it across resume', async t => {
+test('new assets with references pin reference-fit and keep its verified archive when revised inputs have no images', async t => {
   const f = await fixture(t, referenced);
   assert.ok(f.plan.selected.includes('yahaha-blender-reference-fit'));
   assert.deepEqual(await createSkillPlan({ ...f, spec: { ...referenced, referenceImages: ['reference.png', 'side.png'] } }), f.plan);
-  await assert.rejects(createSkillPlan({ ...f, spec }), { kind: 'INTEGRITY_ERROR' });
+  const files = [f.file, ...f.plan.resources.map(row => path.join(f.project, 'tools/modeling-skills', f.plan.lockHash, row.path))];
+  const before = await Promise.all(files.map(hashFile));
+  assert.deepEqual(await createSkillPlan({ ...f, spec, skillsRoot: path.join(f.project, 'unavailable-release') }), f.plan);
+  assert.deepEqual(await Promise.all(files.map(hashFile)), before);
+  assert.deepEqual(spec.referenceImages, []);
 });
 
-for (const mutation of ['missing', 'protocol', 'lock', 'resources', 'missing-resources', 'selected', 'entrypoints', 'helpers', 'stages', 'resource-file']) {
-  test(`added references cannot hide a changed pinned ${mutation}`, async t => {
-    const f = await fixture(t), plan = structuredClone(f.plan);
+for (const original of [spec, referenced]) for (const mutation of ['missing', 'protocol', 'lock', 'resources', 'missing-resources', 'selected', 'entrypoints', 'helpers', 'stages', 'resource-file']) {
+  test(`${original === spec ? 'added' : 'removed'} references cannot hide a changed pinned ${mutation}`, async t => {
+    const f = await fixture(t, original), plan = structuredClone(f.plan);
     if (mutation === 'missing') await fs.unlink(f.file);
     else if (mutation === 'resource-file') await fs.appendFile(path.join(f.project, plan.entrypoints[0]), '\nchanged');
     else {
@@ -53,7 +57,7 @@ for (const mutation of ['missing', 'protocol', 'lock', 'resources', 'missing-res
       if (mutation === 'stages') plan.stages = ['final'];
       await atomicJson(f.file, plan);
     }
-    await assert.rejects(createSkillPlan({ ...f, spec: referenced }), { kind: 'INTEGRITY_ERROR' });
+    await assert.rejects(createSkillPlan({ ...f, spec: original === spec ? referenced : spec }), { kind: 'INTEGRITY_ERROR' });
   });
 }
 
@@ -63,12 +67,15 @@ test('reference-fit cannot be removed from metadata while its hashed resources r
   f.plan.entrypoints = f.plan.entrypoints.filter(file => !file.includes('/yahaha-blender-reference-fit/'));
   await atomicJson(f.file, f.plan);
   await assert.rejects(createSkillPlan({ ...f, spec: referenced }), { kind: 'INTEGRITY_ERROR' });
+  await assert.rejects(createSkillPlan({ ...f, spec }), { kind: 'INTEGRITY_ERROR' });
 });
 
-test('reference additions cannot silently reroute a changed style or engine', async t => {
-  const f = await fixture(t);
-  for (const contract of [defaultContract({ styleProfile: 'lowpoly' }),
-    defaultContract({ runtime: { ...spec.contract.runtime, engine: 'unreal' } })]) {
-    await assert.rejects(createSkillPlan({ ...f, spec: { ...referenced, contract } }), { kind: 'INTEGRITY_ERROR' });
+test('reference changes cannot silently reroute a changed style or engine', async t => {
+  for (const original of [spec, referenced]) {
+    const f = await fixture(t, original);
+    for (const contract of [defaultContract({ styleProfile: 'lowpoly' }),
+      defaultContract({ runtime: { ...spec.contract.runtime, engine: 'unreal' } })]) {
+      await assert.rejects(createSkillPlan({ ...f, spec: { ...(original === spec ? referenced : spec), contract } }), { kind: 'INTEGRITY_ERROR' });
+    }
   }
 });

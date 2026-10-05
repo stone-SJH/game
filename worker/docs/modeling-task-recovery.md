@@ -64,9 +64,17 @@ attempt and plans image-route activation for detailed characters. Assets already
 in the current whole iteration defer that route until the next iteration. Existing scores,
 earlier routes, budgets, execution history and all source assets remain retained.
 Recovered assets keep their verified reference set in subsequent iterations, including
-an empty reference set. Automatic research cannot silently append images and change
-their skill lock or attempt identity; an explicit specification revision still permits
-new research. Concept generation uses the retained requirements and references.
+an empty reference set. An explicit specification revision permits new research only
+for changed or new assets; unchanged asset specifications retain their verified
+references even when another asset changes. A partial revision cannot reuse the old
+whole-round handoff. Automatic research cannot silently append images to frozen assets
+and change their skill lock or attempt identity. Concept generation uses the retained
+requirements and references.
+
+An existing skill archive retains its hashed reference-fit membership when current
+reference inputs change or are unavailable. Missing image evidence remains a research
+or quality gap; it does not mean the skill archive changed. Resource hashes, metadata,
+entrypoints, helpers, stage order, style and engine compatibility remain checked.
 
 Run worker/tools/modeling-toolchain-upgrade-probe.mjs with positional arguments
 <original-workspace> <new-disposable-workspace> <old-release> first. It tests the copied

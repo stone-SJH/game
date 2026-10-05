@@ -32,11 +32,12 @@ export async function createSkillPlan({ spec, project, feedback, skillsRoot = pa
     const plan = await readJson(await localPath(project, `${root}/skill-plan.json`));
     const resourceSkills = Array.isArray(plan?.resources)
       ? [...new Set(plan.resources.map(resource => typeof resource?.path === 'string' ? resource.path.split('/')[0] : null))] : [];
-    // Accepted revisions may add reference images without changing the technical
-    // contract. Keep the original toolchain; the current spec still drives image
-    // inputs and reference review. Derive membership from the hashed resources,
-    // never from editable plan metadata. New assets still use full routing below.
-    const pinnedSelected = selected.filter(name => name !== 'yahaha-blender-reference-fit' || resourceSkills.includes(name));
+    // Reference inputs can change or be unavailable after an accepted revision.
+    // Preserve reference-fit membership from the hashed archive in either case;
+    // current inputs still drive evidence/quality review. Style and engine routing
+    // must still match, and editable metadata cannot add or remove pinned skills.
+    const pinnedSelected = selected.filter(name => name !== 'yahaha-blender-reference-fit');
+    if (resourceSkills.includes('yahaha-blender-reference-fit')) pinnedSelected.splice(1, 0, 'yahaha-blender-reference-fit');
     if (!plan || plan.protocol !== 2 || plan.lockHash !== pinnedLockHash || !Array.isArray(plan.resources) || hashValue(plan.resources) !== pinnedLockHash ||
         !isDeepStrictEqual(resourceSkills, pinnedSelected) || !isDeepStrictEqual(plan.selected, pinnedSelected) ||
         !isDeepStrictEqual(plan.entrypoints, pinnedSelected.map(name => `${root}/${name}/SKILL.md`)) ||

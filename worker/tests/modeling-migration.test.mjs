@@ -12,6 +12,8 @@ import { createProductionIterations } from '../agent/production-iterations.mjs';
 import { executionPolicy } from '../agent/modeling-execution.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { modelingToolHashes } from '../agent/modeling-skill-routing.mjs';
+import { prepareModelingReferences } from '../agent/modeling-research.mjs';
+import { defaultContract } from '../agent/modeling-contract.mjs';
 
 async function fixture(t) {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'modeling-migration-'));
@@ -87,6 +89,53 @@ test('offline migration preserves artifacts and consumed budgets, then Continue 
   assert.equal(next.skipResearch, false); assert.deepEqual(next.assets[0].referenceImages, ['reference.png']);
   await fs.unlink(path.join(f.workspace, 'production-state', migrated.productionIdentity, 'iterations.json'));
   await assert.rejects(createProductionIterations({ job: f.job, project: f.project, policy: {} }), /consumed budgets cannot restart/);
+});
+
+test('a partial revision keeps unchanged recovered references and budgets without reusing the old whole-round handoff', async t => {
+  const f = await fixture(t);
+  await migrateModelingTask({ ...f.options, apply: true });
+  const revisedAsset = { ...f.plan.assets[1], maxTriangles: 200, prompt: 'Faithful original reference', contract: defaultContract() };
+  const addedAsset = { ...revisedAsset, assetId: 'added' };
+  const revised = { ...f.plan, revisions: 1, assets: [f.plan.assets[0], revisedAsset, addedAsset] };
+  const files = [path.join(f.root, 'recovery.json'), path.join(f.root, 'execution.json'), ...f.states.map(row => row.file)];
+  const before = await Promise.all(files.map(hashFile));
+  for (const iteration of [null, 1, 2]) {
+    const result = await recoveredModelingReferences({ project: f.project, job: f.job, plan: revised, iteration });
+    assert.ok(result, 'Unchanged assets must retain their verified reference identity');
+    assert.deepEqual(result.assets[0].referenceImages, ['reference.png']);
+    assert.deepEqual(result.assets.slice(1), [revisedAsset, addedAsset]);
+    assert.deepEqual(result.frozenAssetIds, ['retained']);
+    assert.equal(result.skipResearch, false);
+    assert.deepEqual(result.handoffs, []);
+    assert.equal(result.record.evidence.length, 1);
+  }
+  const recovered = await recoveredModelingReferences({ project: f.project, job: f.job, plan: revised, iteration: 2 });
+  let researchCalls = 0;
+  const researched = await prepareModelingReferences({ ...f, assets: recovered.assets, frozenAssetIds: recovered.frozenAssetIds,
+    iteration: 2, signal: new AbortController().signal, reportProgress: async () => {}, review: async () => {
+      researchCalls++;
+      return { references: [], blocked: [revisedAsset, addedAsset].map(asset => ({ assetId: asset.assetId, reason: 'No verified new image' })) };
+    } });
+  assert.equal(researchCalls, 1);
+  assert.equal(researched.record.issue, undefined);
+  assert.deepEqual(researched.assets[0].referenceImages, ['reference.png']);
+  assert.deepEqual(researched.record.blocked.map(row => row.assetId), ['partial', 'added']);
+  assert.deepEqual(await Promise.all(files.map(hashFile)), before);
+  await fs.appendFile(path.join(f.project, 'reference.png'), 'changed');
+  await assert.rejects(recoveredModelingReferences({ project: f.project, job: f.job, plan: revised, iteration: 2 }), { kind: 'INTEGRITY_ERROR' });
+});
+
+test('partial revisions still reject changed retained state and original-plan recovery mismatches', async t => {
+  const f = await fixture(t);
+  await migrateModelingTask({ ...f.options, apply: true });
+  const revised = { ...f.plan, assets: [f.plan.assets[0]] };
+  const state = await readModelingState(f.states[0].file);
+  await atomicJson(f.states[0].file, { ...state, spec: { ...state.spec, maxTriangles: 999 } });
+  await assert.rejects(recoveredModelingReferences({ project: f.project, job: f.job, plan: revised, iteration: 2 }), { kind: 'INTEGRITY_ERROR' });
+  const recordFile = path.join(f.root, 'recovery.json'), record = await readJson(recordFile);
+  record.assets[0].baseHash = '0'.repeat(64);
+  await atomicJson(recordFile, record);
+  await assert.rejects(recoveredModelingReferences({ project: f.project, job: f.job, plan: f.plan, iteration: 2 }), /Recovery asset contract changed/);
 });
 
 test('migration refuses changed runtime, unfinished calls, altered references or nonempty completed rounds before writing', async t => {

@@ -65,9 +65,15 @@ test('resume verification uses recovered reference inputs without rewriting skil
       requirementsHash: 'frozen', specHash: hashValue(enriched), referenceEvidence: [{ file: image, sha256: await hashFile(image) }] }] });
   const files = [f.file, f.execution, path.join(project, 'tools/modeling-skills', skills.lockHash, 'skill-plan.json')];
   const before = await Promise.all(files.map(hashFile));
-  await assert.rejects(createSkillPlan({ spec: base, project, pinnedLockHash: skills.lockHash }), { kind: 'INTEGRITY_ERROR' });
+  assert.equal((await createSkillPlan({ spec: base, project, pinnedLockHash: skills.lockHash })).lockHash, skills.lockHash);
   assert.deepEqual(await verifyRetainedModelingSkills({ workspace: f.workspace, job, plan }), ['rock']);
+  const added = { ...base, assetId: 'new-prop' };
+  const addedSkills = await createSkillPlan({ spec: added, project });
+  await atomicJson(path.join(taskRoot, 'toolchain-new-prop.json'), { skillLockHash: addedSkills.lockHash });
+  const revised = { ...plan, revisions: 1, assets: [base, added] };
+  assert.deepEqual(await verifyRetainedModelingSkills({ workspace: f.workspace, job, plan: revised }), ['rock', 'new-prop']);
   assert.deepEqual(await Promise.all(files.map(hashFile)), before);
   await fs.appendFile(image, 'changed');
   await assert.rejects(verifyRetainedModelingSkills({ workspace: f.workspace, job, plan }), { kind: 'INTEGRITY_ERROR' });
+  await assert.rejects(verifyRetainedModelingSkills({ workspace: f.workspace, job, plan: revised }), { kind: 'INTEGRITY_ERROR' });
 });

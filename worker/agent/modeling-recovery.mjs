@@ -22,12 +22,18 @@ export async function loadModelingRecovery(project, job) {
 
 export async function recoveredModelingReferences({ project, job, plan, iteration }) {
   const record = await loadModelingRecovery(project, job);
-  // A real specification revision goes through normal research and authoring.
-  if (!record || record.planHash !== hashValue(plan)) return null;
+  if (!record) return null;
+  const originalPlan = record.planHash === hashValue(plan);
+  const skipResearch = originalPlan && iteration === record.iteration;
   const assets = [], evidence = [], handoffs = [], frozenAssetIds = [];
   for (const spec of plan.assets) {
     const entry = record.assets.find(row => row.assetId === spec.assetId);
-    if (!entry || entry.baseHash !== hashValue(spec)) throw modelingFailure('INTEGRITY_ERROR', 'Recovery asset contract changed.');
+    if (!entry || entry.baseHash !== hashValue(spec)) {
+      if (originalPlan) throw modelingFailure('INTEGRITY_ERROR', 'Recovery asset contract changed.');
+      // Only changed/new assets need fresh research. Unrelated revisions must
+      // preserve the references used by each unchanged asset's skill and budget pins.
+      assets.push(spec); continue;
+    }
     if (!entry.statePath) { assets.push(spec); continue; }
     const file = await localPath(path.dirname(project), entry.statePath, { existing: true });
     const state = await readModelingState(file);
@@ -37,7 +43,7 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
     await verifyEvidence(entry.referenceEvidence);
     frozenAssetIds.push(spec.assetId);
     assets.push(state.spec); evidence.push(...entry.referenceEvidence);
-    if (iteration === record.iteration) {
+    if (skipResearch) {
       const handoff = state.rounds?.[iteration]?.stageGap;
       if (!handoff || handoff.assetId !== spec.assetId || !Array.isArray(handoff.files) ||
           Boolean(handoff.usable) !== entry.usable || handoff.quality?.score !== entry.score) {
@@ -48,7 +54,9 @@ export async function recoveredModelingReferences({ project, job, plan, iteratio
       await verifyEvidence(files); evidence.push(...files); handoffs.push(handoff);
     }
   }
-  return { assets, handoffs, frozenAssetIds, skipResearch: iteration === record.iteration,
+  if (!originalPlan && !frozenAssetIds.length) return null;
+  return { assets, handoffs, frozenAssetIds, skipResearch,
     record: { recoveryId: record.id, evidence, references: [], blocked: [],
-      reason: 'Reuse verified task-owned references and original attempt budgets. Finish the retained iteration before new quality repairs.' } };
+      reason: skipResearch ? 'Reuse verified task-owned references and original attempt budgets. Finish the retained iteration before new quality repairs.' :
+        'Preserve verified references and original attempt budgets for unchanged assets; research revised or new assets normally.' } };
 }
