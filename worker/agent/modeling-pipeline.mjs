@@ -27,6 +27,7 @@ import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from 
 import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
+import { retireCanceledAuthor } from './modeling-maintenance.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -556,6 +557,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     const stateFile = path.join(stateRoot, short, 'state.json');
     let state = await readModelingState(stateFile);
     if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
+    const canceled = await retireCanceledAuthor(state, execution);
+    if (canceled) { state = canceled; await writeModelingState(stateFile, state); }
     if (state && enforceSourcePolicy(state, sourcePolicy, productionIteration)) await writeModelingState(stateFile, state);
     const repairRequest = await readJson(path.join(project, 'plan/modeling-repair-request.json'));
     const repairKey = hashValue({ revision: job.revisionId || productionIteration, assetId: spec.assetId, reason: repairRequest?.reason || '' });
@@ -612,7 +615,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       return true;
     }
     const retainedFinal = await retainedFinalForValidation({ project, stateRoot: taskState, state, execution });
-    if (job.revisionId && state.bestCandidate && !state.pending && !repair && !retainedFinal) {
+    if (job.revisionId && state.bestCandidate && !state.pending && !repair && !retainedFinal &&
+        !(canceled && state.productionIteration === productionIteration)) {
       await verifyEvidence(state.bestCandidate.files.map(file => ({ file: path.join(project, file.path), sha256: file.sha256 })));
       await workingSource(project, state.bestCandidate);
       return { ...state.bestCandidate, reused: true, reuseReason: 'Unchanged asset contract; validate the existing candidate before requesting a scoped repair.' };
@@ -914,6 +918,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       } catch (error) {
         const stage = error.modelingStage || (['AUTHORING', 'FINAL_PENDING'].includes(state.pending?.phase) ? 'AUTHOR' : 'VALIDATION');
         state.failures.push({ attemptId, route, phase: state.pending?.phase, at: new Date().toISOString(), ...failureRecord(error, stage, signal) });
+        if (stage === 'AUTHOR') state = await retireCanceledAuthor(state, execution) || state;
         // A confirmed failed call consumed its reservation. Preserve its files
         // and ledger, but do not leave an active author blocking the next revision.
         if (['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error)) &&

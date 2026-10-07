@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { atomicJson, readJson, hashFile, hashValue } from '../agent/modeling-io.mjs';
 import { readModelingState } from '../agent/modeling-state.mjs';
-import { planPendingSettlement, applyPendingSettlement } from '../agent/modeling-maintenance.mjs';
+import { planPendingSettlement, applyPendingSettlement, retireCanceledAuthor } from '../agent/modeling-maintenance.mjs';
+import { createExecutionStore } from '../agent/modeling-execution.mjs';
 
 async function fixture(t) {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'settle-pending-'));
@@ -45,4 +46,49 @@ test('unconfirmed, live and changed execution evidence cannot be settled', async
   ledger.groups.group.calls[0].error.stopConfirmed = true; ledger.groups.group.calls[0].status = 'STARTED'; await atomicJson(f.execution, ledger);
   await assert.rejects(planPendingSettlement(f.workspace), /verify its process tree/);
   assert.deepEqual(await readModelingState(f.file), f.state);
+});
+
+test('cancellation retirement uses the confirmed ledger despite a bare outer abort and preserves all budgets', async t => {
+  const f = await fixture(t), ledger = await readJson(f.execution);
+  ledger.groups.group.calls[0].error = { kind: 'CANCELED', canceled: true, timedOut: true, stopConfirmed: true };
+  await atomicJson(f.execution, ledger);
+  f.state.productionIteration = 12;
+  f.state.failures = [{ kind: 'CANCELED', stopConfirmed: null, message: 'Lease or task deadline expired.' }];
+  const before = structuredClone(f.state), hash = await hashFile(f.execution);
+  const store = createExecutionStore(path.dirname(f.execution));
+  const after = await retireCanceledAuthor(f.state, store);
+  assert.equal(after.pending, null); assert.deepEqual(f.state, before);
+  for (const key of ['attempts', 'rounds', 'revisionBudgets', 'attemptBudgets', 'failures', 'productionIteration'])
+    assert.deepEqual(after[key], before[key]);
+  assert.deepEqual(after.canceledAuthorSettlements[0].pending, before.pending);
+  assert.equal(after.canceledAuthorSettlements[0].iteration, 12);
+  assert.equal(after.canceledAuthorSettlements[0].failure.callId, 'author-8');
+  assert.equal(await hashFile(f.execution), hash);
+  assert.equal(await retireCanceledAuthor(after, store), null);
+});
+
+test('retirement never conceals uncertain shutdown, another stage or a non-cancellation failure', async t => {
+  const f = await fixture(t), ledger = await readJson(f.execution), store = createExecutionStore(path.dirname(f.execution));
+  for (const error of [
+    { kind: 'CANCELED', stopConfirmed: null }, { kind: 'SERVICE_TRANSIENT', stopConfirmed: true },
+    { kind: 'INTEGRITY_ERROR', stopConfirmed: true }, { kind: 'CANCELED', stopConfirmed: true, executionFence: true },
+  ]) {
+    ledger.groups.group.calls[0].error = error; await atomicJson(f.execution, ledger);
+    assert.equal(await retireCanceledAuthor(f.state, store), null);
+  }
+  ledger.groups.group.calls[0].error = { kind: 'CANCELED', stopConfirmed: false };
+  await atomicJson(f.execution, ledger);
+  await assert.rejects(retireCanceledAuthor(f.state, store), error => error.kind === 'STOP_UNCONFIRMED');
+  ledger.groups.group.calls[0].error.stopConfirmed = true;
+  ledger.groups.group.calls[0].status = 'STARTED'; await atomicJson(f.execution, ledger);
+  await assert.rejects(retireCanceledAuthor(f.state, store), error => error.kind === 'STOP_UNCONFIRMED');
+  ledger.groups.group.calls[0].status = 'FAILED'; await atomicJson(f.execution, ledger);
+  assert.equal(await retireCanceledAuthor({ ...f.state, failures: [{ attemptId: 'rock-2', stopConfirmed: false }] }, store), null);
+  assert.equal(await retireCanceledAuthor({ ...f.state, failures: [{ attemptId: 'rock-2', executionFence: true }] }, store), null);
+  for (const phase of ['TECHNICAL_PENDING', 'VISUAL_PENDING', 'ACCEPTED'])
+    assert.equal(await retireCanceledAuthor({ ...f.state, pending: { ...f.state.pending, phase } }, store), null);
+  ledger.groups.later = { key: 'checkpoint:rock-2', stage: 'CHECKPOINT', completed: true,
+    calls: [{ callId: 'checkpoint-9', status: 'COMPLETED', startedAt: 2, stopConfirmed: true }] };
+  await atomicJson(f.execution, ledger);
+  assert.equal(await retireCanceledAuthor(f.state, store), null);
 });

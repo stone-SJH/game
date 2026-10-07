@@ -12,6 +12,33 @@ function settledState(state, row) {
 
 const budgetHash = state => hashValue({ attempts: state.attempts, rounds: state.rounds, revisionBudgets: state.revisionBudgets, attemptBudgets: state.attemptBudgets });
 
+// A canceled author is terminal once its durable call confirms shutdown. The
+// outer task abort may have replaced that result with a bare cancellation, so
+// use the execution ledger rather than inferring shutdown from the state error.
+// This retires the reservation; it does not resume, accept or refund its work.
+export async function retireCanceledAuthor(state, execution) {
+  const pending = state?.pending;
+  if (!pending || !['AUTHORING', 'FINAL_PENDING'].includes(pending.phase)) return null;
+  const failure = state.failures?.at(-1);
+  if (failure?.attemptId === pending.attemptId && (failure.stopConfirmed === false || failure.executionFence)) return null;
+  await execution.assertSettled();
+  const ledger = await execution.snapshot();
+  const calls = Object.values(ledger.groups).filter(group =>
+    group.key === `author:${pending.attemptId}` || group.key === `author:${pending.attemptId}-blockout` ||
+    group.key === `author:${pending.attemptId}-final` || group.key === `preview:${pending.attemptId}` ||
+    group.key === `checkpoint:${pending.attemptId}`)
+    .flatMap(group => group.calls.map(call => ({ group: group.key, stage: group.stage, ...call })))
+    .sort((a, b) => b.startedAt - a.startedAt);
+  const last = calls[0];
+  if (!last || !['AUTHOR', 'PREVIEW', 'CHECKPOINT'].includes(last.stage) || last.status !== 'FAILED' ||
+      last.error?.kind !== 'CANCELED' || last.error.stopConfirmed !== true || last.error.executionFence) return null;
+  return { ...state, pending: null, canceledAuthorSettlements: [...(state.canceledAuthorSettlements || []), {
+    iteration: state.productionIteration, pending, executionFile: execution.file,
+    failure: { callId: last.callId, group: last.group, ...last.error },
+    budgetHash: budgetHash(state),
+    reason: 'Canceled author confirmed stopped; reservation remains consumed in its original iteration. Outputs require independent validation before use.' }] };
+}
+
 // Offline repair only. The caller owns the stopped worker and workspace lock.
 // Retire an already failed, confirmed-stopped call; never replay or refund it.
 export async function planPendingSettlement(workspace) {

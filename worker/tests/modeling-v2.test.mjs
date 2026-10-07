@@ -12,7 +12,8 @@ import { createTripoProvider } from '../agent/providers/tripo.mjs';
 import { atomicJson, hashFile, hashValue, readJson, recordAuthorRecipe } from '../agent/modeling-io.mjs';
 import { serveBlender, blenderTools } from '../tools/blender-mcp-server.mjs';
 import { validateUnrealModels } from '../agent/modeling-unreal.mjs';
-import { readModelingState } from '../agent/modeling-state.mjs';
+import { readModelingState, writeModelingState } from '../agent/modeling-state.mjs';
+import { createExecutionStore } from '../agent/modeling-execution.mjs';
 import { validateSchema } from '../agent/modeling-evaluation.mjs';
 
 test('organic asymmetric model preview passes the MCP schema with every required camera', () => {
@@ -108,6 +109,57 @@ test('a final author timeout validates retained exports in the same attempt and 
   const final = Object.values(ledger.groups).find(g => g.key.endsWith('-final'));
   assert.equal(final.completed, undefined); assert.equal(final.calls.length, 1); assert.equal(final.calls[0].status, 'FAILED');
   assert.equal((await pipeline.prepare()).assets[0].reused, true); assert.equal(authors, 2); assert.equal(checks, 1);
+});
+
+test('a confirmed canceled author retires before a new revision without moving or refunding its old reservation', async t => {
+  const f = await fixture(t), abort = new AbortController(); let builds = 0;
+  const job = { taskId: 'canceled-revision', workspaceId: 'workspace', revisionId: 'original', runId: 'first', modelingSpecs: [spec] };
+  const taskRoot = path.join(f.root, 'modeling-state/tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }));
+  const store = createExecutionStore(taskRoot, { signal: abort.signal });
+  const options = { ...f, job, signal: abort.signal, invocation: { command: process.execPath, args: [] },
+    probe: async () => ({ blenderMcpAvailable: true, blenderVersion: 'fixture' }),
+    provider: { availability: async () => ({ enabled: false }) }, evaluate: async () => { throw new Error('Use local route'); },
+    step: async () => { throw new Error('Unexpected process launch'); },
+    build: async context => {
+      builds++;
+      for (const name of ['source.blend', 'model.glb', 'recipe.py', 'asset-manifest.json'])
+        await fs.writeFile(path.join(f.project, context.directory, name), 'fixture');
+      await atomicJson(path.join(f.project, context.directory, 'build-report.json'), { smallEditsOnly: true });
+      if (builds !== 1) return;
+      await context.saveBlockout({ stageArtifacts: [] });
+      await store.run({ key: `author:${context.attemptId}-final`, stage: 'AUTHOR', timeoutMs: 10000 }, async () => {
+        abort.abort(new Error('Lease or task deadline expired.'));
+        throw Object.assign(new Error('Canceled author process'), { result: { canceled: true, timedOut: true, stopConfirmed: true, exitCode: 1 } });
+      });
+    },
+    check: async () => ({ passed: true, smallEditsOnly: true }),
+  };
+  await assert.rejects(createModelingPipeline(options).prepare(), /Lease or task deadline/);
+  const stateDir = (await fs.readdir(path.join(f.root, 'modeling-state'))).find(name => /^[a-f0-9]{20}$/.test(name));
+  const stateFile = path.join(f.root, 'modeling-state', stateDir, 'state.json');
+  const state = await readModelingState(stateFile);
+  assert.equal(state.pending, null); assert.equal(state.canceledAuthorSettlements.length, 1);
+  assert.equal(state.failures.at(-1).stopConfirmed, null); // Outer abort lost the process result.
+  const canceled = state.canceledAuthorSettlements[0], attempt = canceled.pending.attemptId;
+  const source = path.join(f.project, `art/models/meter/${stateDir}/blender_direct-1/source.blend`), sourceHash = await hashFile(source);
+  const before = { round: structuredClone(state.rounds[100000]), budget: structuredClone(state.revisionBudgets.original),
+    deadline: structuredClone(state.attemptBudgets[attempt]), ledger: await store.snapshot() };
+  // Reproduce the retained marker from a worker predating cancellation retirement.
+  state.pending = canceled.pending; delete state.canceledAuthorSettlements;
+  await writeModelingState(stateFile, state);
+  const output = path.join(f.root, 'follow-up'); await fs.mkdir(output);
+  const resumed = createModelingPipeline({ ...options, output, signal: new AbortController().signal,
+    job: { ...job, revisionId: 'follow-up', parentRevisionId: 'original', runId: 'second' } });
+  const result = await resumed.prepare();
+  assert.equal(result.assets[0].status, 'DCC_READY'); assert.equal(builds, 2);
+  const after = await readModelingState(stateFile);
+  assert.equal(after.productionIteration, 101000); assert.equal(after.attempts.blender_direct, 2);
+  assert.deepEqual(after.rounds[100000], before.round); assert.deepEqual(after.revisionBudgets.original, before.budget);
+  assert.deepEqual(after.attemptBudgets[attempt], before.deadline); assert.equal(await hashFile(source), sourceHash);
+  assert.equal(after.canceledAuthorSettlements[0].iteration, 100000);
+  assert.deepEqual(after.canceledAuthorSettlements[0].pending, canceled.pending);
+  const ledger = await store.snapshot();
+  assert.deepEqual(ledger.groups[hashValue(`author:${attempt}-final`)], before.ledger.groups[hashValue(`author:${attempt}-final`)]);
 });
 
 test('v2 contracts preserve legacy plans and reject invalid dimensions, rig and LOD targets',()=>{
