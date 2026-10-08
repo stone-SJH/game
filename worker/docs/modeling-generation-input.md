@@ -14,6 +14,12 @@ provider request. Research cannot silently replace this input. The final compose
 including reference descriptions and draft repairs, is checked immediately before submission
 and saved as `draft-<n>/generation-input.json` with its hash and reference evidence.
 
+The excluded-term list is host validation configuration and is never submitted. Independent
+input review receives the composed `initialProviderInputs` separately from that configuration
+and archived history. This review does not certify visual fidelity or provider acceptance.
+Supersession records contain only removed requirement-array entries; validation reports the
+exact expected entries and unexpected values so bounded repairs can correct malformed output.
+
 An input constraint failure makes no provider request. A confirmed provider content-review
 rejection remains retained and blocks automatic resubmission of the same explicit input,
 including after unrelated metadata changes. Neither input approval nor an approved concept

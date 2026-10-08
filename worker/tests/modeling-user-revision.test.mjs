@@ -54,6 +54,14 @@ test('host user revision supersedes exact appearance obligations while retaining
   assert.throws(() => applyUserAssetChanges(current, proposal, 'Continue.'), /cite the current instruction/);
   const bad = structuredClone(proposal); bad.changes[0].supersededRequirements.pop();
   assert.throws(() => applyUserAssetChanges(current, bad, instruction), /supersession record/);
+  const overreported = structuredClone(proposal);
+  overreported.changes[0].supersededRequirements.push(original.prompt, original.description);
+  assert.throws(() => applyUserAssetChanges(current, overreported, instruction), error => {
+    assert.deepEqual(error.validationIssues[0].expectedSupersededRequirements, proposal.changes[0].supersededRequirements);
+    assert.deepEqual(error.validationIssues[0].unexpected, [original.prompt, original.description]);
+    assert.deepEqual(error.validationIssues[0].missing, []);
+    return true;
+  });
 });
 
 test('provider input excludes history and comparison references; final composed and repair text are checked', () => {
@@ -79,6 +87,8 @@ test('reviewed revision archives obsolete requests, resumes without extra calls 
   assert.equal(await readJson(pending), null); assert.equal(await readJson(request), null);
   const receipt = await readJson(first.recordFile);
   assert.deepEqual(receipt.before, current); assert.equal(receipt.staleRequests.length, 2);
+  assert.equal(receipt.initialProviderInputs[0].submitted, false);
+  assert.equal(receipt.initialProviderInputs[0].prompt, composeConceptPrompt(first.current.assets[0]));
   assert.equal(receipt.status, 'APPLIED'); assert.equal(f.calls.length, 2);
   const later = { ...first.current, reason: 'Later production repair' };
   await atomicJson(request, later);
