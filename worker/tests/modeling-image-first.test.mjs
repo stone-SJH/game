@@ -14,6 +14,7 @@ import { defaultContract } from '../agent/modeling-contract.mjs';
 import { modelingRuntimeIdentity } from '../agent/modeling-runtime-lock.mjs';
 import { atomicJson, hashFile, readJson, agentEnvironment } from '../agent/modeling-io.mjs';
 import { modelingSourcePolicy, enforceSourcePolicy, sourcePolicyAttempts } from '../agent/modeling-source-policy.mjs';
+import { generationInputFeedback } from '../agent/modeling-input-feedback.mjs';
 
 const criteria = ['subject-and-identity', 'anatomy-and-proportions', 'silhouette-and-detail', 'clean-single-subject-view', 'reference-fidelity'];
 const verdict = (status = 'PASS') => ({ criteria: criteria.map(criterion => ({ criterion, status, evidence: 'Observed full subject and visible limbs.' })),
@@ -110,6 +111,31 @@ test('a repair that reintroduces an excluded name is stopped before a second pro
   assert.equal(f.events.filter(row => row === 'image').length, 1);
 });
 
+test('non-character concepts use only designated references and keep the current descriptive prompt', async t => {
+  const f = await conceptFixture(t), sent = [], reference = path.join(f.project, 'design.png');
+  await fs.writeFile(reference, png());
+  f.args.spec = { assetId: 'bronze-vase', description: 'Bronze vase', prompt: 'Historic catalog object',
+    requirements: ['Retain the Aster-42 catalog comparison internally'],
+    referenceImages: ['design.png', 'unavailable-comparison.png'], maxTriangles: 10000,
+    requireRig: false, requireClosedMesh: true, contract: defaultContract(),
+    generationInput: { prompt: 'One tall bronze vase with a narrow neck', requirements: ['Embossed leaves'],
+      referenceImages: ['design.png'], excludedTerms: ['Aster-42'] } };
+  const generate = f.args.imageProvider.generate;
+  f.args.imageProvider.generate = async args => { sent.push(args.prompt); return generate(args); };
+  f.args.review = async (name, schema, prompt, images, options) => {
+    assert.equal(images[0], reference);
+    const result = name === 'modeling-concept-brief' ? { prompt: 'Embossed leaves and a bronze surface with patina' } : verdict();
+    assert.equal(images.length, name === 'modeling-concept-brief' ? 1 : 2);
+    validateSchema(result, schema); await options.validate?.(result); return result;
+  };
+  const result = await prepareModelingConcept(f.args);
+  assert.equal(result.status, 'APPROVED'); assert.equal(sent.length, 1);
+  assert.match(sent[0], /tall bronze vase with a narrow neck/); assert.match(sent[0], /patina/);
+  assert.doesNotMatch(sent[0], /Aster-42|comparison|A-pose/);
+  const receipt = await readJson(result.evidence.find(row => row.file.endsWith('generation-input.json')).file);
+  assert.deepEqual(receipt.referenceEvidence.map(row => row.file), [reference]);
+});
+
 test('an explicit rejected generation input stays rejected when nonvisual requirements and asset state identity change', async t => {
   const f = await conceptFixture(t);
   const explicit = { ...spec, generationInput: { prompt: spec.prompt, requirements: spec.requirements, referenceImages: [], excludedTerms: [] } };
@@ -117,6 +143,29 @@ test('an explicit rejected generation input stays rejected when nonvisual requir
     error: { kind: 'IMAGE_INPUT_REJECTED', responseEvidence: { httpStatus: 400, code: 'moderation_blocked' } } });
   const result = await prepareModelingConcept({ ...f.args, spec: { ...explicit, requirements: [...spec.requirements, 'Technical delivery evidence'] }, short: 'new', iteration: 2 });
   assert.equal(result.issue.kind, 'IMAGE_INPUT_REJECTED'); assert.equal(f.events.length, 0);
+});
+
+test('a revised visual prompt creates a new request while preserving the rejected prompt and user feedback', async t => {
+  const f = await conceptFixture(t); let posts = 0;
+  f.args.spec = { ...spec, generationInput: { prompt: spec.prompt, requirements: spec.requirements, referenceImages: [], excludedTerms: [] } };
+  f.args.imageProvider = createModelingImageProvider({ settings: f.settings, credential: f.credential, fetchImpl: async () => {
+    posts++;
+    return posts === 1 ? new Response(JSON.stringify({ error: { code: 'moderation_blocked', message: 'private-router-auth' } }),
+      { status: 400, headers: { 'x-request-id': '281d6dfa-dc74-48c5-9535-2026f620a886' } }) : json({ data: [{ b64_json: png().toString('base64') }] });
+  } });
+  const first = await prepareModelingConcept(f.args);
+  assert.equal(first.issue.requiresInputChange, true); assert.match(first.issue.inputReview.prompt, /Detailed silver fox/);
+  const report = generationInputFeedback({ assets: [{ assetId: spec.assetId, quality: { gaps: [first.issue] } }] }, { iteration: 1 });
+  assert.equal(report.status, 'NEEDS_INPUT_REVISION'); assert.equal(report.blockedAssets[0].issues[0].response.code, 'moderation_blocked');
+  assert.match(report.reason, /281d6dfa/); assert.match(report.continueTemplate, /fox/); assert.match(report.providerCause, /does not identify/);
+  assert.doesNotMatch(JSON.stringify(report), /private-router-auth/);
+  const firstInput = first.evidence.find(row => row.file.endsWith('generation-input.json'));
+  const originalBytes = await fs.readFile(firstInput.file, 'utf8');
+  await prepareModelingConcept({ ...f.args, iteration: 2 }); assert.equal(posts, 1);
+  const revised = { ...f.args.spec, generationInput: { ...f.args.spec.generationInput, prompt: 'One rounded clay fox sculpture with a smooth matte surface' } };
+  const next = await prepareModelingConcept({ ...f.args, spec: revised, short: 'revised', iteration: 3 });
+  assert.equal(next.status, 'APPROVED'); assert.equal(posts, 2);
+  assert.equal(await fs.readFile(firstInput.file, 'utf8'), originalBytes);
 });
 
 test('image router resolves selected Codex provider, pins budgets and never shares auth with an override host', async t => {

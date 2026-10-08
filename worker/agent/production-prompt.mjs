@@ -8,7 +8,8 @@ export function promptText(value, limit = 1200) {
 export function issueSummary(issue = {}) {
   return { stage: issue.stage, status: issue.status, kind: issue.kind,
     reason: promptText(issue.reason || issue.message, 600),
-    ...(issue.requiresInputChange ? { requiresInputChange: true, responseEvidence: issue.responseEvidence } : {}),
+    ...(issue.requiresInputChange ? { requiresInputChange: true, responseEvidence: issue.responseEvidence || issue.inputReview?.response,
+      inputIdentity: issue.inputReview?.inputIdentity, inputReport: 'generation-input-required-<iteration>.json' } : {}),
     evidenceFile: issue.evidenceFile || issue.reportFile || issue.executionFile };
 }
 

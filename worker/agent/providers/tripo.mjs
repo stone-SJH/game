@@ -9,7 +9,7 @@ import { checkConceptPng } from '../modeling-image-provider.mjs';
 const API = 'https://openapi.tripo3d.com/v3';
 const unavailable = (reasonCode, extra = {}) => ({ status: 'unavailable', provider: 'tripo', reasonCode, fallbackRoute: 'blender_direct', ...extra });
 const failure = (reasonCode, extra = {}) => Object.assign(new Error(reasonCode), { reasonCode, ...extra });
-export const canResumeTripoImageTask = state => Boolean(state?.taskId && (['waiting', 'ready'].includes(state.status) ||
+export const canResumeTripoImageTask = state => Boolean(state?.taskId && !state.requiresInputChange && (['waiting', 'ready'].includes(state.status) ||
   (state.status === 'unavailable' && !['task_failed', 'provider_region_unknown'].includes(state.reasonCode))));
 
 export async function readTripoKey({ repoRoot = repositoryRoot, keyFile = process.env.TRIPO_API_KEY_FILE } = {}) {
@@ -30,6 +30,7 @@ export async function tripoAvailability(options) {
 }
 
 function classify(httpStatus, code) {
+  if (httpStatus === 400 && code === 2008) return 'content_policy_rejected';
   if (code === 2010) return 'insufficient_credits';
   if (httpStatus === 401 || code === 1000 || code === 1001) return 'authentication';
   if (httpStatus === 403) return 'forbidden';
@@ -65,7 +66,12 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
       let value;
       try { value = JSON.parse((await limitedBody(response, 1024 * 1024)).toString('utf8')); }
       catch { throw failure(classify(response.status), { httpStatus: response.status }); }
-      if (!response.ok || value.code !== 0) throw failure(classify(response.status, value.code), { httpStatus: response.status, providerCode: Number.isInteger(value.code) ? value.code : null });
+      if (!response.ok || value.code !== 0) {
+        const trace = response.headers.get('x-tripo-trace-id') || value.request_id;
+        const requestId = typeof trace === 'string' && /^(?:req_[a-zA-Z0-9_-]{1,100}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.test(trace) ? trace : null;
+        throw failure(classify(response.status, value.code), { httpStatus: response.status,
+          providerCode: Number.isInteger(value.code) ? value.code : null, ...(requestId ? { requestId } : {}) });
+      }
       return value.data;
     } catch (error) {
       signal.throwIfAborted();
@@ -110,7 +116,7 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
         return result.balance > 0 ? { status: 'ready', balance: result.balance } : unavailable('insufficient_credits');
       } catch (error) { signal.throwIfAborted(); return unavailable(error.reasonCode || 'provider_error'); }
     },
-    async generate({ project, directory, stateFile, ledgerFile, assetId, prompt, requirementsHash, image, resumePolling = false, signal = new AbortController().signal, deadlineAt } = {}) {
+    async generate({ project, directory, stateFile, ledgerFile, rejectionDirectory, assetId, prompt, requirementsHash, image, resumePolling = false, signal = new AbortController().signal, deadlineAt } = {}) {
       signal.throwIfAborted();
       let imageBytes;
       if (image) {
@@ -130,21 +136,37 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
         imageBytes = await fs.readFile(inputFile); checkConceptPng(imageBytes);
       }
       const keyInfo = await readTripoKey({ repoRoot, keyFile });
-      if (!keyInfo.enabled) return unavailable(keyInfo.reasonCode);
       const root = await localPath(project, directory);
       await fs.mkdir(root, { recursive: true });
       const file = await localPath(project, `${directory}/tripo-model.glb`);
       const body = image ? { model, texture: true, pbr: true, texture_quality: 'detailed', face_limit: 30000 } :
         { prompt: String(prompt || '').slice(0, 1024), model, texture: true, pbr: true, face_limit: 30000 };
+      const inputIdentity = hashValue({ provider: 'tripo', assetId, body, ...(image ? { imageHash: image.sha256 } : {}) });
+      const rejectedFile = path.join(rejectionDirectory || path.dirname(stateFile), 'rejected-tripo-input-' + inputIdentity + '.json');
+      const rejected = await readJson(rejectedFile);
+      if (rejected) {
+        if (rejected.inputReview?.inputIdentity !== inputIdentity || !rejected.requiresInputChange) throw modelingFailure('INTEGRITY_ERROR', 'Tripo rejection identity changed.');
+        return { ...rejected, cachedRejection: true };
+      }
       const requestHash = hashValue({ body, assetId, requirementsHash, ...(image ? { imageHash: image.sha256, approval: image.approval } : {}) });
       let state = await readJson(stateFile);
       if (state && state.requestHash !== requestHash) throw modelingFailure('INTEGRITY_ERROR', 'Provider state does not match immutable modeling inputs.');
+      if (state?.status === 'unavailable' && (state.responseEvidence?.providerCode === 2008 && state.requiresInputChange ||
+          state.providerCode === 2008 && (state.httpStatus === 400 || state.reasonCode === 'task_failed'))) {
+        const responseEvidence = state.responseEvidence || { httpStatus: state.httpStatus || null, providerCode: 2008 };
+        const retained = { ...state, ...unavailable('content_policy_rejected'), kind: 'PROVIDER_INPUT_REJECTED', requiresInputChange: true,
+          fallbackRoute: null, responseEvidence, inputReview: state.inputReview || { provider: 'tripo', inputIdentity, requestHash,
+            prompt: body.prompt || null, image: image ? { path: image.path, sha256: image.sha256 } : null, response: responseEvidence, exactTriggerKnown: false } };
+        await atomicJson(rejectedFile, retained); // Add derived classification; never rewrite the historical request.
+        return retained;
+      }
       if (state?.status === 'unavailable' && !(image && resumePolling && canResumeTripoImageTask(state))) return state;
       if (state?.status === 'ready') {
         try { if (await hashFile(file) === state.sha256) return state; } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
       if (state && state.providerRegion !== 'cn') return unavailable('provider_region_unknown', { taskId: state.taskId || null });
       if (state && !state.taskId) return unavailable('submission_unknown', { submissionUnknown: true });
+      if (!keyInfo.enabled) return unavailable(keyInfo.reasonCode);
       const remaining = deadlineAt ? Date.parse(deadlineAt) - Date.now() : Infinity;
       if (remaining < maxWaitMs + 120000) return unavailable('insufficient_fallback_time');
       const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(maxWaitMs)]);
@@ -173,7 +195,7 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
           totalSignal.throwIfAborted();
           detail = await request(`/tasks/${encodeURIComponent(state.taskId)}`, { key: keyInfo.key, signal: totalSignal });
           if (detail?.status === 'success') break;
-          if (['failed', 'cancelled'].includes(detail?.status)) throw failure('task_failed', { providerCode: Number.isInteger(detail.error_code) ? detail.error_code : null });
+          if (['failed', 'cancelled'].includes(detail?.status)) throw failure(detail.error_code === 2008 ? 'content_policy_rejected' : 'task_failed', { providerCode: Number.isInteger(detail.error_code) ? detail.error_code : null });
           if (!['queued', 'running'].includes(detail?.status)) throw failure('unknown_task_status');
           await delay(pollMs, undefined, { signal: totalSignal });
         }
@@ -186,6 +208,17 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
         if (['EACCES', 'EPERM', 'ENOSPC', 'EROFS', 'EIO'].includes(error.code)) throw error;
         const reasonCode = totalSignal.aborted ? 'provider_timeout' : error.reasonCode || 'provider_error';
         const ledger = await readJson(ledgerFile, { submissions: 0 });
+        if (reasonCode === 'content_policy_rejected') {
+          const responseEvidence = { httpStatus: error.httpStatus || null, providerCode: 2008, ...(error.requestId ? { requestId: error.requestId } : {}) };
+          const result = await save(unavailable(reasonCode, { kind: 'PROVIDER_INPUT_REJECTED', requiresInputChange: true,
+            fallbackRoute: null,
+            taskId: state?.taskId || null, submissionUnknown: false, creditsConsumed: null, responseEvidence,
+            inputReview: { provider: 'tripo', inputIdentity, requestHash, prompt: body.prompt || null,
+              image: image ? { path: image.path, sha256: image.sha256 } : null, response: responseEvidence, exactTriggerKnown: false } }));
+          // A rejected asset does not disable generation of unrelated assets or refund a reservation.
+          await atomicJson(rejectedFile, result);
+          return result;
+        }
         await atomicJson(ledgerFile, { ...ledger, disabled: true, reasonCode });
         return await save(unavailable(reasonCode, { taskId: state?.taskId || null, submissionUnknown: !state?.taskId,
           httpStatus: error.httpStatus || null, providerCode: error.providerCode || null, creditsConsumed: null }));

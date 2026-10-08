@@ -6,6 +6,7 @@ import { checkConceptPng } from './modeling-image-provider.mjs';
 import fs from 'node:fs/promises';
 import { canSearchAfterGenerationFailure } from './modeling-search-fallback.mjs';
 import { conceptSpecification, conceptInputIdentity, composeConceptPrompt } from './modeling-generation-input.mjs';
+import { rejectedImageDetails } from './modeling-input-feedback.mjs';
 
 const criteria = ['subject-and-identity', 'anatomy-and-proportions', 'silhouette-and-detail', 'clean-single-subject-view', 'reference-fidelity'];
 const text = { type: 'string', minLength: 1, maxLength: 6000 };
@@ -27,7 +28,9 @@ export async function readConceptInputRejection({ spec, project, taskState, shor
   if (!record) return null;
   if (record.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected concept inputs changed.'), { kind: 'INTEGRITY_ERROR' });
   await verifyEvidence(record.evidence);
-  return { file, record };
+  const inputReview = record.issue.inputReview || await rejectedImageDetails({ spec, inputIdentity,
+    responseEvidence: record.issue.responseEvidence, evidence: record.evidence });
+  return { file, record: { ...record, issue: { ...record.issue, inputReview } } };
 }
 
 // A rejection belongs to immutable asset/reference inputs, not one quality iteration.
@@ -42,7 +45,9 @@ export async function retainConceptInputRejection({ spec, project, taskState, sh
   const file = inputRejectionFile(taskState, short, inputIdentity, spec);
   const issue = { stage: 'modeling-concept', status: 'GAP', kind: 'IMAGE_INPUT_REJECTED', requiresInputChange: true,
     reason: `Upstream content review rejected this concept (${error.responseEvidence.code}). Retain the evidence and wait for revised asset inputs; do not automatically resubmit the rejected input.`,
-    responseEvidence: error.responseEvidence };
+    responseEvidence: error.responseEvidence,
+    inputReview: await rejectedImageDetails({ spec, inputIdentity, responseEvidence: error.responseEvidence,
+      requestStateFile: error.requestStateFile, evidence }) };
   let record = await readJson(file);
   if (!record) {
     record = { protocol: 1, inputIdentity, issue, evidence: [...evidence,
@@ -50,6 +55,27 @@ export async function retainConceptInputRejection({ spec, project, taskState, sh
     await atomicJson(file, record);
   }
   if (record.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected concept inputs changed.'), { kind: 'INTEGRITY_ERROR' });
+  await verifyEvidence(record.evidence);
+  return { file, record };
+}
+
+// Retain a 3D refusal against the visual brief as well as the provider payload.
+export async function retainProviderInputRejection({ spec, project, taskState, short, result, stage, evidence = [] }) {
+  if (result.kind !== 'PROVIDER_INPUT_REJECTED' || !result.requiresInputChange || result.responseEvidence?.providerCode !== 2008)
+    throw new Error('Expected a classified 3D provider content rejection.');
+  const references = await Promise.all(conceptSpecification(spec).referenceImages.map(file => localPath(project, file, { existing: true })));
+  const inputIdentity = conceptInputIdentity(spec, await fileEvidence(references));
+  const file = inputRejectionFile(taskState, short, inputIdentity, spec);
+  await verifyEvidence(evidence);
+  let record = await readJson(file);
+  if (!record) {
+    record = { protocol: 1, inputIdentity, recordedAt: new Date().toISOString(), evidence,
+      issue: { stage, status: 'GAP', kind: result.kind, requiresInputChange: true,
+        reason: 'Upstream 3D content review rejected this input (2008). Revise the asset description or intended references; do not automatically resubmit unchanged content.',
+        responseEvidence: result.responseEvidence, inputReview: result.inputReview } };
+    await atomicJson(file, record);
+  }
+  if (record.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected asset input changed.'), { kind: 'INTEGRITY_ERROR' });
   await verifyEvidence(record.evidence);
   return { file, record };
 }
@@ -73,8 +99,8 @@ export async function prepareModelingConcept({ spec, project, taskState, short, 
     await atomicJson(recordFile, record); return record;
   };
   const inputIdentity = conceptInputIdentity(spec, referenceEvidence);
-  const rejectedFile = inputRejectionFile(taskState, short, inputIdentity, spec);
-  const rejected = await readJson(rejectedFile);
+  const retainedRejection = await readConceptInputRejection({ spec, project, taskState, short });
+  const rejectedFile = retainedRejection?.file, rejected = retainedRejection?.record;
   if (rejected) {
     if (rejected.inputIdentity !== inputIdentity) throw Object.assign(new Error('Rejected concept inputs changed.'), { kind: 'INTEGRITY_ERROR' });
     await verifyEvidence(rejected.evidence);

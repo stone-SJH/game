@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createTripoProvider, tripoAvailability } from '../agent/providers/tripo.mjs';
+import { createTripoProvider, tripoAvailability, canResumeTripoImageTask } from '../agent/providers/tripo.mjs';
 import { createModelingPipeline } from '../agent/modeling-pipeline.mjs';
 import { selectModelingRoute, reviewPasses, modelingInvocationArgs, visualSchemaFor, validateSchema } from '../agent/modeling-evaluation.mjs';
-import { atomicJson, readJson, hashFile, localPath, agentEnvironment } from '../agent/modeling-io.mjs';
+import { atomicJson, readJson, hashFile, hashValue, localPath, agentEnvironment } from '../agent/modeling-io.mjs';
 import { buildAssetCatalog } from '../agent/asset-catalog.mjs';
 import { runProductionHarness } from '../agent/production-harness.mjs';
 
@@ -81,6 +81,53 @@ test('valid download is hashed, unauthenticated on CDN, and reused without resub
   assert.equal((await provider.generate(f.generation)).sha256, result.sha256);
   assert.equal(calls.length, 3);
   assert.doesNotMatch(await fs.readFile(f.generation.stateFile, 'utf8'), /signature=private|tsk_test/);
+});
+
+for (const phase of ['submission', 'polling']) test('Tripo content refusal is scoped to effective input, preserves budget and permits a changed input: ' + phase, async t => {
+  const f = await fixture(t), calls = []; let posts = 0;
+  const provider = createTripoProvider({ ...f.providerArgs, maxGenerations: 5, fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    if (options.method === 'POST') {
+      posts++;
+      if (posts === 1 && phase === 'submission') return json({ code: 2008, message: 'tsk_test_credential', request_id: 'req_content_review' }, 400);
+      return json({ code: 0, data: { task_id: 'generated_' + posts } });
+    }
+    if (url.includes('/tasks/')) return json({ code: 0, data: posts === 1 && phase === 'polling'
+      ? { status: 'failed', error_code: 2008 }
+      : { status: 'success', output: { model_url: 'https://cdn.tripo3d.ai/model.glb' } } });
+    return new Response(glb());
+  } });
+  const args = { ...f.generation, rejectionDirectory: path.join(f.root, 'task-rejections') };
+  const blocked = await provider.generate(args), oldBytes = await fs.readFile(args.stateFile, 'utf8');
+  assert.equal(blocked.requiresInputChange, true); assert.equal(blocked.responseEvidence.providerCode, 2008);
+  assert.equal(blocked.fallbackRoute, null);
+  assert.equal(blocked.inputReview.prompt, spec.prompt); assert.equal(canResumeTripoImageTask({ ...blocked, taskId: 'known' }), false);
+  assert.doesNotMatch(oldBytes, /tsk_test_credential/);
+  const repeated = await provider.generate({ ...args, stateFile: path.join(f.root, 'metadata-only.json'), requirementsHash: 'new-nonvisual-metadata' });
+  assert.equal(repeated.cachedRejection, true); assert.equal(posts, 1);
+  assert.equal((await readJson(args.ledgerFile)).disabled, false);
+  const other = await provider.generate({ ...args, assetId: 'other-prop', prompt: 'A wooden box', stateFile: path.join(f.root, 'other.json'), directory: 'art/other' });
+  assert.equal(other.status, 'ready');
+  const revised = await provider.generate({ ...args, prompt: 'A blue paper lantern with a brass frame',
+    stateFile: path.join(f.root, 'new-input.json'), directory: 'art/revised', requirementsHash: 'new-user-revision' });
+  assert.equal(revised.status, 'ready'); assert.equal(posts, 3);
+  assert.equal((await readJson(args.ledgerFile)).submissions, 3);
+  assert.equal(await fs.readFile(args.stateFile, 'utf8'), oldBytes);
+});
+
+test('legacy Tripo 2008 receipts gain actionable classification without rewriting old requests or consuming budget', async t => {
+  const f = await fixture(t); let requests = 0;
+  const model = 'fixture-model', body = { prompt: spec.prompt, model, texture: true, pbr: true, face_limit: 30000 };
+  await atomicJson(f.generation.stateFile, { protocol: 1, providerRegion: 'cn', status: 'unavailable', httpStatus: 400,
+    providerCode: 2008, reasonCode: 'provider_contract_error',
+    requestHash: hashValue({ body, assetId: f.generation.assetId, requirementsHash: f.generation.requirementsHash }) });
+  await atomicJson(f.generation.ledgerFile, { submissions: 1, disabled: true, reasonCode: 'provider_contract_error' });
+  const before = await fs.readFile(f.generation.stateFile, 'utf8'), budget = await fs.readFile(f.generation.ledgerFile, 'utf8');
+  const provider = createTripoProvider({ ...f.providerArgs, model, fetchImpl: async () => { requests++; throw new Error('Must not resubmit'); } });
+  const result = await provider.generate(f.generation);
+  assert.equal(result.kind, 'PROVIDER_INPUT_REJECTED'); assert.equal(result.inputReview.prompt, spec.prompt);
+  assert.equal(requests, 0); assert.equal(await fs.readFile(f.generation.stateFile, 'utf8'), before);
+  assert.equal(await fs.readFile(f.generation.ledgerFile, 'utf8'), budget);
 });
 
 test('unknown POST outcome survives new provider instances without repeat submission', async t => {
@@ -309,6 +356,21 @@ test('provider outage disables third-party assessment for subsequent assets', as
   assert.equal(summary.assets.length, 2);
   assert.deepEqual(enabledStates, [true, false]);
   assert.equal(f.calls.filter(call => call === 'provider').length, 1);
+});
+
+test('a retained 3D content refusal cannot turn into automatic Blender or search fallback on the next round', async t => {
+  const f = await pipelineFixture(t); let submissions = 0, searches = 0;
+  f.options.provider.generate = async () => { submissions++; return { status: 'unavailable', kind: 'PROVIDER_INPUT_REJECTED',
+    requiresInputChange: true, reasonCode: 'content_policy_rejected', responseEvidence: { httpStatus: 400, providerCode: 2008 },
+    inputReview: { provider: 'tripo', prompt: spec.prompt, response: { httpStatus: 400, providerCode: 2008 } } }; };
+  f.options.searchAssets = async () => { searches++; return null; };
+  const first = await createModelingPipeline(f.options).prepare({ iteration: 1 });
+  assert.equal(first.assets[0].quality.gaps[0].kind, 'PROVIDER_INPUT_REJECTED');
+  f.options.provider.availability = async () => ({ enabled: false, reasonCode: 'key_file_missing' });
+  const second = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(second.assets[0].quality.gaps[0].requiresInputChange, true);
+  assert.equal(submissions, 1); assert.equal(searches, 0);
+  assert.equal(f.calls.some(call => call.startsWith('build:')), false);
 });
 
 test('failed technical output remains missing while the rest of production can continue', async t => {

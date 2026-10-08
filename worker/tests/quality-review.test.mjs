@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { collectQualityEvidence, inspectProduction, runProductionHarness } from '../agent/production-harness.mjs';
 import { extractQualityCriteria, parseQualityAdvice, qualityReviewSettings } from '../agent/quality-review.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
+import { atomicJson, hashValue } from '../agent/modeling-io.mjs';
 
 const stages = ['intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan', 'asset-production-and-import',
   'level-blockout-and-traversal', 'gameplay-foundation-and-input', 'camera-combat-ai-and-feel',
@@ -220,6 +221,39 @@ test('quality review rejects omitted, duplicate, skipped or unsupported criteria
     assert.throws(() => parseQualityAdvice(JSON.stringify(advice), expected));
   }
   assert.deepEqual(extractQualityCriteria({ qualityCriteria: ['  ', 'A', '', 'B'] }).map(row => row.id), ['quality-1', 'quality-2']);
+});
+
+for (const productionFails of [false, true]) test('content refusal publishes actionable input and stops after the current round (production fails=' + productionFails + ')', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'input-feedback-harness-'));
+  const project = path.join(root, 'project'), output = path.join(root, 'run');
+  await fs.mkdir(project); await fs.mkdir(output); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  environment(t, { CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '5', CODEX_RETRY_DELAY_MS: '1',
+    MODELING_ROUTING_ENABLED: '1', TRIPO_API_KEY_FILE: path.join(root, 'absent-key') });
+  const spec = { assetId: 'stone-statue', description: 'Statue', prompt: 'One stone statue', requirements: ['Stone surface'],
+    referenceImages: [], maxTriangles: 10000, requireRig: false, requireClosedMesh: false };
+  const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality', objective: 'Make a playable game', modelingSpecs: [spec] };
+  const taskState = path.join(root, 'modeling-state/tasks', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId }));
+  await atomicJson(path.join(taskState, 'capabilities-1.json'), { blenderMcpAvailable: true });
+  await atomicJson(path.join(taskState, 'asset-gap-1-' + hashValue(spec) + '.json'), { assetId: spec.assetId,
+    status: 'NO_USABLE_ARTIFACT', usable: false, files: [], spec, quality: { accepted: false, score: 0,
+      gaps: [{ stage: 'modeling-concept', kind: 'IMAGE_INPUT_REJECTED', requiresInputChange: true, reason: 'Content review rejected the input',
+        inputReview: { provider: 'concept-image', prompt: 'One stone statue', response: { httpStatus: 400, code: 'moderation_blocked', requestId: 'req_fixture' } } }] } });
+  const publications = []; let productions = 0;
+  await assert.rejects(runProductionHarness({ job, project, output, signal: new AbortController().signal, unreal: 'unused',
+    reportProgress: async () => {}, onIterationReview: async record => publications.push(record),
+    step: async (name, command, args) => {
+      if (name.startsWith('production-orchestrator')) {
+        productions++;
+        if (productionFails) throw new Error('Fixture packaging failure');
+        await seedDeliverables(project);
+      }
+      return { exitCode: 0, stdout: '', stderr: '', stopConfirmed: true, timedOut: false };
+    } }), error => error.kind === 'GENERATION_INPUT_REQUIRED' && error.productionIncomplete);
+  assert.equal(productions, 1);
+  const feedback = publications.find(item => item.record.kind === 'generation-input-required');
+  assert.ok(feedback); assert.equal(feedback.record.blockedAssets[0].issues[0].input.prompt, 'One stone statue');
+  assert.equal(JSON.parse(await fs.readFile(feedback.file, 'utf8')).status, 'NEEDS_INPUT_REVISION');
+  assert.equal(await fs.stat(path.join(output, 'codex-production-attempt-2.json')).catch(() => null), null);
 });
 
 test('large asset plans cannot crowd out the actual scene image from quality review', async t => {

@@ -7,6 +7,15 @@ is `project/plan/modeling-user-revision.json`. Technical contracts and unrelated
 are preserved. Obsolete pending requests are archived with their original contents.
 An ordinary agent repair cannot grant this authority or change the approved input.
 
+This is an asset-level visual revision protocol, shared by characters, props, organic objects
+and environment kits. Asset IDs, excluded terms, reference selections and superseded entries
+come from each task's current instruction and plan; there are no built-in task IDs, character
+names or prescribed replacement designs. Multiple assets may be revised together, while
+unaffected assets remain unchanged. Receipts and refusals are scoped to their task workspace.
+A plain Continue with no visual change preserves the existing inputs and pending repair work.
+Technical contract renegotiation is outside this visual-input path: this mechanism cannot
+silently change dimensions, rig requirements, budgets or engine acceptance to make a run pass.
+
 Revised assets have an explicit `generationInput`: current visual prompt, visual
 requirements, designated generation references and excluded terms. Historical requirements,
 technical checks and comparison-only images remain evidence but are not appended to the
@@ -25,6 +34,36 @@ rejection remains retained and blocks automatic resubmission of the same explici
 including after unrelated metadata changes. Neither input approval nor an approved concept
 proves generation, rigging, import, runtime binding or package acceptance. Report host image
 submissions separately from Tripo submissions and engineering-agent tool calls.
+
+## Content review recovery
+
+Image API `moderation_blocked`/`content_policy_violation` and Tripo error `2008` require an
+input revision. Tripo classification follows its [v3 error reference](https://developers.tripo3d.com/en/docs/error-handling).
+Network timeouts, authentication failures, credit shortages and moderation-service errors
+are separate failures; they must not be guessed to be content rejections.
+
+The host publishes `generation-input-required-<iteration>.json` through the existing artifact
+channel. It includes affected asset IDs, stage/provider, the submitted prompt or image hash,
+available request/trace IDs and error codes, plus a Continue template and revision options.
+It does not invent the sensitive word, image region or copyright cause when none was supplied.
+Retained legacy image receipts are read for diagnostics without rewriting their evidence.
+
+Finish and preserve the current playable/provisional round and independent assets, then stop
+automatic rounds with `GENERATION_INPUT_REQUIRED`. If packaging itself fails, retain its
+failure alongside the input report. Do not run several identical rounds before telling the user.
+
+The user may give a complete acceptable description, clarify which appearance obligations
+it supersedes, or explicitly select different references/design scope. The normal host revision
+flow reviews that instruction, builds a new input identity and tries it under the existing
+budget rules. New user reference inventory is made available to the reviewer. Old failures
+and spent reservations remain immutable; changed content is not rejected merely because its
+asset ID has a prior failure. Unchanged effective input remains blocked despite metadata or
+state-path changes. A rejected asset does not disable generation for unrelated assets.
+
+There is no automatic provider switch, encoding trick, disguised resubmission or silent
+design replacement after a content refusal. Legitimate input changes remain subject to the
+provider's review; success is not guaranteed. Pure technical-contract changes are outside
+the visual-revision protocol and must not silently waive the original acceptance contract.
 
 Three unchanged package hashes and scores now stop with `PRODUCTION_STALLED` and
 `production-stalled.json`, retaining iteration reports and deliveries. This is a no-progress

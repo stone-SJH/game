@@ -22,6 +22,7 @@ import { contentStore, packageEntry } from './workspace-storage.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { promptText, issueSummary, modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall } from './production-prompt.mjs';
 import { readSceneCoverage, coverageInstructions, coverageStalled } from './modeling-coverage.mjs';
+import { generationInputFeedback } from './modeling-input-feedback.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -539,6 +540,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       iterationTotal: maxAttempts || qualityIterationTotal || null, tool: 'AI / Codex', prompt: basePrompt, step: `production iteration ${attempt}`, steps: { completed: 0, total: 3 } });
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     let codexTemp;
+    let inputFeedback;
     let stage = 'production-orchestrator';
     try {
       if (modelingPipeline) {
@@ -555,6 +557,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
           stageScores.push({ stage: 'modeling-planning', score: 0 });
         }
       }
+      inputFeedback = generationInputFeedback(modelingResults, { iteration, revisionId: job.revisionId, runId: job.runId });
+      if (inputFeedback) {
+        const file = path.join(output, `generation-input-required-${iteration}.json`);
+        await writeJson(file, inputFeedback);
+        await reportProgress({ phase: 'reviewing', step: 'Generation input requires a user revision', error: inputFeedback.reason,
+          diagnostic: { kind: 'GENERATION_INPUT_REQUIRED', report: path.basename(file) } });
+        try { await onIterationReview({ file, record: inputFeedback }); }
+        catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `input-feedback-publication-${iteration}.json`), stageIssue('input-feedback-publication', error)); }
+      }
       const engineeringPlan = modelingPipeline ? await observe('engineering-handoff', () => modelingPipeline.engineeringPlan()) : null;
       const engineeringHandoff = engineeringPlan ? [
         'Read plan/engineering-plan.json before building gameplay. This host-frozen plan covers every original requirement and separates documented engineering choices from unresolved original-reference facts. Never edit it.',
@@ -569,6 +580,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
         'Read plan/modeling-results.json for the complete current asset handoff, exact paths, contracts and evidence before importing or modifying an asset. Historical failure logs are evidence, not additional authoring instructions.',
         'When plan/modeling-user-revision.json exists, read its host disposition. APPLIED means the current asset input revision has been reviewed; do not invent another host-approval requirement or restore superseded appearance requirements. It does not mean concept/model/engine quality passed. generationInput is host-owned and must be preserved exactly in internal repair requests.',
         'Distinguish host image submissions, Tripo submissions and your own tool calls. A zero count for your calls is not evidence of zero host requests. Cite generation-input.json, provider receipts and actual import/binding evidence; report input rejections as input rejections, not missing user permission.',
+        'If an asset requiresInputChange, preserve the current round and independent work. The host will publish the exact input/rejection and stop further automatic rounds. Do not make a cosmetic rejection retry, silently change the requested design, or claim a placeholder satisfies generation acceptance.',
         ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [
           'Planning is unresolved. Read the retained planning evidence and intake draft when present. They preserve requirements but are NOT approved executable model contracts. Do not edit the host planning records, claim acceptance, or request a modeling revision inside this round.',
           'Continue the whole playable iteration using explicitly documented temporary engine-native representations. Choose and record any necessary gameplay design metrics as provisional project decisions, never original-game measurements. Keep all contract/fidelity obligations as GAP until independently checked. The next complete iteration repairs planning internally.',
@@ -737,6 +749,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
         threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults, playable, productionCompleted: true, coverage });
       try { await onIterationReview({ file: delivered.file, record: delivered.record }); }
       catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `iteration-${iteration}-publication-gap.json`), stageIssue('iteration-publication', error)); }
+      if (inputFeedback) throw Object.assign(new Error(inputFeedback.reason), { kind: 'GENERATION_INPUT_REQUIRED', productionIncomplete: true,
+        inputFeedbackFile: path.join(output, `generation-input-required-${iteration}.json`) });
       if (playable && score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
       if (coverageStalled(iterations.rounds)) throw Object.assign(new Error('Scene coverage has not improved in three completed iterations. Retained all checkpoints; repair the unresolved asset/tool chain before spending another iteration.'),
         { kind: 'COVERAGE_STALLED', productionIncomplete: true });
@@ -762,8 +776,10 @@ export async function runProductionHarness({ job, project, output, signal, step,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
         acceptanceFailure: error.acceptanceFailure, qualityFailure: error.qualityFailure,
       });
-      if (error.productionIncomplete || ['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error))) throw error;
+      if (error.productionIncomplete && (!inputFeedback || error.kind === 'GENERATION_INPUT_REQUIRED') || ['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error))) throw error;
       throwIfExecutionFenced(error, signal);
+      if (inputFeedback) throw Object.assign(new Error(inputFeedback.reason + ' Current round also stopped at ' + stage + ': ' + error.message),
+        { kind: 'GENERATION_INPUT_REQUIRED', productionIncomplete: true, inputFeedbackFile: path.join(output, `generation-input-required-${iteration}.json`) });
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });
       if (feedback.action === 'stop') {
         const retained = await iterations.best(feedback.reason);

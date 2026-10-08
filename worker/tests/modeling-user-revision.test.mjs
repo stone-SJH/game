@@ -112,3 +112,52 @@ test('a task without a controller-owned follow-up cannot obtain a relaxed asset 
   const result = await reconcileUserModelingRevision({ ...f, job: { revisionId: 'new-user-revision' } });
   assert.equal(result.current, current); assert.equal(f.calls.length, 0);
 });
+
+test('one generic revision handles multiple non-character assets with separate visual constraints', () => {
+  const cases = [
+    { assetId: 'delivery-cart', assetClass: 'static-prop', excluded: 'Aster-42', prompt: 'A blue metal cart with two oak wheels' },
+    { assetId: 'garden-gateway', assetClass: 'modular-kit', excluded: 'Beacon', prompt: 'A blue stone gateway with fluted columns' },
+    { assetId: 'coral-formation', assetClass: 'organic-static', excluded: '珊瑚王', prompt: 'A blue branching coral formation with porous surfaces' },
+  ];
+  const assets = cases.map(row => ({ assetId: row.assetId, description: row.assetId, prompt: 'Red ' + row.assetId,
+    requirements: ['Retain the original collision and texture budgets', 'Red surfaces'], referenceImages: [],
+    maxTriangles: 10000, requireRig: false, requireClosedMesh: true, contract: defaultContract({ assetClass: row.assetClass }) }));
+  const base = { reason: 'Independent asset specifications', assets: [...assets, structuredClone(prop)], revisions: 2 };
+  const instruction = 'Make the cart, gateway and coral blue; omit each designated catalog name from its generation input.';
+  const changes = cases.map((row, index) => ({ assetId: row.assetId, instructionQuote: instruction, reason: 'Requested blue surface and omitted catalog name',
+    description: row.assetId, prompt: row.prompt, requirements: [assets[index].requirements[0], 'Blue surfaces'],
+    supersededRequirements: ['Red surfaces'], referenceImages: [],
+    generationInput: { prompt: row.prompt, requirements: ['Blue surfaces'], referenceImages: [], excludedTerms: [row.excluded] } }));
+  const next = applyUserAssetChanges(base, { reason: 'Apply the scoped multi-asset change', changes }, instruction);
+  assert.deepEqual(next.assets[3], base.assets[3]);
+  for (let index = 0; index < cases.length; index++) {
+    assert.deepEqual(next.assets[index].contract, base.assets[index].contract);
+    assert.deepEqual(next.assets[index].requirements, [base.assets[index].requirements[0], 'Blue surfaces']);
+    assert.match(composeConceptPrompt(next.assets[index]), /Blue surfaces/);
+    assert.throws(() => assertGenerationPrompt(next.assets[index], cases[index].excluded), error => error.kind === 'GENERATION_INPUT_CONFLICT');
+    assertGenerationPrompt(next.assets[index], cases[(index + 1) % cases.length].excluded);
+  }
+  assert.deepEqual(base.assets.map(asset => asset.prompt), [...cases.map(row => 'Red ' + row.assetId), prop.prompt]);
+});
+
+test('approval and rejection records are isolated across task workspaces even with equal revision labels', async t => {
+  const approved = await fixture(t, true), rejected = await fixture(t, false);
+  const accepted = await reconcileUserModelingRevision(approved);
+  await assert.rejects(reconcileUserModelingRevision(rejected), error => error.kind === 'USER_REVISION_UNRESOLVED');
+  const resumed = await reconcileUserModelingRevision({ ...approved, current: accepted.current });
+  assert.deepEqual(resumed.current, accepted.current);
+  assert.equal(approved.calls.length, 2); assert.equal(rejected.calls.length, 2);
+  assert.deepEqual(await readJson(path.join(rejected.taskState, 'plan.json')), current);
+});
+
+test('a generic continuation with no asset change does not alter inputs or archive pending work', async t => {
+  const f = await fixture(t), pending = path.join(f.taskState, 'revision-pending.json');
+  await atomicJson(pending, { iteration: 2, rawRequest: 'Retained pending repair' });
+  const before = await fs.readFile(pending, 'utf8'); let calls = 0;
+  const args = { ...f, job: { revisionId: 'continue-revision', payload: { followUpPrompt: 'Continue the existing work.' } },
+    review: async name => { assert.equal(name, 'modeling-user-revision'); calls++; return { reason: 'No asset input change requested', changes: [] }; } };
+  const result = await reconcileUserModelingRevision(args);
+  await reconcileUserModelingRevision({ ...args, current: result.current });
+  assert.deepEqual(result.current, current); assert.equal(calls, 1);
+  assert.equal(await fs.readFile(pending, 'utf8'), before);
+});

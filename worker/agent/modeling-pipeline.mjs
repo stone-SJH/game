@@ -21,7 +21,7 @@ import { throwIfExecutionFenced, stageIssue } from './stage-failure.mjs';
 import { readModelingState, writeModelingState, modelingFailureSummary } from './modeling-state.mjs';
 import { recoveredModelingReferences } from './modeling-recovery.mjs';
 import { createModelingImageProvider } from './modeling-image-provider.mjs';
-import { prepareModelingConcept, readConceptInputRejection } from './modeling-concept.mjs';
+import { prepareModelingConcept, readConceptInputRejection, retainProviderInputRejection } from './modeling-concept.mjs';
 import { searchModelingAsset, canSearchAfterGenerationFailure } from './modeling-search-fallback.mjs';
 import { retainPlanningGap, loadPlanningGap, planningRepairContext } from './modeling-planning-continuation.mjs';
 import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from './workspace-epoch.mjs';
@@ -29,6 +29,7 @@ import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
 import { reconcileUserModelingRevision } from './modeling-user-revision.mjs';
+import { assertGenerationPrompt } from './modeling-generation-input.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -749,10 +750,12 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     };
     while (true) {
       signal.throwIfAborted();
+      if (sourcePolicy.external3DAllowed) {
+        const rejectedInput = await readConceptInputRejection({ spec, project, taskState, short });
+        if (rejectedInput) return await retainImageGap(rejectedInput.record.issue);
+      }
       if (state.route === 'image_tripo_blender' && !sourceFile) {
         try {
-          const rejectedInput = await readConceptInputRejection({ spec, project, taskState, short });
-          if (rejectedInput) return await retainImageGap(rejectedInput.record.issue);
           if (!availability.enabled) {
             if (await searchModel({ reasonCode: availability.reasonCode })) continue;
             return await retainImageGap({ stage: 'modeling-image-to-3d', status: 'GAP', reason: availability.reasonCode || 'Tripo unavailable; no usable searched model.' });
@@ -771,9 +774,15 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           const result = await provider.generate({ project, directory: 'art/models/' + spec.assetId + '/' + short + '/image-provider-' + providerIteration,
             stateFile: path.join(stateRoot, short, 'image-provider-' + providerIteration + '.json'),
             ledgerFile: path.join(taskState, 'image-tripo-ledger-' + providerIteration + '.json'),
+            rejectionDirectory: path.join(taskState, 'provider-input-rejections'),
             assetId: spec.assetId, prompt: spec.prompt, requirementsHash, image: { ...concept.image, approval: concept.approval },
             resumePolling: providerIteration < productionIteration, signal, deadlineAt: job.deadlineAt });
           if (result.status !== 'ready') {
+            if (result.requiresInputChange) {
+              const rejected = await retainProviderInputRejection({ spec, project, taskState, short, result,
+                stage: 'modeling-image-to-3d', evidence: concept.evidence });
+              return await retainImageGap(rejected.record.issue);
+            }
             if (await searchModel(result)) continue;
             return await retainImageGap({ stage: 'modeling-image-to-3d', status: 'GAP', reason: result.reasonCode });
           }
@@ -804,14 +813,20 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         try {
           result = await provider.generate({ project, directory: `art/models/${spec.assetId}/${short}/provider`,
             stateFile: path.join(stateRoot, short, 'provider.json'), ledgerFile: path.join(output, 'tripo-ledger.json'),
-            assetId: spec.assetId, prompt: spec.prompt, requirementsHash, signal, deadlineAt: job.deadlineAt });
+            rejectionDirectory: path.join(taskState, 'provider-input-rejections'),
+            assetId: spec.assetId, prompt: assertGenerationPrompt(spec, spec.generationInput?.prompt || spec.prompt), requirementsHash, signal, deadlineAt: job.deadlineAt });
         } catch (error) {
           throwIfStopped(error, signal);
+          if (error.requiresInputChange) return await retainImageGap({ ...stageIssue('modeling-text-to-3d', error), requiresInputChange: true });
           if (error.kind === 'INTEGRITY_ERROR' || ['ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO'].includes(error.code)) throw error;
           result = { status: 'unavailable', reasonCode: 'provider_call_unavailable' };
         }
         await report(result, path.join(output, `modeling-provider-${spec.assetId}-${short}.json`));
         if (result.status !== 'ready') {
+          if (result.requiresInputChange) {
+            const rejected = await retainProviderInputRejection({ spec, project, taskState, short, result, stage: 'modeling-text-to-3d' });
+            return await retainImageGap(rejected.record.issue);
+          }
           if (await searchModel(result)) continue;
           providerDisabledReason = result.reasonCode || 'provider_unavailable'; await fallback(providerDisabledReason); continue;
         }
