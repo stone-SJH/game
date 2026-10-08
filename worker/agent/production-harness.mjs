@@ -20,7 +20,7 @@ import { diagnoseUpstreamAI } from './modeling-upstream-ai.mjs';
 import { createStageCache } from './stage-cache.mjs';
 import { contentStore, packageEntry } from './workspace-storage.mjs';
 import { failureKind } from './service-recovery.mjs';
-import { promptText, issueSummary, modelingHandoffSummary, productionFeedbackSummary, currentProductionResult } from './production-prompt.mjs';
+import { promptText, issueSummary, modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall } from './production-prompt.mjs';
 import { readSceneCoverage, coverageInstructions, coverageStalled } from './modeling-coverage.mjs';
 
 const STAGES = [
@@ -481,6 +481,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
           error.upstreamAI = upstreamAI;
           await reportProgress({ error: upstreamAI.message, diagnostic: upstreamAI });
         }
+        if (error.productionIncomplete) throw error;
         throwIfExecutionFenced(error, signal);
         const issue = { stage: name, status: 'GAP', reason: error.message, kind: error.kind, acceptanceFailure: error.acceptanceFailure,
           ...(upstreamAI ? { upstreamAI } : {}) };
@@ -566,6 +567,8 @@ export async function runProductionHarness({ job, project, output, signal, step,
         'The host has now completed the modeling assessment for this iteration. Treat these results as the authoritative asset handoff.',
         `Modeling results summary: ${JSON.stringify(modelingHandoffSummary(modelingResults))}`,
         'Read plan/modeling-results.json for the complete current asset handoff, exact paths, contracts and evidence before importing or modifying an asset. Historical failure logs are evidence, not additional authoring instructions.',
+        'When plan/modeling-user-revision.json exists, read its host disposition. APPLIED means the current asset input revision has been reviewed; do not invent another host-approval requirement or restore superseded appearance requirements. It does not mean concept/model/engine quality passed. generationInput is host-owned and must be preserved exactly in internal repair requests.',
+        'Distinguish host image submissions, Tripo submissions and your own tool calls. A zero count for your calls is not evidence of zero host requests. Cite generation-input.json, provider receipts and actual import/binding evidence; report input rejections as input rejections, not missing user permission.',
         ...(modelingResults.status === 'PLANNING_PROVISIONAL' ? [
           'Planning is unresolved. Read the retained planning evidence and intake draft when present. They preserve requirements but are NOT approved executable model contracts. Do not edit the host planning records, claim acceptance, or request a modeling revision inside this round.',
           'Continue the whole playable iteration using explicitly documented temporary engine-native representations. Choose and record any necessary gameplay design metrics as provisional project decisions, never original-game measurements. Keep all contract/fidelity obligations as GAP until independently checked. The next complete iteration repairs planning internally.',
@@ -737,8 +740,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
       if (playable && score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
       if (coverageStalled(iterations.rounds)) throw Object.assign(new Error('Scene coverage has not improved in three completed iterations. Retained all checkpoints; repair the unresolved asset/tool chain before spending another iteration.'),
         { kind: 'COVERAGE_STALLED', productionIncomplete: true });
-      if (iterations.rounds.length >= roundLimit || (maxAttempts > 0 && attempt >= maxAttempts) ||
-          delivered.record.packageDigest && iterations.rounds.length >= 3 && iterations.rounds.slice(-3).every(row => row.score === score && row.packageDigest === delivered.record.packageDigest)) {
+      const stalled = productionStall(iterations.rounds, delivered.record);
+      if (stalled) {
+        await writeJson(path.join(output, 'production-stalled.json'), stalled);
+        throw Object.assign(new Error(stalled.reason + (stalled.blockedAssets.length ? ' Blocked assets: ' + stalled.blockedAssets.map(row => row.assetId).join(', ') : '')), stalled);
+      }
+      if (iterations.rounds.length >= roundLimit || (maxAttempts > 0 && attempt >= maxAttempts)) {
         return await iterations.best('Iteration budget reached; retained the best available result with its measured score, playability and gaps.');
       }
       feedback = { ...quality, kind: 'quality-review', action: 'repair-project', score, remainingGap: 1-score/100,

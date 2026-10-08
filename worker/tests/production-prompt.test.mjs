@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { modelingHandoffSummary, productionFeedbackSummary, currentProductionResult } from '../agent/production-prompt.mjs';
+import { modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall } from '../agent/production-prompt.mjs';
 
 test('large retained modeling histories cannot consume the production input budget', () => {
   const message = 'historical tool failure '.repeat(100000);
@@ -28,4 +28,15 @@ test('legacy or inherited packages cannot satisfy execution of the current revis
   assert.equal(currentProductionResult(result, job), true);
   delete result.delivery.productionCompleted;
   assert.equal(currentProductionResult(result, job), false);
+});
+
+test('three unchanged packages report the asset blocker and do not claim budget exhaustion or quality completion', () => {
+  const round = { score: 0, packageDigest: 'same-package' };
+  const record = { ...round, modeling: { assets: [{ assetId: 'player', usable: false,
+    quality: { gaps: [{ kind: 'IMAGE_INPUT_REJECTED', requiresInputChange: true, reason: 'Current input rejected.' }] } }] } };
+  assert.equal(productionStall([round, round], record), null);
+  assert.equal(productionStall([round, round, { ...round, packageDigest: 'new-package' }], record), null);
+  const stopped = productionStall([round, round, round], record);
+  assert.equal(stopped.kind, 'PRODUCTION_STALLED'); assert.equal(stopped.productionIncomplete, true);
+  assert.equal(stopped.blockedAssets[0].issues[0].requiresInputChange, true);
 });

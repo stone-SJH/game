@@ -81,6 +81,44 @@ async function conceptFixture(t, statuses = ['PASS'], sameBytes = false) {
   return { ...f, events, args };
 }
 
+test('explicit visual input reaches the image API without archived names or comparison image rewriting', async t => {
+  const f = await conceptFixture(t), sent = [];
+  const originalGenerate = f.args.imageProvider.generate;
+  f.args.imageProvider.generate = async args => { sent.push(args.prompt); return originalGenerate(args); };
+  f.args.spec = { ...spec, requirements: [...spec.requirements, 'Historical Link appearance and wait for host approval'],
+    referenceImages: ['nonexistent-comparison-only.png'], generationInput: {
+      prompt: 'An original silver fox in a neutral standing pose', requirements: ['Four anatomically coherent legs'],
+      referenceImages: [], excludedTerms: ['Link'],
+    } };
+  const priorReview = f.args.review;
+  f.args.review = async (...args) => {
+    assert.equal(args[0], 'modeling-concept-review'); assert.doesNotMatch(args[2], /Historical Link|wait for host/);
+    return priorReview(...args);
+  };
+  const result = await prepareModelingConcept(f.args);
+  assert.equal(result.status, 'APPROVED'); assert.equal(sent.length, 1); assert.doesNotMatch(sent[0], /Link|host approval|comparison/);
+  const input = await readJson(result.evidence.find(row => row.file.endsWith('generation-input.json')).file);
+  assert.equal(input.prompt, sent[0]); assert.equal(input.constraintsChecked, true); assert.deepEqual(input.referenceEvidence, []);
+});
+
+test('a repair that reintroduces an excluded name is stopped before a second provider call', async t => {
+  const f = await conceptFixture(t, ['GAP']);
+  f.args.spec = { ...spec, generationInput: { prompt: spec.prompt, requirements: spec.requirements, referenceImages: [], excludedTerms: ['Link'] } };
+  f.args.review = async () => ({ ...verdict('GAP'), repairInstructions: 'Use Link as the reference' });
+  const result = await prepareModelingConcept(f.args);
+  assert.equal(result.issue.kind, 'GENERATION_INPUT_CONFLICT'); assert.equal(result.issue.requiresInputChange, true);
+  assert.equal(f.events.filter(row => row === 'image').length, 1);
+});
+
+test('an explicit rejected generation input stays rejected when nonvisual requirements and asset state identity change', async t => {
+  const f = await conceptFixture(t);
+  const explicit = { ...spec, generationInput: { prompt: spec.prompt, requirements: spec.requirements, referenceImages: [], excludedTerms: [] } };
+  await retainConceptInputRejection({ spec: explicit, project: f.project, taskState: f.args.taskState, short: 'old',
+    error: { kind: 'IMAGE_INPUT_REJECTED', responseEvidence: { httpStatus: 400, code: 'moderation_blocked' } } });
+  const result = await prepareModelingConcept({ ...f.args, spec: { ...explicit, requirements: [...spec.requirements, 'Technical delivery evidence'] }, short: 'new', iteration: 2 });
+  assert.equal(result.issue.kind, 'IMAGE_INPUT_REJECTED'); assert.equal(f.events.length, 0);
+});
+
 test('image router resolves selected Codex provider, pins budgets and never shares auth with an override host', async t => {
   const f = await fixture(t), directory = path.join(f.root, 'codex');
   await fs.mkdir(directory);
@@ -320,6 +358,55 @@ async function pipelineFixture(t, { conceptGap = false, modelGap = false } = {})
     } };
   return { ...f, options, events };
 }
+
+test('a controller follow-up revises only the requested asset before generation and survives the next iteration', async t => {
+  const f = await pipelineFixture(t);
+  const originalBuild = f.options.build;
+  f.options.build = async context => {
+    await originalBuild(context);
+    // Separate fixture source bytes represent distinct retained assets.
+    for (const name of ['source.blend', 'model.glb', ...(context.spec.requireRig ? ['model.fbx'] : [])])
+      await fs.writeFile(path.join(f.project, context.directory, name), context.directory + '/' + name);
+  };
+  await createModelingPipeline(f.options).prepare();
+  const evaluate = f.options.evaluate;
+  const instruction = 'Use an original russet fox instead of silver; keep the anatomy and rig.';
+  const revised = { ...spec, prompt: 'A detailed russet fox with four visible legs', requirements: [spec.requirements[0], 'Layered russet fur'] };
+  f.options.job = { ...f.options.job, revisionId: 'follow-up', payload: { followUpPrompt: instruction } };
+  let reconciliations = 0;
+  f.options.evaluate = async context => {
+    if (context.name === 'modeling-user-revision') {
+      reconciliations++;
+      return { reason: 'Apply requested fur change', changes: [{ assetId: 'fox', instructionQuote: instruction,
+        reason: 'User changes the fur color', description: 'Detailed original russet fox', prompt: revised.prompt,
+        requirements: revised.requirements, supersededRequirements: [spec.requirements[1]], referenceImages: [],
+        generationInput: { prompt: revised.prompt, requirements: revised.requirements, referenceImages: [], excludedTerms: [] } }] };
+    }
+    if (context.name === 'modeling-user-revision-review') return { approved: true, reason: 'Only the user-requested fur color changes.' };
+    if (context.name === 'modeling-evaluation' && context.prompt.includes('"assetId":"fox"')) {
+      const value = advice(revised), candidates = JSON.parse(context.prompt.match(/Candidates: (.*)\n/)[1]);
+      value.candidates = candidates.map(candidate => ({ assetId: candidate.assetId, similarity: 0, canMeetQuality: false,
+        editPlan: [], qualityByCriterion: value.direct.qualityByCriterion, reason: 'Fixture candidates have no verified previews.' }));
+      return value;
+    }
+    return evaluate(context);
+  };
+  const build = f.options.build;
+  f.options.build = async context => {
+    if (context.spec.assetId === 'fox') {
+      assert.deepEqual(context.spec.requirements, revised.requirements);
+      return build({ ...context, spec: { ...context.spec, requirements: spec.requirements } });
+    }
+    return build(context);
+  };
+  const second = await createModelingPipeline(f.options).prepare({ iteration: 2 });
+  assert.equal(second.assets[0].usable, true);
+  assert.equal(second.assets[0].spec.generationInput.prompt, revised.prompt);
+  await createModelingPipeline(f.options).prepare({ iteration: 3 });
+  assert.equal(reconciliations, 1);
+  assert.equal(f.events.filter(event => event === 'image').length, 2);
+  assert.equal(f.events.filter(event => event === 'build:prop').length, 1);
+});
 
 async function searchedSource(f, kind) {
   const file = 'searched.' + (kind === 'image' ? 'png' : 'glb');

@@ -395,7 +395,7 @@ test('repairing an overlong revision prompt preserves legacy zero tolerances and
   f.options.probe = async () => ({ blenderMcpAvailable: false });
   f.options.evaluate = async ({ name, schema }) => {
     assert.equal(name, 'modeling-revision'); repairs++;
-    assert.equal(schema.properties.assets.items.properties.contract.anyOf[0].properties.pivot.properties.toleranceMeters.minimum, 0);
+    for (const variant of schema.properties.assets.items.anyOf.filter(item => item.properties.contract)) assert.equal(variant.properties.contract.anyOf[0].properties.pivot.properties.toleranceMeters.minimum, 0);
     return { reason: 'Compact the current action; retain frozen obligations', assets: [{ ...original, prompt: 'Replace the remaining visible temporary geometry.' }] };
   };
   await createModelingPipeline(f.options).prepare({ iteration: 2 });

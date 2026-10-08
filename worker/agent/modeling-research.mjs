@@ -11,6 +11,9 @@ const schema = object({ references: { type: 'array', maxItems: 120, items: objec
 }) }, blocked: { type: 'array', maxItems: 30, items: object({ assetId: text, reason: text }) } });
 
 export function needsVisualResearch(spec) {
+  // A host-reviewed generation brief has an explicit reference set, including an
+  // intentionally empty one. Comparison research cannot silently change it.
+  if (spec.generationInput) return false;
   return Boolean(spec.contract && !spec.referenceImages.length &&
     /原作|原游戏|原版|复刻|一比一|1\s*[:：]\s*1|reference[- ](?:match|accurate)|replica|faithful.*(?:original|reference)/i
       .test([spec.prompt, ...spec.requirements].join('\n')));

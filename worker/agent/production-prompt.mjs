@@ -8,7 +8,17 @@ export function promptText(value, limit = 1200) {
 export function issueSummary(issue = {}) {
   return { stage: issue.stage, status: issue.status, kind: issue.kind,
     reason: promptText(issue.reason || issue.message, 600),
+    ...(issue.requiresInputChange ? { requiresInputChange: true, responseEvidence: issue.responseEvidence } : {}),
     evidenceFile: issue.evidenceFile || issue.reportFile || issue.executionFile };
+}
+
+export function productionStall(rounds, record) {
+  if (!record.packageDigest || rounds.length < 3 || !rounds.slice(-3).every(row => row.score === record.score && row.packageDigest === record.packageDigest)) return null;
+  const blocked = (record.modeling?.assets || []).filter(asset => asset.usable === false)
+    .map(asset => ({ assetId: asset.assetId, issues: (asset.quality?.gaps || []).slice(-1).map(issueSummary) }));
+  return { kind: 'PRODUCTION_STALLED', productionIncomplete: true,
+    reason: 'Three completed iterations retained the same package and score without satisfying the current revision. Repair the recorded blockers before continuing; this is not an exhausted iteration budget.',
+    blockedAssets: blocked, packageDigest: record.packageDigest };
 }
 
 export function modelingHandoffSummary(result = {}) {

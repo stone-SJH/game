@@ -169,7 +169,7 @@ test('quality advice cannot complete with an unresolved dimension gap', () => {
   assert.throws(() => parseQualityAdvice(JSON.stringify(value)), /unresolved gap/);
 });
 
-test('quality budget returns a retained playable result with honest gaps instead of global failure', async t => {
+test('unchanged provisional packages stop with retained deliveries and an explicit no-progress failure', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quality-review-budget-'));
   const project = path.join(root, 'project'), output = path.join(root, 'run');
   await fs.mkdir(path.join(project, 'plan'), { recursive: true });
@@ -192,11 +192,16 @@ test('quality budget returns a retained playable result with honest gaps instead
   };
   const job = { taskId: 'task-quality', runId: 'run-quality', workspaceId: 'workspace-quality',
     objective: 'Make a platformer.\n质量验收条件：\n- 美术精度达到卡通参考' };
-  const delivered = await runProductionHarness({ job, project, output, signal: new AbortController().signal, step,
-    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {} });
+  const deliveries = [];
+  await assert.rejects(runProductionHarness({ job, project, output, signal: new AbortController().signal, step,
+    unreal: 'UnrealEditor-Cmd.exe', reportProgress: async () => {},
+    onIterationReview: async ({ record }) => { if (record.kind === 'iteration-delivery') deliveries.push(record); } }),
+  error => error.kind === 'PRODUCTION_STALLED' && error.productionIncomplete);
+  const delivered = { qualityAccepted: deliveries.at(-1).qualityAccepted, delivery: deliveries.at(-1) };
   assert.equal(delivered.qualityAccepted, false);
   assert.equal(delivered.delivery.status, 'DELIVERED_WITH_GAPS');
-  assert.equal(await fs.readFile(delivered.files.packageFile, 'utf8'), 'game');
+  assert.equal(await fs.readFile(path.join(project, 'package/Windows/Game.exe'), 'utf8'), 'game');
+  assert.equal(JSON.parse(await fs.readFile(path.join(output, 'production-stalled.json'), 'utf8')).kind, 'PRODUCTION_STALLED');
   assert.equal(productionCalls, 3);
   assert.equal(qualityCalls, 3);
 });

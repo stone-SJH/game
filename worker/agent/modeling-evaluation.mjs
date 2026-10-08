@@ -1,5 +1,6 @@
 import { monitorInvocationArgs } from './iteration-monitor.mjs';
 import { contractSchema, generatedContractSchema, validateContractSemantics } from './modeling-contract.mjs';
+import { generationInputSchema } from './modeling-generation-input.mjs';
 
 const string = { type: 'string', minLength: 1, maxLength: 3000 };
 const strings = { type: 'array', maxItems: 30, items: string };
@@ -32,9 +33,10 @@ export const modelingPlanV2Schema = object({ reason: string, assets: { type: 'ar
 // tolerances. New contracts still use the stricter generation schema.
 const { traversal: optionalTraversal, ...legacyContractProperties } = contractSchema.properties;
 export const modelingRevisionSchema = object({ reason: string, assets: { type: 'array', maxItems: 30,
-  items: object({ ...assetSpecSchema.properties, contract: { anyOf: [
+  items: { anyOf: [false, true].flatMap(explicitInput => [false, true].map(withContract => object({ ...assetSpecSchema.properties,
+    ...(explicitInput ? { generationInput: generationInputSchema } : {}), ...(withContract ? { contract: { anyOf: [
     object({ ...legacyContractProperties, traversal: optionalTraversal }), object(legacyContractProperties),
-  ] } }) } });
+  ] } } : {}) }))) } } });
 const prediction = object({ criterion: string, achievable: { type: 'boolean' }, evidence: string });
 const predictions = { type: 'array', minItems: 1, maxItems: 30, items: prediction };
 export const modelingDecisionSchema = object({
@@ -103,10 +105,14 @@ export function validateSchema(value, schema, field = 'response') {
 }
 
 export function validateSpecs(value) {
-  validateSchema({ ...value, assets: value?.assets?.map(({ contract, ...asset }) => asset) }, modelingPlanSchema);
+  validateSchema({ ...value, assets: value?.assets?.map(({ contract, generationInput, ...asset }) => asset) }, modelingPlanSchema);
   if (new Set(value.assets.map(asset => asset.assetId)).size !== value.assets.length) throw new Error('Duplicate modeling asset ID.');
   for (const asset of value.assets) if (new Set(asset.requirements).size !== asset.requirements.length) throw new Error('Duplicate modeling requirement.');
   for (const asset of value.assets) {
+    if (Object.hasOwn(asset, 'generationInput')) {
+      validateSchema(asset.generationInput, generationInputSchema, 'asset.generationInput');
+      if (asset.generationInput.referenceImages.some(file => !asset.referenceImages.includes(file))) throw new Error('Generation references must be explicitly included in the asset reference inventory.');
+    }
     if (Object.hasOwn(asset, 'contract')) validateSchema(asset.contract, contractSchema, 'asset.contract');
     validateContractSemantics(asset);
   }

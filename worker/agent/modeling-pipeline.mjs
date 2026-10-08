@@ -28,6 +28,7 @@ import { modelingIteration, readWorkspaceEpoch, usesLegacyModelingBudget } from 
 import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
+import { reconcileUserModelingRevision } from './modeling-user-revision.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -84,6 +85,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   async function plan() {
     const requestFile = await localPath(project, 'plan/modeling-request.json');
     let current = await readJson(taskPlanFile) || await readJson(planFile);
+    ({ current } = await reconcileUserModelingRevision({ current, job, project, taskState, review: reviewer, timeoutMs: policy.intakeMs }));
     if (!current) {
       planningGap = await loadPlanningGap(project, taskState, productionIteration);
       if (planningGap) return null;
@@ -124,7 +126,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
           const revised = request.assets.find(asset => asset.assetId === original.assetId);
           if (!revised || original.requirements.some(criterion => !revised.requirements.includes(criterion)) ||
               revised.maxTriangles > original.maxTriangles || (original.requireRig && !revised.requireRig) ||
-              (original.requireClosedMesh && !revised.requireClosedMesh) || !preservesContract(original, revised) || original.referenceImages.some(image => !revised.referenceImages.includes(image))) {
+              (original.requireClosedMesh && !revised.requireClosedMesh) || !preservesContract(original, revised) || original.referenceImages.some(image => !revised.referenceImages.includes(image)) ||
+              hashValue(original.generationInput || null) !== hashValue(revised.generationInput || null)) {
             throw new Error('Modeling revisions cannot remove assets or weaken original acceptance requirements.');
           }
         }
@@ -147,8 +150,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         try { request = JSON.parse(requestRaw); validateRevision(request); }
         catch (error) {
           throwIfExecutionFenced(error, signal);
-          request = await reviewer('modeling-revision', current?.assets.some(asset => asset.contract) ? modelingRevisionSchema : modelingPlanSchema,
-            `Repair this internal revision request. Preserve all original assets and obligations. Copy existing contracts EXACTLY, including zero tolerances; do not regenerate them using new-contract defaults. Keep each prompt within 1024 characters: summarize the current action and move additional obligations into requirements instead of appending iteration history. The raw request remains retained evidence. Do not invent missing measurements or remove requested additions. If it cannot be resolved, keep the unresolved constraints. Original plan: ${JSON.stringify(current)}\nRaw request: ${requestRaw}\nFindings: ${error.message}`, [],
+          request = await reviewer('modeling-revision', modelingRevisionSchema,
+            `Repair this internal revision request. Preserve all CURRENT approved assets and obligations, including generationInput exactly when present. Superseded historical requirements must not be reintroduced. Copy existing contracts EXACTLY, including zero tolerances; do not regenerate them using new-contract defaults. Keep each prompt within 1024 characters; do not append iteration history or internal workflow instructions to visual requirements. The raw request remains retained evidence. Do not invent missing measurements or remove requested additions. If it cannot be resolved, keep the unresolved constraints. Current plan: ${JSON.stringify(current)}\nRaw request: ${requestRaw}\nFindings: ${error.message}`, [],
             { key: `modeling-revision:iteration-${productionIteration}`, maxCalls: 2, timeoutMs: policy.intakeMs, validate: validateRevision });
         }
         current = { ...request, revisions: (current.revisions || 0) + 1 };
