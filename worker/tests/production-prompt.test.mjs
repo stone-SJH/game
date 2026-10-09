@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall } from '../agent/production-prompt.mjs';
+import { modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall, issueSummary } from '../agent/production-prompt.mjs';
 
 test('large retained modeling histories cannot consume the production input budget', () => {
   const message = 'historical tool failure '.repeat(100000);
@@ -39,4 +39,15 @@ test('three unchanged packages report the asset blocker and do not claim budget 
   const stopped = productionStall([round, round, round], record);
   assert.equal(stopped.kind, 'PRODUCTION_STALLED'); assert.equal(stopped.productionIncomplete, true);
   assert.equal(stopped.blockedAssets[0].issues[0].requiresInputChange, true);
+});
+
+test('large failed-gate payloads are bounded in prompts while retained evidence remains complete', () => {
+  const issue = { kind: 'TECHNICAL_GAP', feedbackEvidence: { reportFile: 'geometry.json' }, findings: Array.from({ length: 12 }, () => ({
+    id: 'dimensions', scope: 'source.gates', expected: 'x'.repeat(30000), actual: Array(200).fill('y'.repeat(30000)), tolerance: 'z'.repeat(30000),
+  })) };
+  const summarized = issueSummary(issue);
+  assert.equal(summarized.findings.length, 2);
+  assert.ok(JSON.stringify(summarized).length < 1100);
+  assert.equal(summarized.evidenceFile, 'geometry.json');
+  assert.equal(issue.findings.length, 12); assert.equal(issue.findings[0].actual.length, 200);
 });

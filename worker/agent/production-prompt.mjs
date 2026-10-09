@@ -6,9 +6,13 @@ export function promptText(value, limit = 1200) {
 }
 
 export function issueSummary(issue = {}) {
+  const findings = (issue.findings || []).slice(0, 2).map(row => ({
+    gate: promptText([row.scope, row.id].filter(Boolean).join('.'), 80),
+    expected: promptText(JSON.stringify(row.expected), 100), actual: promptText(JSON.stringify(row.actual), 160),
+  }));
   return { stage: issue.stage, status: issue.status, kind: issue.kind,
     reason: promptText(issue.reason || issue.message, 600),
-    ...(issue.findings?.length ? { findings: issue.findings.slice(0, 12) } : {}),
+    ...(findings.length ? { findings } : {}),
     ...(issue.consumed !== undefined ? { consumed: issue.consumed, limit: issue.limit } : {}),
     ...(issue.requiresInputChange ? { requiresInputChange: true, responseEvidence: issue.responseEvidence || issue.inputReview?.response,
       inputIdentity: issue.inputReview?.inputIdentity, inputReport: 'generation-input-required-<iteration>.json' } : {}),
