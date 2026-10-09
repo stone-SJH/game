@@ -143,9 +143,20 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
         { prompt: String(prompt || '').slice(0, 1024), model, texture: true, pbr: true, face_limit: 30000 };
       const inputIdentity = hashValue({ provider: 'tripo', assetId, body, ...(image ? { imageHash: image.sha256 } : {}) });
       const rejectedFile = path.join(rejectionDirectory || path.dirname(stateFile), 'rejected-tripo-input-' + inputIdentity + '.json');
+      const effectiveInput = { prompt: body.prompt?.trim() || null, imageHash: image?.sha256 || null };
+      const effectiveRejectionFile = path.join(path.dirname(project), 'modeling-state/provider-rejections', 'tripo-' + hashValue(effectiveInput) + '.json');
+      const effectiveRejected = await readJson(effectiveRejectionFile);
+      if (effectiveRejected) {
+        const actual = { prompt: effectiveRejected.inputReview?.prompt?.trim() || null, imageHash: effectiveRejected.inputReview?.image?.sha256 || null };
+        if (!effectiveRejected.requiresInputChange || effectiveRejected.responseEvidence?.providerCode !== 2008 || hashValue(actual) !== hashValue(effectiveInput)) {
+          throw modelingFailure('INTEGRITY_ERROR', 'Retained effective Tripo input rejection changed.');
+        }
+        return { ...effectiveRejected, cachedRejection: true };
+      }
       const rejected = await readJson(rejectedFile);
       if (rejected) {
         if (rejected.inputReview?.inputIdentity !== inputIdentity || !rejected.requiresInputChange) throw modelingFailure('INTEGRITY_ERROR', 'Tripo rejection identity changed.');
+        await atomicJson(effectiveRejectionFile, rejected);
         return { ...rejected, cachedRejection: true };
       }
       const requestHash = hashValue({ body, assetId, requirementsHash, ...(image ? { imageHash: image.sha256, approval: image.approval } : {}) });
@@ -158,6 +169,7 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
           fallbackRoute: null, responseEvidence, inputReview: state.inputReview || { provider: 'tripo', inputIdentity, requestHash,
             prompt: body.prompt || null, image: image ? { path: image.path, sha256: image.sha256 } : null, response: responseEvidence, exactTriggerKnown: false } };
         await atomicJson(rejectedFile, retained); // Add derived classification; never rewrite the historical request.
+        await atomicJson(effectiveRejectionFile, retained);
         return retained;
       }
       if (state?.status === 'unavailable' && !(image && resumePolling && canResumeTripoImageTask(state))) return state;
@@ -217,6 +229,7 @@ export function createTripoProvider({ repoRoot = repositoryRoot, keyFile, fetchI
               image: image ? { path: image.path, sha256: image.sha256 } : null, response: responseEvidence, exactTriggerKnown: false } }));
           // A rejected asset does not disable generation of unrelated assets or refund a reservation.
           await atomicJson(rejectedFile, result);
+          await atomicJson(effectiveRejectionFile, result);
           return result;
         }
         await atomicJson(ledgerFile, { ...ledger, disabled: true, reasonCode });

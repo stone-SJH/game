@@ -66,6 +66,20 @@ function advice(current = spec, enabled = true) {
     thirdParty: { assessed: enabled, preferred: false, smallEditsOnly: false, editMinutes: 40,
       editPlan: ['Rig the generated anatomy'], qualityByCriterion: enabled ? predictions : [], reason: 'Requires rigging' }, rationale: 'Preserve original requirements.' };
 }
+
+test('effective rejected image input survives metadata, state file and router changes; revised content is reviewed anew', async t => {
+  const f = await fixture(t); let posts = 0;
+  const fetchImpl = async () => { posts++; return json({ error: { code: 'moderation_blocked' } }, 400); };
+  const provider = createModelingImageProvider({ settings: f.settings, credential: f.credential, fetchImpl });
+  await assert.rejects(provider.generate(f.generation), error => error.kind === 'IMAGE_INPUT_REJECTED');
+  const changedMetadata = { ...f.generation, stateFile: path.join(f.root, 'new-revision.json'), requirementsHash: 'new-metadata' };
+  const newRouter = createModelingImageProvider({ credential: f.credential, fetchImpl,
+    settings: async () => ({ ...await f.settings(), endpoint: 'http://changed.test/images' }) });
+  await assert.rejects(newRouter.generate(changedMetadata), error => error.kind === 'IMAGE_INPUT_REJECTED');
+  assert.equal(posts, 1);
+  await assert.rejects(provider.generate({ ...changedMetadata, prompt: 'An original copper woodland creature, broad paws and rounded ears.' }), error => error.kind === 'IMAGE_INPUT_REJECTED');
+  assert.equal(posts, 2);
+});
 async function conceptFixture(t, statuses = ['PASS'], sameBytes = false) {
   const f = await fixture(t); const events = [];
   const imageProvider = createModelingImageProvider({ settings: f.settings, credential: f.credential, fetchImpl: async () => {

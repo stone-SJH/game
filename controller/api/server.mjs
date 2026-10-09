@@ -109,14 +109,14 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
   }
   async function route(req, res) {
     const url = new URL(req.url, origin);
-    if (req.method === 'GET' && ['/', '/app.js', '/app.css'].includes(url.pathname)) {
+    if (req.method === 'GET' && ['/', '/app.js', '/user-decisions.js', '/app.css'].includes(url.pathname)) {
       const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
       const data = await fsp.readFile(path.join(appRoot, name));
       res.writeHead(200, { 'content-type': name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.js') ? 'text/javascript' : 'text/css', 'cache-control': 'no-cache',
         'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
       return res.end(data);
     }
-    if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', service: 'yahahagame-controller', protocol: 2 });
+    if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', service: 'yahahagame-controller', protocol: 2, capabilities: { userDecisions: 1 } });
     if (req.method === 'POST' && ['/v1/auth/login', '/v1/auth/register'].includes(url.pathname)) {
       if (req.headers.origin !== origin || !req.headers['content-type']?.startsWith('application/json')) throw problem(403, 'Invalid request origin.');
       await rateLimit(db, `ip:${req.socket.remoteAddress}`, 100);
@@ -148,7 +148,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
           try { cursor = JSON.parse(Buffer.from(url.searchParams.get('cursor'), 'base64url').toString()); } catch { throw problem(400, 'Invalid list cursor.'); }
           if (!Array.isArray(cursor) || cursor.length !== 2 || !Number.isFinite(Date.parse(cursor[0])) || typeof cursor[1] !== 'string') throw problem(400, 'Invalid list cursor.');
         }
-        const rows = (await db.query(`SELECT t.task_id,t.kind,t.objective,t.status,t.worker_id,t.created_at,t.updated_at,j.progress, t.created_at::text AS cursor_time
+        const rows = (await db.query(`SELECT t.task_id,t.kind,t.objective,CASE WHEN t.input_request IS NOT NULL THEN 'WAITING_FOR_INPUT' ELSE t.status END AS status,t.worker_id,t.created_at,t.updated_at,j.progress, t.created_at::text AS cursor_time
           FROM tasks t LEFT JOIN LATERAL (SELECT progress FROM jobs WHERE jobs.task_id=t.task_id ORDER BY jobs.created_at DESC LIMIT 1) j ON true WHERE t.user_id=$1
           AND ($2::timestamptz IS NULL OR (t.created_at,t.task_id)<($2::timestamptz,$3::text)) ORDER BY t.created_at DESC,t.task_id DESC LIMIT 51`, [session.user_id, cursor?.[0] || null, cursor?.[1] || null])).rows;
         const items = rows.slice(0, 50), last = items.at(-1);
@@ -189,7 +189,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         'content-disposition': `attachment; filename="reference"; filename*=UTF-8''${encodeURIComponent(row.name).replaceAll("'", '%27')}` });
       return pipeline(fs.createReadStream(row.storage_path), res);
     }
-    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|recover|artifacts))?$/);
+    const task = url.pathname.match(/^\/v1\/tasks\/([a-zA-Z0-9-]+)(?:\/(cancel|events|rerun|recover|artifacts|answer))?$/);
     if (task) {
       if (req.method === 'GET' && task[2] === 'events') return streamEvents(req, res, task[1]);
       const session = await user(req, req.method !== 'GET');
@@ -203,6 +203,7 @@ export function createServer({ db, artifactRoot, origin, secureCookies = true, m
         return json(res, value.status === 'CANCELING' ? 202 : 200, value);
       }
       if (req.method === 'POST' && task[2] === 'rerun') return json(res, 202, await tasks.rerunTask(db, task[1], session.user_id, await body(req)));
+      if (req.method === 'POST' && task[2] === 'answer') return json(res, 202, await tasks.answerTask(db, task[1], session.user_id, await body(req)));
       if (req.method === 'POST' && task[2] === 'recover') return json(res, 202, await tasks.recoverTask(db, task[1], session.user_id, await body(req)));
     }
     const artifact = url.pathname.match(/^\/artifacts\/([a-zA-Z0-9-]{1,100})$/);

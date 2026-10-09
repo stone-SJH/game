@@ -1,5 +1,6 @@
 import { digest, id, problem, transaction } from './database.mjs';
 import { selectedReferences, bindReferences } from './references.mjs';
+import { validateInputRequest, validateDecisionAnswer, decisionHash } from '../core/input-requests.mjs';
 
 export const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED']);
 const ARTIFACT_PAGE_SIZE = 5;
@@ -429,10 +430,13 @@ export async function taskView(db, taskId, userId) {
       }
     }
     const progress = job?.progress && Object.keys(job.progress).length ? progressForUser(job.progress, task.status) : null;
-    const runsForUser = runs.map(item => ({ runId: item.run_id, taskRevision: item.revision_number, status: item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
+    const runsForUser = runs.map(item => ({ runId: item.run_id, taskRevision: item.revision_number, status: task.input_request?.runId === item.run_id ? 'WAITING_FOR_INPUT' : item.status, jobId: item.job_id, jobStatus: item.job_status, objective: item.objective || task.objective,
       followUpPrompt: item.input?.followUpPrompt || null, references: item.input?.references || [],
-      createdAt: item.created_at, finishedAt: item.finished_at, resultSummary: runSummary(item, task.status) }));
-    return { taskId, ownerId: userId, objective: task.objective, kind: task.kind, status: task.status, workerId: task.worker_id,
+      createdAt: item.created_at, finishedAt: item.finished_at,
+      resultSummary: task.input_request?.runId === item.run_id ? 'Waiting for your answer: ' + task.input_request.title : runSummary(item, task.status) }));
+    const waiting = Boolean(task.input_request);
+    return { taskId, ownerId: userId, objective: task.objective, kind: task.kind, status: waiting ? 'WAITING_FOR_INPUT' : task.status, workerId: task.worker_id,
+      inputRequest: task.input_request || null,
       workspaceId: workspace?.workspace_id, runId: run?.run_id, taskRevision: run?.revision_number || null, deadlineAt: task.deadline_at, createdAt: task.created_at,
       updatedAt: task.updated_at, result: task.result, currentPrompt: run?.input?.followUpPrompt || null, progress,
       references: run?.input?.payload?.references || [],
@@ -441,7 +445,7 @@ export async function taskView(db, taskId, userId) {
       runs: runsForUser, iterationSummaries: iterationSummaries(iterationRows, task, runsForUser, diagnosticArtifacts),
       artifactFacets: artifactRevisionFacets,
       events, eventCursor: events.at(-1)?.event_id || '0',
-      allowedActions: terminal.has(task.status) ? ['rerun'] : task.status === 'CANCELING' ? [] : ['cancel'],
+      allowedActions: waiting ? ['answer', 'cancel'] : terminal.has(task.status) ? ['rerun'] : task.status === 'CANCELING' ? [] : ['cancel'],
       artifacts: artifactResult.artifacts.map(artifactForUser), artifactCount: artifactResult.count, artifactBytes: artifactResult.bytes,
       artifactsNextCursor: artifactResult.nextCursor };
   });
@@ -457,6 +461,12 @@ export async function artifactView(db, taskId, userId, options = {}) {
 export async function cancelTask(db, taskId, userId) {
   return change(db, async client => {
     const task = await ownedTask(client, taskId, userId);
+    if (task.input_request) {
+      await client.query("UPDATE task_input_requests SET status='CANCELED' WHERE request_id=$1 AND status='PENDING'", [task.input_request.requestId]);
+      await client.query("UPDATE tasks SET status='CANCELED',input_request=NULL,cancel_reason='CANCELED',updated_at=now() WHERE task_id=$1", [taskId]);
+      await event(client, taskId, 'TASK_CANCELED', { requestId: task.input_request.requestId });
+      return { taskId, status: 'CANCELED' };
+    }
     if (terminal.has(task.status) || task.status === 'CANCELING') return { taskId, status: task.status };
     const state = task.status === 'QUEUED' ? 'CANCELED' : 'CANCELING';
     await client.query("UPDATE tasks SET status=$2,cancel_reason='CANCELED',updated_at=now() WHERE task_id=$1", [taskId, state]);
@@ -471,6 +481,13 @@ export async function rerunTask(db, taskId, userId, input) {
   if (!prompt || prompt.length > 4000) throw problem(400, 'Follow-up prompt must contain 1-4000 characters.');
   return change(db, async client => {
     const task = await ownedTask(client, taskId, userId);
+    if (task.input_request) throw problem(409, 'Answer the pending question before continuing this task.');
+    return queueFollowup(client, task, userId, prompt, input);
+  });
+}
+
+async function queueFollowup(client, task, userId, prompt, input, decision = null) {
+    const taskId = task.task_id;
     if (!terminal.has(task.status)) throw problem(409, 'Only a terminal task can be continued.');
     if ((await client.query("SELECT 1 FROM worker_allocations wa JOIN jobs j ON j.job_id=wa.job_id WHERE j.task_id=$1 AND wa.released_at IS NULL", [taskId])).rowCount) {
       throw problem(409, 'The previous worker execution is still shutting down.');
@@ -480,8 +497,14 @@ export async function rerunTask(db, taskId, userId, input) {
     const revisionNumber = Number((await client.query('SELECT COALESCE(MAX(revision_number),0)+1 AS next FROM task_revisions WHERE task_id=$1', [taskId])).rows[0].next);
     const runId = id('run'), jobId = id('job'), revisionId = id('revision');
     const references = await selectedReferences(client, userId, input.references, revisionNumber);
+    const budgetRevisionId = decision && !decision.answer.grantNewBudget
+      ? priorRun.input?.payload?.budgetRevisionId || priorRun.revision_id : revisionId;
     const payload = { ...(task.payload || {}), followUpPrompt: prompt, parentRunId: priorRun?.run_id || null,
-      parentRevisionId: priorRun?.revision_id || null, revisionId, budgetGrant: { revisionId, authorCallsPerAsset: 3, productionIterations: 10 }, workspacePolicy: 'continue-existing',
+      parentRevisionId: priorRun?.revision_id || null, revisionId,
+      parentBudgetRevisionId: priorRun?.input?.payload?.budgetRevisionId || priorRun?.revision_id || null,
+      ...(decision ? { inputAnswer: decision, budgetRevisionId } : {}),
+      budgetGrant: budgetRevisionId === revisionId ? { revisionId, authorCallsPerAsset: 3, productionIterations: 10 }
+        : priorRun.input?.payload?.budgetGrant || null, workspacePolicy: 'continue-existing',
       references: [...(priorRun?.input?.payload?.references || []), ...references] };
     const revisionInput = { kind: task.kind, objective: task.objective, followUpPrompt: prompt, payload, references };
     const previous = (await client.query('SELECT input FROM task_revisions WHERE task_id=$1 ORDER BY revision_number', [taskId])).rows
@@ -494,15 +517,36 @@ export async function rerunTask(db, taskId, userId, input) {
     await client.query("INSERT INTO task_runs(run_id,task_id,revision_id,status) VALUES($1,$2,$3,'QUEUED')", [runId, taskId, revisionId]);
     await client.query('INSERT INTO jobs(job_id,task_id,run_id,payload,objective) VALUES($1,$2,$3,$4,$5)', [jobId, taskId, runId, payload, objective]);
     await bindReferences(client, references, taskId, revisionId);
-    await client.query("UPDATE tasks SET status='QUEUED',cancel_reason=NULL,result=NULL,deadline_at=now()+interval '24 hours',updated_at=now() WHERE task_id=$1", [taskId]);
+    await client.query("UPDATE tasks SET status='QUEUED',input_request=NULL,cancel_reason=NULL,result=NULL,deadline_at=now()+interval '24 hours',updated_at=now() WHERE task_id=$1", [taskId]);
+    if (decision) await client.query("UPDATE workspaces SET required_capabilities=required_capabilities || '{\"userDecisions\":1}'::jsonb WHERE task_id=$1", [taskId]);
     await event(client, taskId, 'TASK_FOLLOWUP_REQUESTED', { taskId, runId, jobId, prompt });
     return { taskId, runId, jobId, workspaceId: (await client.query('SELECT workspace_id FROM workspaces WHERE task_id=$1', [taskId])).rows[0]?.workspace_id, status: 'QUEUED', references };
+}
+export async function answerTask(db, taskId, userId, input) {
+  return change(db, async client => {
+    const task = await ownedTask(client, taskId, userId);
+    const saved = (await client.query('SELECT * FROM task_input_requests WHERE request_id=$1 AND task_id=$2 FOR UPDATE', [input?.requestId || '', taskId])).rows[0];
+    if (!saved) throw problem(409, 'The question is no longer available. Refresh the task.');
+    const answer = validateDecisionAnswer(saved.request, input), answerHash = decisionHash(answer);
+    if (saved.status === 'ANSWERED') {
+      if (saved.answer_key === input.idempotencyKey && saved.answer_hash === answerHash) return { ...saved.result, duplicate: true };
+      throw problem(409, 'This question has already been answered. Refresh the task.');
+    }
+    if (saved.status !== 'PENDING' || task.input_request?.requestId !== saved.request_id) throw problem(409, 'This question was superseded or canceled. Refresh the task.');
+    const latest = (await client.query('SELECT run_id,revision_id FROM task_runs WHERE task_id=$1 ORDER BY created_at DESC LIMIT 1', [taskId])).rows[0];
+    if (latest?.run_id !== saved.run_id || latest.revision_id !== saved.revision_id) throw problem(409, 'The task revision changed. Refresh the current question.');
+    const decision = { protocol: 1, request: saved.request, answer, answerId: input.idempotencyKey };
+    const result = await queueFollowup(client, task, userId, answer.instruction, {}, decision);
+    await client.query("UPDATE task_input_requests SET status='ANSWERED',answer_key=$2,answer_hash=$3,answer=$4,result=$5,answered_at=now() WHERE request_id=$1", [saved.request_id, input.idempotencyKey, answerHash, answer, result]);
+    await event(client, taskId, 'USER_DECISION_ANSWERED', { requestId: saved.request_id, runId: result.runId, grantNewBudget: answer.grantNewBudget });
+    return result;
   });
 }
 export async function recoverTask(db, taskId, userId, input) {
   if (!/^[a-zA-Z0-9-]{1,100}$/.test(input?.requestId || '')) throw problem(400, 'Recovery requestId required.');
   return change(db, async client => {
     const task = await ownedTask(client, taskId, userId);
+    if (task.input_request) throw problem(409, 'Answer the pending question before recovering this task.');
     const existing = (await client.query("SELECT j.job_id,j.run_id FROM jobs j WHERE j.task_id=$1 AND j.payload->>'recoveryRequestId'=$2", [taskId, input.requestId])).rows[0];
     if (existing) return { taskId, runId: existing.run_id, jobId: existing.job_id, recovered: true };
     if (!terminal.has(task.status) || new Date(task.deadline_at) <= new Date()) throw problem(409, 'Recovery requires a settled task with remaining original time budget. Use Continue for a new revision.');
@@ -523,7 +567,7 @@ export async function registerWorker(db, worker, input) {
     const active = (await client.query('SELECT boot_id FROM worker_allocations WHERE worker_id=$1 AND released_at IS NULL', [worker.worker_id])).rows[0];
     if (active && active.boot_id !== input.bootId) throw problem(409, 'Previous execution requires shutdown verification before a new worker boot.');
     await client.query("UPDATE workers SET boot_id=$2,status='ONLINE',capabilities=$3,last_seen_at=now(),updated_at=now() WHERE worker_id=$1", [worker.worker_id, input.bootId, input.capabilities || {}]);
-    return { registered: true, workerId: worker.worker_id, protocol: 2 };
+    return { registered: true, workerId: worker.worker_id, protocol: 2, capabilities: { userDecisions: 1 } };
   });
 }
 export async function pollWorker(db, worker, input, leaseMs) {
@@ -549,7 +593,7 @@ export async function pollWorker(db, worker, input, leaseMs) {
     await client.query("UPDATE task_runs SET status='RUNNING' WHERE run_id=$1", [job.run_id]);
     await client.query('INSERT INTO worker_allocations(allocation_id,job_id,workspace_id,worker_id,boot_id,write_epoch) VALUES($1,$2,$3,$4,$5,$6)', [allocationId, job.job_id, job.workspace_id, worker.worker_id, input.bootId, workspace.write_epoch]);
     await event(client, job.task_id, 'STEP_STARTED', { workerId: worker.worker_id, jobId: job.job_id, runId: job.run_id });
-    return { job: { protocol: 2, jobId: job.job_id, taskId: job.task_id, runId: job.run_id, workspaceId: job.workspace_id,
+    return { job: { protocol: 2, controllerCapabilities: { userDecisions: 1 }, jobId: job.job_id, taskId: job.task_id, runId: job.run_id, workspaceId: job.workspace_id,
       revisionId: job.revision_id, parentRevisionId: job.payload?.parentRevisionId || null, parentRunId: job.payload?.parentRunId || null,
       inputHash: job.input_hash, budgetGrant: job.payload?.budgetGrant || null,
       allocationId, writeEpoch: workspace.write_epoch, leaseToken, leaseUntil: leaseUntil.toISOString(), deadlineAt: job.deadline_at,
@@ -653,7 +697,10 @@ export async function stepResult(db, worker, input) {
   await reconcile(db);
   return change(db, async client => {
     const job = await matchingJob(client, worker, input);
-    if (job.run_finished_at) return { accepted: job.status === 'COMPLETED', status: job.status, duplicate: true };
+    if (job.run_finished_at) {
+      const pending = (await client.query('SELECT input_request FROM tasks WHERE task_id=$1', [job.task_id])).rows[0]?.input_request;
+      return { accepted: job.status === 'COMPLETED', status: pending?.runId === job.run_id ? 'WAITING_FOR_INPUT' : job.status, duplicate: true };
+    }
     if (input.stopConfirmed !== true) throw problem(409, 'Process shutdown is unconfirmed; allocation remains reserved.');
     let status;
     if (job.cancel_reason) status = job.cancel_reason === 'EXPIRED' ? 'EXPIRED' : job.cancel_reason === 'CANCELED' ? 'CANCELED' : 'FAILED';
@@ -676,11 +723,23 @@ export async function stepResult(db, worker, input) {
     const progress = normalizeProgress(input.progress, job.objective || job.base_objective) || job.progress || null;
     if (progress) progress.status = status === 'COMPLETED' ? 'completed' : status === 'CANCELED' ? 'canceled' : 'failed';
     const recorded = { status: input.status, reason: input.reason || null, artifactIds: input.artifactIds || [], report: input.report || null, stopConfirmed: true };
+    const request = !job.cancel_reason && input.status === 'FAIL' && input.report?.inputRequest;
+    if (request) {
+      validateInputRequest(request);
+      const run = (await client.query('SELECT revision_id FROM task_runs WHERE run_id=$1', [job.run_id])).rows[0];
+      if (request.taskId !== job.task_id || request.runId !== job.run_id || request.revisionId !== run.revision_id) throw problem(409, 'Question belongs to another execution.');
+      const prior = (await client.query('SELECT request FROM task_input_requests WHERE request_id=$1', [request.requestId])).rows[0];
+      if (prior && decisionHash(prior.request) !== decisionHash(request)) throw problem(409, 'Question identity was reused with different evidence.');
+      await client.query("UPDATE task_input_requests SET status='SUPERSEDED' WHERE task_id=$1 AND status='PENDING' AND request_id<>$2", [job.task_id, request.requestId]);
+      await client.query("INSERT INTO task_input_requests(request_id,task_id,revision_id,run_id,request,status) VALUES($1,$2,$3,$4,$5,'PENDING') ON CONFLICT(request_id) DO NOTHING", [request.requestId, job.task_id, request.revisionId, job.run_id, request]);
+      await client.query('UPDATE tasks SET input_request=$2 WHERE task_id=$1', [job.task_id, request]);
+      if (progress) Object.assign(progress, { phase: 'waiting_input', status: 'waiting_input', error: null, step: request.title });
+    }
     await client.query('UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE task_id=$1', [job.task_id, status, recorded]);
     await client.query('UPDATE jobs SET status=$2,result=$3,progress=COALESCE($4,progress),updated_at=now() WHERE job_id=$1', [job.job_id, status, recorded, progress]);
     await client.query('UPDATE task_runs SET status=$2,finished_at=now() WHERE run_id=$1', [job.run_id, status]);
     await client.query('UPDATE worker_allocations SET released_at=now() WHERE job_id=$1', [job.job_id]);
-    await event(client, job.task_id, `TASK_${status}`, { status, reason: input.reason || null });
-    return { accepted: status === 'COMPLETED', status };
+    await event(client, job.task_id, request ? 'USER_DECISION_REQUIRED' : `TASK_${status}`, { status: request ? 'WAITING_FOR_INPUT' : status, reason: input.reason || null });
+    return { accepted: status === 'COMPLETED', status: request ? 'WAITING_FOR_INPUT' : status };
   });
 }

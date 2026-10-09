@@ -35,6 +35,13 @@ the implementation details.
 - Treat service outages and disk exhaustion as operational failures. They must not trigger
   geometry changes, lower visual scores or new production rounds. Preserve the current source
   and wait for the host's bounded recovery policy.
+- When the host advertises user decisions and a real user choice blocks progress, write
+  `plan/user-decision-request.json` with the affected assets, exact current requirement,
+  measured result and evidence paths, and two or three alternatives with consequences.
+  Preserve the checkpoint, complete independent work and return for host review. Do not
+  simulate a user answer, silently relax requirements, or repeat an unchanged rejected
+  generation input. Tool defects and ordinary repairs remain system responsibilities.
+  Controller-owned answers authorize only the displayed amendment; keep all other gates.
 
 ## Operating loop
 

@@ -8,22 +8,25 @@ import { readWorkspaceEpoch } from './workspace-epoch.mjs';
 import { coverageImproved } from './modeling-coverage.mjs';
 
 export async function createProductionIterations({ job, project, policy }) {
+  const budgetRevisionId = job.payload?.budgetRevisionId || job.revisionId;
   const recovery = job.revisionId ? null : await loadModelingRecovery(project, job);
   const identity = recovery?.productionIdentity || hashValue({ taskId: job.taskId, workspaceId: job.workspaceId,
-    ...(job.revisionId ? { revisionId: job.revisionId } : { objective: job.objective }) });
+    ...(budgetRevisionId ? { revisionId: budgetRevisionId } : { objective: job.objective }) });
   const store = contentStore(path.dirname(project));
   const workspace = path.dirname(project), epoch = await readWorkspaceEpoch(workspace);
-  const legacy = epoch?.branches?.find(branch => branch.revisionIds.includes(job.revisionId));
+  const legacy = epoch?.branches?.find(branch => branch.revisionIds.includes(budgetRevisionId));
   const root = legacy ? path.dirname(await localPath(workspace, legacy.path, { existing: true })) : path.join(workspace, 'production-state', identity);
   const file = path.join(root, 'iterations.json');
   let state = await readJson(file, null, 64 * 1024 * 1024);
+  if (job.payload?.inputAnswer && budgetRevisionId !== job.revisionId && !state) throw modelingFailure('INTEGRITY_ERROR', 'The inherited production budget is missing; an answer cannot reset it.');
   if (recovery && !state) throw modelingFailure('INTEGRITY_ERROR', 'Recovered production ledger is missing; consumed budgets cannot restart.');
   if (!state) {
     let best = null;
     if (job.parentRevisionId) {
-      const parent = epoch?.branches?.find(branch => branch.revisionIds.includes(job.parentRevisionId));
+      const parentBudgetRevisionId = job.payload?.parentBudgetRevisionId || job.parentRevisionId;
+      const parent = epoch?.branches?.find(branch => branch.revisionIds.includes(parentBudgetRevisionId));
       const parentFile = parent ? await localPath(workspace, parent.path, { existing: true })
-        : path.join(workspace, 'production-state', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, revisionId: job.parentRevisionId }), 'iterations.json');
+        : path.join(workspace, 'production-state', hashValue({ taskId: job.taskId, workspaceId: job.workspaceId, revisionId: parentBudgetRevisionId }), 'iterations.json');
       const prior = await readJson(parentFile, null, 64 * 1024 * 1024);
       if (prior?.best) {
         await verifyEvidence(prior.best.evidence);

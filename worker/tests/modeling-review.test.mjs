@@ -290,6 +290,11 @@ for (const previousFormat of [false, true]) test('whole iterations preserve the 
   await createModelingPipeline(f.options).prepare({ iteration: 2 });
   assert.equal(f.counts.author, 3);
   assert.equal((await readModelingState(file)).revisionBudgets['revision-budget'].attempts.blender_direct, 3);
+  f.options.job.revisionId = 'answer-with-inherited-budget';
+  f.options.job.payload = { budgetRevisionId: 'revision-budget', inputAnswer: { protocol: 1 } };
+  await createModelingPipeline(f.options).prepare();
+  assert.equal(f.counts.author, 3, 'an answer revision must not refund consumed author calls');
+  delete f.options.job.payload;
   f.options.job.revisionId = 'explicit-new-revision';
   await createModelingPipeline(f.options).prepare();
   assert.equal(f.counts.author, 6);

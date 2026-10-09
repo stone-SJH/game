@@ -78,6 +78,24 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
       const body = { model: 'gpt-image-2', prompt, n: 1,
         size: config.identity.size, quality: 'high', output_format: 'png' };
       if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 32000) throw new Error('Invalid concept generation prompt.');
+      // Content refusals survive new revisions, asset metadata and router settings.
+      // This provider submits text only; reference descriptions are part of prompt.
+      const rejectionFile = path.join(path.dirname(project), 'modeling-state/image-rejections', hashValue({ prompt: prompt.trim() }) + '.json');
+      const rejected = await readJson(rejectionFile);
+      if (rejected) {
+        const original = await localPath(path.dirname(project), rejected.requestStatePath, { existing: true });
+        await verifyEvidence([{ file: original, sha256: rejected.sha256 }]);
+        const record = await readJson(original);
+        if (record.prompt?.trim() !== prompt.trim() || !inputRejectionCodes.has(record.responseEvidence?.code)) throw modelingFailure('INTEGRITY_ERROR', 'Retained input rejection changed.');
+        throw imageServiceError(record, original);
+      }
+      async function retainRejection(record) {
+        if (record.responseEvidence?.httpStatus === 400 && inputRejectionCodes.has(record.responseEvidence.code)) {
+          const requestStatePath = path.relative(path.dirname(project), stateFile);
+          await localPath(path.dirname(project), requestStatePath, { existing: true });
+          await atomicJson(rejectionFile, { requestStatePath, sha256: await hashFile(stateFile) });
+        }
+      }
       const requestHash = hashValue({ body, requirementsHash, router: config.identity });
       let previous = await readJson(stateFile);
       if (previous && previous.requestHash !== requestHash) throw modelingFailure('INTEGRITY_ERROR', 'Image generation input or router changed.');
@@ -87,7 +105,7 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
       }
       // A received retryable HTTP rejection can recover inside this operation.
       // A lost response/timeout has unknown billing status and is never resubmitted.
-      if (previous && !transientHttp(previous.reasonCode)) throw imageServiceError(previous, stateFile);
+      if (previous && !transientHttp(previous.reasonCode)) { await retainRejection(previous); throw imageServiceError(previous, stateFile); }
       let key;
       try { key = await credential(config); }
       catch { return { status: 'unavailable', reasonCode: 'image_router_unavailable' }; }
@@ -137,6 +155,7 @@ export function createModelingImageProvider({ fetchImpl = globalThis.fetch, sett
             retryAfterMs: error.retryAfterMs || 0,
             ...(error.responseEvidence ? { responseEvidence: error.responseEvidence } : {}) };
           await atomicJson(stateFile, failed); previous = failed;
+          await retainRejection(failed);
           throw imageServiceError(failed, stateFile);
         }
       }, { ...recoveryOptions, signal, deadlineAt, onWaiting });

@@ -71,7 +71,7 @@ function submitting(prefix, busy) {
   for (const control of $(`${prefix}-form`).elements) control.disabled = busy;
   $(`${prefix}-dialog`).oncancel = event => { if (busy) event.preventDefault(); };
 }
-function status(value) { return node('span', value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
+function status(value) { return node('span', value === 'WAITING_FOR_INPUT' ? 'WAITING FOR YOUR ANSWER' : value.replaceAll('_', ' '), `status ${value.toLowerCase()}`); }
 function date(value) { return new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
 function timestamp(value) {
   if (!value) return '';
@@ -407,7 +407,7 @@ async function refreshDetail() {
   const summarySignature = `${task.runs?.[0]?.createdAt || ''}|${(task.iterationSummaries || []).map(item => `${item.taskRevision}:${item.iteration}:${item.status}:${item.goal}:${item.summary}:${item.step}:${item.diagnosticMissing}:${item.diagnosticArtifactId || ''}:${item.updatedAt || ''}:${JSON.stringify(item.failureReasons || [])}`).join('|')}`;
   const artifactSignature = `${task.taskRevision || ''}:${JSON.stringify(task.artifactFacets || [])}:${task.artifacts?.[0]?.artifact_id || ''}:${task.artifactsNextCursor || ''}`;
   const completedOutputSignature = `${task.runId || ''}:${displayTask.completedArtifacts?.length || 0}:${displayTask.completedArtifacts?.[0]?.artifact_id || ''}`;
-  if (pane.dataset.taskId === target && pane.dataset.status === task.status) {
+  if (pane.dataset.taskId === target && pane.dataset.status === task.status && pane.dataset.questionId === (task.inputRequest?.requestId || '')) {
     const progress = pane.querySelector('.worker-progress');
     releaseLazyPreviews(progress); progress?.replaceWith(progressPanel(task));
     if (pane.dataset.summarySignature !== summarySignature) pane.querySelector('.iteration-summaries')?.replaceWith(iterationSummaryPanel(task));
@@ -436,6 +436,11 @@ async function refreshDetail() {
     top.append(rerun);
   }
   pane.append(top, node('h2', task.objective));
+  pane.dataset.questionId = task.inputRequest?.requestId || '';
+  if (task.inputRequest) {
+    pane.append(window.renderUserDecision({ task, userId: session.user.userId, api, node, refresh: async () => { await refreshDetail(); await loadTasks(); } }));
+    pane.append(node('p', '已有包和分数是历史结果；当前问题尚未解决，不能视为本次要求已完成。', 'iteration-summary-warning'));
+  }
   const details = node('dl', undefined, 'details');
   for (const [label, value] of [['Worker',task.workerId || 'Waiting for assigned worker'], ['Created',date(task.createdAt)], ['Workspace',task.workspaceId || 'Unassigned'], ['Task revision',task.taskRevision || '1'], ['Run request',task.currentPrompt || 'Initial task'], ['Task',task.taskId]]) {
     const group = node('div'); group.append(node('dt',label),node('dd',value)); details.append(group);

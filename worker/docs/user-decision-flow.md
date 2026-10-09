@@ -1,8 +1,8 @@
 # Production decisions and resumable questions
 
-Status: implementation design. The current web application offers a free-text Continue
-action, not the structured question/answer protocol specified here. This document must
-not be treated as evidence that the web workflow is deployed.
+Status: implemented in worker, controller and web, with API/worker/browser regression
+coverage. Deployment and retained-task readiness must be verified separately using the
+rollout steps below; this document does not claim that a live controller is upgraded.
 
 ## Outcome
 
@@ -144,3 +144,63 @@ Do not claim that a report attachment alone implements the interactive waiting w
   answer validation, resumed progress, and accurate previous/current package labeling.
 - End-to-end acceptance remains required: a passed concept, technical source or question
   resolution alone cannot mark engine integration or the playable task completed.
+
+## Implemented protocol and rollout
+
+The worker persists an immutable question under the task's `decision-state/`, with a
+hashed evidence file under `project/plan/user-decisions/`. The existing durable RESULT
+journal carries `report.inputRequest` to `/v1/worker/step-result`. That transaction saves
+the question, settles the execution and releases its allocation. The public task and run
+status becomes `WAITING_FOR_INPUT`; the legacy internal execution remains settled FAILED.
+It does not remain on a running lease or expire while waiting for an answer.
+
+`POST /v1/tasks/:id/answer` requires the authenticated owner, CSRF token, request/revision/
+plan/input identities, idempotency key, explicit option or complete text, selected existing
+generation reference paths, and `grantNewBudget`. Answer and next revision commit together.
+Repeating an acknowledged answer returns the same revision; a competing/stale answer gets
+409. A plain continuation or unchanged rejected prompt/reference selection gets 422 and
+creates no revision. Cancel preserves question history. Continue/recover cannot bypass a
+pending question. The web card has no default selection, retains account/question-scoped
+drafts in session storage, and downloads the actual input report directly from the stored
+question. It supports retaining/removing existing generation references; attaching a new
+reference file in this card is not implemented.
+
+Before reserving another production attempt the worker verifies retained evidence, reviews
+the answer, and applies modeling amendments through the existing independently reviewed
+revision mechanism. Ambiguity creates a linked successor question. Crash recovery uses
+the activation record and answer receipt, never reapplies an answered amendment or skips
+a later pending question. Service/tool defects without an authored measured source do not
+enter automatic preference classification. Orchestrator proposals require host review.
+
+Answers inherit the original production and asset-author budget identity by default.
+The unchecked budget option explicitly grants a separate revision allowance (3 author calls
+per asset, 10 production iterations); global limits and retained service/provider ledgers
+still apply. Waiting and invalid answers create no author/provider/production calls; the
+bounded input reviews use their own durable review ledger. All historical consumption and
+accepted artifacts remain intact. A revised brief can still be rejected by the provider;
+that produces another question with new evidence, not an automatic retry.
+
+For a deployment from Git:
+
+1. On the controller, run `controller/deploy/deploy-controller.sh --repo <checkout> --ref main
+   --dry-run`, then the same repository script without `--dry-run`. It applies migration
+   `010_user_decisions.sql` and publishes `app/user-decisions.js`. Verify `/healthz` returns
+   `capabilities.userDecisions: 1`. Record the exact controller commit.
+2. Verify the worker is idle with no execution journal; set `runtime/config/autostart.paused`
+   before stopping its idle process. Fast-forward the worktree to the committed target and
+   use `worker/deploy/deploy-worker.ps1 -PrepareOnly`. Never edit the installed process files.
+3. For each affected compatible retained task, use `worker/tools/migrate-workspace.mjs`
+   `plan`, review the returned plan and predecessor epoch, then `stage` and `apply` with that
+   exact `--expect-plan-hash`. Finish with `resume-check`. Preserve legacy incompatible
+   workspaces without claiming them ready; do not reset their pins or consumed budgets.
+4. Remove the pause marker only when the committed release and intended retained tasks are
+   ready. Start `YahahaGame-Worker-Autostart`, run `register-worker-autostart.ps1 -CheckOnly`,
+   and inspect a fresh `monitor-worker.ps1 -Once -Json`: one worker, correct commit and
+   capability, fresh heartbeat. A logged-in desktop is still required for Unreal workflows.
+5. Continue the existing task from the web. Historical failures are not fabricated into
+   new questions; the next worker assessment publishes grounded questions where necessary.
+
+Controller poll responses advertise support per job; new workers preserve the legacy
+actionable report with old controllers. Answer revisions require `userDecisions: 1` on the
+worker, so an old worker cannot claim them. Question/result replay is idempotent even if
+the acknowledgement was lost. Code verification alone is not deployment acceptance.

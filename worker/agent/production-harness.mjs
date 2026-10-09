@@ -23,6 +23,7 @@ import { failureKind } from './service-recovery.mjs';
 import { promptText, issueSummary, modelingHandoffSummary, productionFeedbackSummary, currentProductionResult, productionStall } from './production-prompt.mjs';
 import { readSceneCoverage, coverageInstructions, coverageStalled } from './modeling-coverage.mjs';
 import { generationInputFeedback } from './modeling-input-feedback.mjs';
+import { createUserDecisions, inputRequired } from './modeling-user-decisions.mjs';
 
 const STAGES = [
   'intake-and-contract', 'project-bootstrap', 'art-direction-and-asset-plan',
@@ -403,8 +404,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
   const invocation = codexInvocation([]);
   const review = createIterationMonitor({ job, project, output, signal, step, invocation, reportProgress, onReview: onIterationReview });
   const modelingEnabled = process.env.MODELING_ROUTING_ENABLED !== '0';
-  const modelingPipeline = modelingEnabled ? createModelingPipeline({ job, project, output, signal, step, invocation,
-    reportProgress, onReport: onModelingReport }) : null;
+  const decisionPipeline = createModelingPipeline({ job, project, output, signal, step, invocation,
+    reportProgress, onReport: onModelingReport });
+  const modelingPipeline = modelingEnabled ? decisionPipeline : null;
+  const decisions = createUserDecisions({ job, project, output, review: decisionPipeline.reviewDecision,
+    reconcile: modelingPipeline ? () => modelingPipeline.reconcileUserInput() : null });
+  await decisions.beforeWork();
   let modelingResults = null;
   const retainedFeedback = await readJson(path.join(project, 'plan/iteration-feedback.json'));
   let feedback = retainedFeedback?.taskId === job.taskId ? retainedFeedback : null;
@@ -500,6 +505,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       `This is production iteration ${iteration}, execution attempt ${attempt}; inspect existing files and improve the current result. Finish a playable round even when some stage quality targets remain unmet.`,
       ...(completed ? [`Best retained iteration: ${completed.delivery.iteration}, score ${completed.delivery.score}/100, checkpoint ${completed.delivery.snapshotManifest || completed.delivery.retainedProject}. The host retains immutable bytes outside the working project; never copy the whole project for a production iteration.`] : []),
       `Task objective: ${promptText(job.objective, 16000)}`,
+      ...(decisions.enabled ? ['If progress needs a user decision changing approved appearance, dimensions, references or scope, write plan/user-decision-request.json with the concrete conflict, measured evidence paths, affected assetIds, and 2-3 alternatives. Preserve requirements, finish independent work and return. The host reviews the request. Tool failures, validator defects and ordinary repairs remain your responsibility.'] : []),
       coverageInstructions(coverageBefore),
       'Read the COMPLETE objective and references in plan/production-context.json before editing. The latest follow-up takes precedence. This prompt is a bounded summary; linked records preserve all requirements.',
       `Work only inside this task workspace: ${project}`,
@@ -541,6 +547,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
     const sessionOutput = path.join(output, `codex-production-session-${attempt}.txt`);
     let codexTemp;
     let inputFeedback;
+    let inputRequest;
     let stage = 'production-orchestrator';
     try {
       if (modelingPipeline) {
@@ -565,6 +572,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
           diagnostic: { kind: 'GENERATION_INPUT_REQUIRED', report: path.basename(file) } });
         try { await onIterationReview({ file, record: inputFeedback }); }
         catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `input-feedback-publication-${iteration}.json`), stageIssue('input-feedback-publication', error)); }
+        inputRequest = await decisions.fromGeneration(inputFeedback);
       }
       const engineeringPlan = modelingPipeline ? await observe('engineering-handoff', () => modelingPipeline.engineeringPlan()) : null;
       const engineeringHandoff = engineeringPlan ? [
@@ -610,6 +618,15 @@ export async function runProductionHarness({ job, project, output, signal, step,
       });
       if (!orchestration) throw orchestrationError || Object.assign(new Error('Production did not complete; existing packages remain retained, but no new revision delivery was produced.'),
         { kind: 'PRODUCTION_NOT_EXECUTED', productionIncomplete: true });
+      if (decisions.enabled) {
+        const proposedFile = path.join(project, 'plan/user-decision-request.json');
+        const proposed = await readJson(proposedFile, null, 64000);
+        if (proposed) {
+          const request = await decisions.reviewBlocker(modelingResults, proposed);
+          await fs.rename(proposedFile, proposedFile.replace('.json', `-reviewed-${job.revisionId}-${attempt}.json`));
+          if (request) throw inputRequired(request);
+        }
+      }
       if (hasHardFailureMarker(`${orchestration?.stdout}\n${orchestration?.stderr}`) || await isFile(path.join(project, 'acceptance', 'hard-failure.json'))) {
         await observe('production-blocker', async () => { throw new Error('Production agent reported a blocker; preserve its evidence and complete assessment of this round.'); });
       }
@@ -749,9 +766,12 @@ export async function runProductionHarness({ job, project, output, signal, step,
         threshold: qualitySettings.scoreThreshold, qualityAccepted, issues, quality, modeling: modelingResults, playable, productionCompleted: true, coverage });
       try { await onIterationReview({ file: delivered.file, record: delivered.record }); }
       catch (error) { throwIfExecutionFenced(error, signal); await writeJson(path.join(output, `iteration-${iteration}-publication-gap.json`), stageIssue('iteration-publication', error)); }
+      if (inputRequest) throw inputRequired(inputRequest);
       if (inputFeedback) throw Object.assign(new Error(inputFeedback.reason), { kind: 'GENERATION_INPUT_REQUIRED', productionIncomplete: true,
         inputFeedbackFile: path.join(output, `generation-input-required-${iteration}.json`) });
       if (playable && score >= qualitySettings.scoreThreshold && !issues.length) return delivered.retained;
+      const decisionRequest = await decisions.reviewBlocker(modelingResults);
+      if (decisionRequest) throw inputRequired(decisionRequest);
       if (coverageStalled(iterations.rounds)) throw Object.assign(new Error('Scene coverage has not improved in three completed iterations. Retained all checkpoints; repair the unresolved asset/tool chain before spending another iteration.'),
         { kind: 'COVERAGE_STALLED', productionIncomplete: true });
       const stalled = productionStall(iterations.rounds, delivered.record);
@@ -776,8 +796,10 @@ export async function runProductionHarness({ job, project, output, signal, step,
         stage, exitCode: error.result?.exitCode, timedOut: error.result?.timedOut,
         acceptanceFailure: error.acceptanceFailure, qualityFailure: error.qualityFailure,
       });
-      if (error.productionIncomplete && (!inputFeedback || error.kind === 'GENERATION_INPUT_REQUIRED') || ['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error))) throw error;
       throwIfExecutionFenced(error, signal);
+      if (error.kind === 'USER_INPUT_REQUIRED') throw error;
+      if (inputRequest) throw inputRequired(inputRequest);
+      if (error.productionIncomplete && (!inputFeedback || error.kind === 'GENERATION_INPUT_REQUIRED') || ['SERVICE_TRANSIENT', 'SERVICE_CONFIGURATION', 'RESOURCE_EXHAUSTED'].includes(failureKind(error))) throw error;
       if (inputFeedback) throw Object.assign(new Error(inputFeedback.reason + ' Current round also stopped at ' + stage + ': ' + error.message),
         { kind: 'GENERATION_INPUT_REQUIRED', productionIncomplete: true, inputFeedbackFile: path.join(output, `generation-input-required-${iteration}.json`) });
       feedback = await review({ attempt, stage, error, retryAllowed: !(maxAttempts > 0 && attempt >= maxAttempts) });

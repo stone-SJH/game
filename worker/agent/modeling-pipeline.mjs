@@ -86,6 +86,13 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     return runReview({ name, schema, prompt, images, ...options });
   }
 
+  async function verifyDecisionToolchain() {
+    await execution.assertSettled();
+    await pinToolchain(path.join(taskState, 'execution-policy'), 'runtime', {
+      policy, runtime: await modelingRuntimeIdentity(invocation, project), harnessHashes: await modelingToolHashes(),
+    });
+  }
+
   async function plan() {
     const requestFile = await localPath(project, 'plan/modeling-request.json');
     let current = await readJson(taskPlanFile) || await readJson(planFile);
@@ -605,9 +612,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     }
     const decisionMirror = await localPath(project, `plan/modeling/${spec.assetId}/${short}/decision.json`);
     state.rounds ||= {};
-    const legacyRevision = usesLegacyModelingBudget(await readWorkspaceEpoch(path.dirname(project)), job.revisionId);
+    const budgetRevisionId = job.payload?.budgetRevisionId || job.revisionId;
+    const legacyRevision = usesLegacyModelingBudget(await readWorkspaceEpoch(path.dirname(project)), budgetRevisionId);
     const revisionBudget = job.revisionId && !legacyRevision;
-    const priorRevisionRound = revisionBudget ? state.rounds[job.revisionId] : null;
+    const priorRevisionRound = revisionBudget ? state.rounds[budgetRevisionId] : null;
     if (priorRevisionRound) priorRevisionRound.iteration ||= state.productionIteration;
     // Generation/polling checkpoints belong to one whole iteration; author
     // allowances belong to the controller revision and cannot reset on retry.
@@ -616,9 +624,9 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       : { attempts: {}, iteration: productionIteration, revisionId: job.revisionId, startedAt: new Date().toISOString() };
     const round = state.rounds[productionIteration];
     state.revisionBudgets ||= {};
-    if (revisionBudget) state.revisionBudgets[job.revisionId] ||= { attempts: { ...priorRevisionRound?.attempts } };
-    const authorAttempts = revisionBudget ? state.revisionBudgets[job.revisionId].attempts : round.attempts;
-    const otherAttempts = revisionBudget ? await otherRevisionAttempts(stateRoot, stateFile, spec.assetId, job.revisionId) : {};
+    if (revisionBudget) state.revisionBudgets[budgetRevisionId] ||= { attempts: { ...priorRevisionRound?.attempts } };
+    const authorAttempts = revisionBudget ? state.revisionBudgets[budgetRevisionId].attempts : round.attempts;
+    const otherAttempts = revisionBudget ? await otherRevisionAttempts(stateRoot, stateFile, spec.assetId, budgetRevisionId) : {};
     const consumedAttempts = route => {
       const totals = Object.fromEntries([...new Set([...Object.keys(authorAttempts), ...Object.keys(otherAttempts)])]
         .map(key => [key, (authorAttempts[key] || 0) + (otherAttempts[key] || 0)]));
@@ -1073,6 +1081,15 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
   }
 
   return {
+    async reviewDecision(...args) {
+      await verifyDecisionToolchain();
+      return reviewer(...args);
+    },
+    async reconcileUserInput() {
+      await verifyDecisionToolchain();
+      const current = await readJson(taskPlanFile);
+      return reconcileUserModelingRevision({ current, job, project, taskState, review: reviewer, timeoutMs: policy.intakeMs });
+    },
     async prepare({ iteration = 1 } = {}) {
       if (!Number.isSafeInteger(iteration) || iteration < 1) throw new Error('Invalid production iteration.');
       const nextIteration = await modelingIteration(path.dirname(project), job, iteration);

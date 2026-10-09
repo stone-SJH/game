@@ -345,7 +345,7 @@ async function executeOwnedJob(job, ctx) {
     return result;
   }
   const unreal = process.env.UNREAL_CMD || 'D:\\UE\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe';
-  let failure;
+  let failure, inputRequest;
   let production;
   try {
     await publish({ phase: 'preparing', step: 'Preparing reference files' });
@@ -432,12 +432,19 @@ async function executeOwnedJob(job, ctx) {
   } catch (error) {
     if (signal.aborted || error.stopConfirmed === false) throw error;
     failure = error.upstreamAI?.message || error.message;
-    await publish({ phase: 'failed', status: 'failed', goal: job.objective, error: failure, diagnostic: error.upstreamAI || null });
+    inputRequest = error.inputRequest || null;
+    if (inputRequest) {
+      const questionFile = path.join(output, 'user-input-required.json');
+      await atomicJson(questionFile, inputRequest);
+      if (publisher) artifactIds.push(await uploadFile('user-input-required.json', questionFile, 'application/json', { required: true }));
+    }
+    await publish({ phase: inputRequest ? 'waiting_input' : 'failed', status: inputRequest ? 'waiting_input' : 'failed', goal: job.objective,
+      error: inputRequest ? null : failure, step: inputRequest?.title, diagnostic: error.upstreamAI || null });
   } finally {
     clearInterval(snapshotTimer);
     await publishing;
   }
-  const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure,
+  const report = { protocol: 2, production: true, taskId: job.taskId, runId: job.runId, logs, passed: !failure, failure, ...(inputRequest ? { inputRequest } : {}),
     deliverables: production ? Object.fromEntries(Object.entries(production.files).map(([role, file]) => [role, path.relative(project, file)])) : null,
     playablePackages, iterationReviews, publication: publisher?.summary(), qualityAccepted: production?.qualityAccepted ?? false, delivery: production?.delivery || null };
   const reportName = 'production-report.json';
@@ -449,10 +456,10 @@ async function executeOwnedJob(job, ctx) {
       onPending: publication => publish({ phase: 'publishing', status: 'running', publication,
         step: 'Production result retained; retrying pending artifact publication' }) });
   }
-  await publish({ phase: failure ? 'failed' : 'completed', status: failure ? 'failed' : 'completed', goal: job.objective,
+  await publish({ phase: inputRequest ? 'waiting_input' : failure ? 'failed' : 'completed', status: inputRequest ? 'waiting_input' : failure ? 'failed' : 'completed', goal: job.objective,
     ...(production?.delivery ? { step: `${production.delivery.playable === false ? 'Retained incomplete' : 'Delivered'} iteration ${production.delivery.iteration}: ${production.delivery.score}/100 (target ${production.delivery.threshold})`, publication: publisher?.summary() } : {}) });
   // Full tool output lives in the streamed report artifact, not the bounded control request.
-  const summary = { protocol: 2, production: true, passed: report.passed, failure, deliverables: report.deliverables,
+  const summary = { protocol: 2, production: true, passed: report.passed, failure, ...(inputRequest ? { inputRequest } : {}), deliverables: report.deliverables,
     qualityAccepted: report.qualityAccepted, publication: publisher?.summary(), delivery: report.delivery ? {
       iteration: report.delivery.iteration, status: report.delivery.status, score: report.delivery.score,
       threshold: report.delivery.threshold, qualityAccepted: report.delivery.qualityAccepted,
@@ -501,7 +508,7 @@ export async function runAgent({ control, workerId, token, root, signal, once = 
     }
   }
   const identity = job => ({ jobId: job.jobId, taskId: job.taskId, leaseToken: job.leaseToken });
-  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, workspaceIteration: 2, artifactContent: 1, productionHarness: 1, telemetry: 1, referenceFiles: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
+  await post('/v1/worker/register', { protocol: 2, capabilities: { platform: process.platform, node: process.version, workspaceIteration: 2, userDecisions: 1, artifactContent: 1, productionHarness: 1, telemetry: 1, referenceFiles: 1, requiredOutputs: ['uproject', 'scene-preview', 'packaged-exe', 'acceptance-report'] } });
   if (prior) await sendResult(prior.job, prior.result);
   console.log(`worker ${workerId} registered (protocol 2)`);
   while (!signal?.aborted) {

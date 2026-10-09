@@ -105,6 +105,9 @@ for (const phase of ['submission', 'polling']) test('Tripo content refusal is sc
   assert.doesNotMatch(oldBytes, /tsk_test_credential/);
   const repeated = await provider.generate({ ...args, stateFile: path.join(f.root, 'metadata-only.json'), requirementsHash: 'new-nonvisual-metadata' });
   assert.equal(repeated.cachedRejection, true); assert.equal(posts, 1);
+  const renamed = await provider.generate({ ...args, assetId: 'renamed-asset', stateFile: path.join(f.root, 'renamed.json'),
+    rejectionDirectory: path.join(f.root, 'another-rejection-directory'), requirementsHash: 'different-metadata' });
+  assert.equal(renamed.cachedRejection, true); assert.equal(posts, 1);
   assert.equal((await readJson(args.ledgerFile)).disabled, false);
   const other = await provider.generate({ ...args, assetId: 'other-prop', prompt: 'A wooden box', stateFile: path.join(f.root, 'other.json'), directory: 'art/other' });
   assert.equal(other.status, 'ready');
