@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { atomicJson, hashValue, localPath, readJson } from './modeling-io.mjs';
 import { modelingFailure, verifyEvidence } from './modeling-execution.mjs';
+import { modelingFindings } from './modeling-findings.mjs';
 
 const INDEX_LIMIT = 2 * 1024 * 1024;
 const LEGACY_LIMIT = 64 * 1024 * 1024;
@@ -59,5 +60,6 @@ export async function writeModelingState(file, state) {
 // payloads and original validation reports. Snapshot the array, never alias it.
 export function modelingFailureSummary(failures = [], stateFile) {
   return failures.map(({ feedback, ...failure }) => ({ ...failure,
-    ...(feedback === undefined ? {} : { feedbackEvidence: { stateFile, retained: true } }) }));
+    ...(feedback === undefined ? {} : { findings: modelingFindings(feedback),
+      feedbackEvidence: { stateFile, reportFile: feedback?.reportFile, retained: true } }) }));
 }

@@ -161,3 +161,37 @@ test('a generic continuation with no asset change does not alter inputs or archi
   assert.deepEqual(result.current, current); assert.equal(calls, 1);
   assert.equal(await fs.readFile(pending, 'utf8'), before);
 });
+
+test('explicit dimension amendments preserve other contracts and atomically resume engineering projections', async t => {
+  const f = await fixture(t);
+  f.current = structuredClone(current);
+  f.current.assets[0].contract.dimensions = { meters: [1.4, .6, 1.75], toleranceMeters: .01 };
+  const before = f.current.assets[0].contract.dimensions;
+  const instruction = 'For player, change only the depth target to 0.32 meters, keeping its 0.01 meter tolerance and other dimensions.';
+  const p = { reason: 'User approves natural depth', changes: [{ ...structuredClone(proposal.changes[0]),
+    instructionQuote: instruction, requirements: [...original.requirements], supersededRequirements: [],
+    dimensionAmendment: { instructionQuote: instruction, before, after: { ...before, meters: [1.4, .32, 1.75] } } }] };
+  const engineering = { assets: f.current.assets.map(a => ({ assetId: a.assetId, contract: a.contract, designDecisions: ['Retained decision'] })) };
+  await atomicJson(path.join(f.taskState, 'plan.json'), f.current);
+  await atomicJson(path.join(f.taskState, 'engineering-plan.json'), engineering);
+  await atomicJson(path.join(f.project, 'plan/engineering-plan.json'), engineering);
+  let calls = 0;
+  const args = { ...f, job: { revisionId: 'dimension-revision', payload: { followUpPrompt: instruction } },
+    review: async (name, schema, prompt, images, options) => { calls++; const value = name === 'modeling-user-revision' ? p : { approved: true, reason: 'Explicit depth change only.' };
+      await options.validate?.(value); return value; } };
+  const result = await reconcileUserModelingRevision(args);
+  const after = result.current.assets[0].contract;
+  assert.deepEqual(after.dimensions.meters, [1.4, .32, 1.75]);
+  assert.deepEqual({ ...after, dimensions: before }, f.current.assets[0].contract);
+  assert.deepEqual(result.current.assets[1], f.current.assets[1]);
+  const record = await readJson(result.recordFile);
+  assert.deepEqual(record.engineering.before, engineering);
+  assert.deepEqual((await readJson(path.join(f.project, 'plan/engineering-plan.json'))).assets[0].contract, after);
+  // Simulate interruption between activation of the state and visible engineering copies.
+  await atomicJson(path.join(f.project, 'plan/engineering-plan.json'), engineering);
+  await reconcileUserModelingRevision(args); assert.equal(calls, 2);
+  assert.deepEqual((await readJson(path.join(f.project, 'plan/engineering-plan.json'))).assets[0].contract, after);
+  const stale = structuredClone(p); stale.changes[0].dimensionAmendment.before.meters[1] = .7;
+  assert.throws(() => applyUserAssetChanges(f.current, stale, instruction), /match the current dimensions/);
+  assert.throws(() => applyUserAssetChanges(f.current, p, 'Continue.'), /cite/);
+});

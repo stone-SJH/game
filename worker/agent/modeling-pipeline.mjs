@@ -29,8 +29,10 @@ import { workingSource } from './modeling-working-source.mjs';
 import { failureKind } from './service-recovery.mjs';
 import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
 import { reconcileUserModelingRevision } from './modeling-user-revision.mjs';
+import { retainedDimensionSource } from './modeling-dimension-source.mjs';
 import { assertGenerationPrompt } from './modeling-generation-input.mjs';
 import { retireCanceledAuthor } from './modeling-maintenance.mjs';
+import { prepareTraversalPlan } from './modeling-traversal-plan.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
 export function createModelingPipeline({ job, project, output, signal, step, invocation, reportProgress = async () => {}, onReport = async () => {},
@@ -395,6 +397,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
         context.phase === 'blockout' ? 'This call establishes rough proportions and essential parts. Save its three stage artifacts and return; the final stage completes materials, runtime preparation, exports and quality checks.' : 'Meet every original requirement. Do not substitute a default cube or silently reduce fidelity.',
       `Previous repair findings: ${JSON.stringify(feedback || null)}`,
       'The host maintains art/working/<assetId>/source.blend as the editable entry. Continue the supplied current source for local repairs. Set bpy.context.preferences.filepaths.save_version=0; the host owns recoverable checkpoints, so do not create .blend1 backups or extra project copies.',
+      'When frozen engineering assigns traversal paths to different assembly poses, declare traversalStateRequest in asset-manifest.json. Parent each moving render mesh and its UCX collision to the same named helper at the frozen pivot; keep fixed support collision outside that helper. The host independently derives and reviews pose bindings, then measures actual source geometry. Author fixture claims are supplemental only. Engine pose/component verification and dynamic gameplay remain required; a static imported combined mesh does not prove articulated traversal.',
       ...(previousAttemptDirectory ? [`Previous attempt: ${previousAttemptDirectory}. If its source is usable, copy/open it and repair it; write all new outputs to this attempt directory.`] : []),
       ...(context.phase === 'blockout' ? [] : ['Write build-report.json with smallEditsOnly (true only for actual local edits), editsApplied and limitations. Report actual work; this report does not authorize acceptance.']),
       ...(context.phase === 'final' ? [`Place any required joint/material closeups or assembly/LOD evidence directly under ${directory}/evidence/ (at most 12 PNG/JPEG/WebP images; use contact sheets). Explain their source and limitations in self-check.json. These are author-supplied supplements, not independent host acceptance.`,
@@ -438,14 +441,18 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     await fs.mkdir(evidence, { recursive: true });
     const specFile = path.join(output, `modeling-spec-${attemptId}.json`);
     await atomicJson(specFile, spec);
+    const traversalPlanFile = await prepareTraversalPlan({ spec, project, directory, output,
+      engineering: engineeringContext?.assets?.find(row => row.assetId === spec.assetId), review: reviewer });
+    const traversalPlanHash = traversalPlanFile ? await hashFile(traversalPlanFile) : null;
     const technical = context.technical || await execution.run({ key: `technical:${attemptId}`, stage: 'TECHNICAL', identity: { assetId: spec.assetId, attemptId },
-      input: { spec }, evidence: context.artifactEvidence, maxCalls: policy.technicalCalls, timeoutMs: policy.technicalMs, retry: () => true },
+      input: { spec, ...(traversalPlanHash ? { traversalPlanHash } : {}) }, evidence: [...(context.artifactEvidence || []), ...await fileEvidence(traversalPlanFile ? [traversalPlanFile] : [])], maxCalls: policy.technicalCalls, timeoutMs: policy.technicalMs, retry: () => true },
     async ({ callId, timeoutMs }) => {
       const relative = `${evidenceDirectory}/${callId}`, target = await localPath(project, relative);
       await fs.mkdir(target, { recursive: true });
       const geometryFile = path.join(target, 'geometry-report.json');
       await step(`modeling-geometry-${attemptId}-${callId}`, blenderExecutable(), ['--background', '--factory-startup', '--disable-autoexec', '--python-exit-code', '1',
-        '--python', path.join(repositoryRoot, 'worker', 'tools', 'modeling-asset-check.py'), '--', '--directory', root, '--spec', specFile, '--report', geometryFile, '--workspace', project],
+        '--python', path.join(repositoryRoot, 'worker', 'tools', 'modeling-asset-check.py'), '--', '--directory', root, '--spec', specFile, '--report', geometryFile, '--workspace', project,
+        ...(traversalPlanFile ? ['--traversal-plan', traversalPlanFile] : [])],
       timeoutMs, project, undefined, { env: agentEnvironment() });
       const geometry = await readJson(geometryFile, null, 32 * 1024 * 1024);
       if (!geometry || geometry.assetId !== spec.assetId || typeof geometry.passed !== 'boolean') throw modelingFailure('TECHNICAL_RUNNER_ERROR', 'Missing or invalid technical report.');
@@ -461,7 +468,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     });
     await verifyEvidence(technical.evidence);
     const { geometry, previews } = technical;
-    if (!geometry.passed) return { passed: false, kind: 'TECHNICAL_GAP', smallEditsOnly: true, feedback: geometry };
+    if (!geometry.passed) return { passed: false, kind: 'TECHNICAL_GAP', smallEditsOnly: true,
+      feedback: { ...geometry, reportFile: technical.geometryFile } };
     await context.saveTechnical?.(technical);
     const supplemental = await authorEvidence(project, directory);
     const labels = [...spec.referenceImages, ...(context.sourcePreviews || []), ...previews, ...supplemental.images];
@@ -581,10 +589,18 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     }
     let candidates;
     if (!state) {
+      const retained = sourcePolicy.external3DAllowed ? await retainedDimensionSource({ spec, stateRoot, taskState, project, revisionId: job.revisionId }) : null;
       candidates = await candidatesFor(spec);
-      const decision = await assess(spec, candidates, { ...availability, enabled: availability.enabled && !providerDisabledReason });
+      const decision = retained ? { route: 'image_tripo_blender', reason: 'Reuse verified source for the approved dimension amendment; rerun all acceptance gates.', editPlan: [] }
+        : await assess(spec, candidates, { ...availability, enabled: availability.enabled && !providerDisabledReason });
       state = { protocol: 2, requirementsHash, spec, decision, originalRoute: decision.route, route: decision.route, attempts: {}, failures: [], providerAttempted: false,
         capabilityHash: hashValue(capabilities), candidateHashes: candidates.map(source => source.sha256), rejectedSources: [] };
+      if (retained) {
+        state.retainedDimensionSource = retained;
+        state.previousAttemptDirectory = retained.directory;
+        state.rounds = { [productionIteration]: { attempts: {}, iteration: productionIteration, revisionId: job.revisionId,
+          startedAt: new Date().toISOString(), concept: retained.generation.concept, generatedBase: retained.generation.base } };
+      }
       await writeModelingState(stateFile, state);
     }
     const decisionMirror = await localPath(project, `plan/modeling/${spec.assetId}/${short}/decision.json`);
@@ -664,6 +680,10 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (retainedFinal) await recoverFinal(retainedFinal);
     await report({ ...state, taskId: job.taskId, runId: job.runId, workspaceId: job.workspaceId }, decisionMirror);
     let sourceFile = state.pending?.sourceFile || (state.bestCandidate && !['tripo_then_blender', 'image_tripo_blender'].includes(state.route) ? await workingSource(project, state.bestCandidate) : null);
+    if (!sourceFile && state.retainedDimensionSource && state.route === 'image_tripo_blender') {
+      await verifyEvidence([{ file: await localPath(project, state.retainedDimensionSource.sourcePath, { existing: true }), sha256: state.retainedDimensionSource.sourceHash }]);
+      sourceFile = state.retainedDimensionSource.sourcePath;
+    }
     if (state.route === 'image_tripo_blender') {
       // Resume paid generation and refine the best retained source in later rounds.
       const retained = state.bestCandidate;

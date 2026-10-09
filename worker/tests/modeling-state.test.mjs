@@ -47,3 +47,14 @@ test('handoff history is a bounded snapshot while original feedback remains inta
   assert.equal(summary.length, 1); assert.ok(JSON.stringify(summary).length < 300);
   assert.equal(failures[0].feedback.geometry.length, 2200000);
 });
+
+test('technical root causes survive handoff alongside their retained evidence', () => {
+  const feedback = { reportFile: 'evidence/geometry.json', source: { gates: [
+    { id: 'dimensions', status: 'GAP', expected: [1, .6, 2], actual: [1, .32, 2], tolerance: .01 },
+    { id: 'triangles', status: 'PASS', actual: 123 },
+  ] } };
+  const [summary] = modelingFailureSummary([{ kind: 'TECHNICAL_GAP', feedback }], 'state.json');
+  assert.equal(summary.findings.length, 1); assert.deepEqual(summary.findings[0].actual, [1, .32, 2]);
+  assert.equal(summary.feedbackEvidence.reportFile, 'evidence/geometry.json');
+  assert.equal(feedback.source.gates.length, 2);
+});

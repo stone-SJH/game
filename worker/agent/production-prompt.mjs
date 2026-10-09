@@ -8,15 +8,17 @@ export function promptText(value, limit = 1200) {
 export function issueSummary(issue = {}) {
   return { stage: issue.stage, status: issue.status, kind: issue.kind,
     reason: promptText(issue.reason || issue.message, 600),
+    ...(issue.findings?.length ? { findings: issue.findings.slice(0, 12) } : {}),
+    ...(issue.consumed !== undefined ? { consumed: issue.consumed, limit: issue.limit } : {}),
     ...(issue.requiresInputChange ? { requiresInputChange: true, responseEvidence: issue.responseEvidence || issue.inputReview?.response,
       inputIdentity: issue.inputReview?.inputIdentity, inputReport: 'generation-input-required-<iteration>.json' } : {}),
-    evidenceFile: issue.evidenceFile || issue.reportFile || issue.executionFile };
+    evidenceFile: issue.evidenceFile || issue.reportFile || issue.executionFile || issue.feedbackEvidence?.reportFile || issue.feedbackEvidence?.stateFile };
 }
 
 export function productionStall(rounds, record) {
   if (!record.packageDigest || rounds.length < 3 || !rounds.slice(-3).every(row => row.score === record.score && row.packageDigest === record.packageDigest)) return null;
   const blocked = (record.modeling?.assets || []).filter(asset => asset.usable === false)
-    .map(asset => ({ assetId: asset.assetId, issues: (asset.quality?.gaps || []).slice(-1).map(issueSummary) }));
+    .map(asset => ({ assetId: asset.assetId, issues: (asset.quality?.gaps || []).slice(-3).map(issueSummary) }));
   return { kind: 'PRODUCTION_STALLED', productionIncomplete: true,
     reason: 'Three completed iterations retained the same package and score without satisfying the current revision. Repair the recorded blockers before continuing; this is not an exhausted iteration budget.',
     blockedAssets: blocked, packageDigest: record.packageDigest };

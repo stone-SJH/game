@@ -43,7 +43,7 @@ export function composeConceptPrompt(spec, visualBrief, repair = '') {
     'Create a high quality production concept for this single 3D asset: ' + input.prompt,
     visualBrief && visualBrief !== input.prompt ? 'Visible details from the designated generation references: ' + visualBrief : '',
     'Appearance requirements: ' + JSON.stringify(input.requirements),
-    'Show the entire subject with all extremities, a clear front three-quarter view, neutral studio light, plain light background, visible surface detail and separated limbs.',
+    'Show the entire subject with all extremities, neutral studio light, plain light background, visible surface detail and separated limbs. Honor the view explicitly requested in the visual brief or current correction, including an underside or rear view; otherwise use a clear front three-quarter view.',
     spec.requireRig ? 'Use a neutral relaxed A-pose for humanoids, or a natural standing pose for animals; preserve anatomy and visible joints for later rigging.' : '',
     'Preserve the current requested design and style. No text, labels, sheet layout, multiple views, unrelated props, crop, ground pedestal or baked dramatic shadows.',
     repair ? 'Correct these independently observed defects from the preceding draft: ' + repair : '',

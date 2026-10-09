@@ -108,6 +108,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory')
     parser.add_argument('--spec')
+    parser.add_argument('--traversal-plan')
     parser.add_argument('--candidate')
     parser.add_argument('--report', required=True)
     parser.add_argument('--workspace')
@@ -129,7 +130,14 @@ def main():
         from modeling_reference import compare
         manifest = json.loads((directory / 'asset-manifest.json').read_text(encoding='utf-8-sig'))
         load_scene(directory / 'source.blend')
-        source = check_scene(spec, manifest)
+        traversal_plan = None
+        if options.traversal_plan:
+            traversal_plan = json.loads(Path(options.traversal_plan).read_text(encoding='utf-8-sig'))
+            if traversal_plan.get('input', {}).get('sourceHash') != sha256(directory / 'source.blend'):
+                raise ValueError('Traversal pose plan does not identify the source being measured')
+            if traversal_plan.get('input', {}).get('manifestHash') != sha256(directory / 'asset-manifest.json'):
+                raise ValueError('Traversal pose plan does not identify the manifest being measured')
+        source = check_scene(spec, manifest, traversal_plan=traversal_plan)
         load_scene(directory / 'model.glb')
         exported = check_scene(spec, manifest, exported=True)
         view_names = ['front','side','back','top','perspective'] + (['lower-oblique'] if spec['contract']['assetClass'] == 'organic-static' else []) + (['other-side','bottom'] if spec['contract']['asymmetric'] else [])

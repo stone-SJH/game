@@ -124,6 +124,8 @@ def check_traversal(world,mesh,components,traversal,dcc):
     try:
         if not components or not dcc or dcc.get('status')!='PASS':
             raise ValueError('Missing successful DCC traversal evidence or map component')
+        if dcc.get('states'):
+            raise ValueError('State-specific source traversal needs matching engine component poses; a static map sweep cannot certify all assembly states')
         u.AutomationLibrary.finish_loading_before_screenshot()
         mappings=alignments(dcc,import_hulls(mesh))
         actor_system=u.get_editor_subsystem(u.EditorActorSubsystem)

@@ -5,7 +5,7 @@ from modeling_scene import bounds_of, dimensions, mesh_metrics, mesh_objects
 from modeling_traversal import check_traversal
 from modeling_precision import measurement
 
-VERSION = '2.2.0'
+VERSION = '2.3.0'
 
 
 def animation_samples(names, objects, render=None):
@@ -49,7 +49,7 @@ def animation_samples(names, objects, render=None):
     return rows
 
 
-def check_scene(spec, manifest, exported=False):
+def check_scene(spec, manifest, exported=False, traversal_plan=None):
     c = spec['contract']
     gates = []
 
@@ -177,7 +177,11 @@ def check_scene(spec, manifest, exported=False):
                 inverse = root.matrix_world.inverted()
                 colliders = [(o.name,[tuple(inverse @ p) for p in bounds_of([o])]) for o in collision]
                 try:
-                    traversal = check_traversal(c['traversal'],colliders)
+                    if traversal_plan:
+                        from modeling_traversal_states import measure_states
+                        traversal = measure_states(c['traversal'], collision, root, traversal_plan)
+                    else:
+                        traversal = check_traversal(c['traversal'],colliders)
                     traversal['colliders'] = [{'name': name, 'verticesMeters': vertices} for name,vertices in colliders]
                 except (ValueError, ArithmeticError) as exc:
                     traversal = {'status': 'GAP', 'reason': str(exc), 'paths': []}
