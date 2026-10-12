@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { atomicJson, readJson, hashFile, hashValue } from '../agent/modeling-io.mjs';
 import { readModelingState } from '../agent/modeling-state.mjs';
-import { planPendingSettlement, applyPendingSettlement, verifyRetainedModelingSkills, retireCanceledAuthor } from '../agent/modeling-maintenance.mjs';
+import { planPendingSettlement, applyPendingSettlement, verifyRetainedModelingSkills, retireCanceledAuthor, resumePendingValidation } from '../agent/modeling-maintenance.mjs';
 import { createSkillPlan } from '../agent/modeling-skill-routing.mjs';
 import { defaultContract } from '../agent/modeling-contract.mjs';
 import { createExecutionStore } from '../agent/modeling-execution.mjs';
@@ -122,4 +122,38 @@ test('retirement never conceals uncertain shutdown, another stage or a non-cance
     calls: [{ callId: 'checkpoint-9', status: 'COMPLETED', startedAt: 2, stopConfirmed: true }] };
   await atomicJson(f.execution, ledger);
   assert.equal(await retireCanceledAuthor(f.state, store), null);
+});
+
+test('new iterations resume frozen validation while preserving original reservations and journals', async t => {
+  const f = await fixture(t), artifact = path.join(f.workspace, 'source.blend');
+  await fs.writeFile(artifact, 'retained authored source');
+  const evidence = [{ file: artifact, sha256: await hashFile(artifact) }];
+  const store = createExecutionStore(path.dirname(f.execution)), executionHash = await hashFile(f.execution);
+  for (const phase of ['TECHNICAL_PENDING', 'VISUAL_PENDING']) {
+    const state = { ...f.state, productionIteration: 12, pending: { ...f.state.pending, phase,
+      artifactEvidence: evidence, ...(phase === 'VISUAL_PENDING' ? { technical: { evidence } } : {}) } };
+    const next = await resumePendingValidation(state, store, 100000);
+    assert.equal(next.productionIteration, 100000);
+    assert.deepEqual(next.pending, state.pending);
+    for (const key of ['attempts', 'rounds', 'revisionBudgets', 'attemptBudgets', 'failures']) assert.deepEqual(next[key], state[key]);
+    assert.equal(next.validationResumptions[0].fromIteration, 12);
+    assert.equal(await resumePendingValidation(next, store, 100000), null);
+    assert.equal(await hashFile(f.execution), executionHash);
+  }
+});
+
+test('validation resumption still fences live execution, altered evidence and unfinished authoring', async t => {
+  const f = await fixture(t), artifact = path.join(f.workspace, 'source.blend');
+  await fs.writeFile(artifact, 'retained source');
+  const state = { ...f.state, productionIteration: 12, pending: { ...f.state.pending, phase: 'TECHNICAL_PENDING',
+    artifactEvidence: [{ file: artifact, sha256: await hashFile(artifact) }] } };
+  const store = createExecutionStore(path.dirname(f.execution));
+  assert.equal(await resumePendingValidation(f.state, store, 13), null);
+  assert.equal(await resumePendingValidation({ ...state, failures: [{ attemptId: state.pending.attemptId, kind: 'INTEGRITY_ERROR' }] }, store, 13), null);
+  const ledger = await readJson(f.execution); ledger.groups.group.calls[0].status = 'STARTED';
+  await atomicJson(f.execution, ledger);
+  await assert.rejects(resumePendingValidation(state, store, 13), { kind: 'STOP_UNCONFIRMED' });
+  ledger.groups.group.calls[0].status = 'FAILED'; await atomicJson(f.execution, ledger);
+  await fs.appendFile(artifact, 'unrecorded mutation');
+  await assert.rejects(resumePendingValidation(state, store, 13), { kind: 'INTEGRITY_ERROR' });
 });

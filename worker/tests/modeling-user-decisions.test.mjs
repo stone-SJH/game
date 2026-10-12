@@ -121,6 +121,79 @@ test('project scope decisions survive a resumed production run without a modelin
   assert.equal(await readJson(path.join(f.root, 'decision-state/pending.json')), null);
 });
 
+test('a new Continue prompt can answer a retained question after cancellation without a structured answer', async t => {
+  const f = await fixture(t); let reviews = 0, reconciles = 0;
+  const beforeQuestion = await fs.readFile(path.join(f.root, 'decision-state', f.question.requestId + '.json'), 'utf8');
+  const instruction = 'Replace the fox with an original copper creature, four broad paws and rounded ears.';
+  const job = { ...f.job, revisionId: 'revision-after-cancel', runId: 'run-after-cancel', parentRevisionId: f.job.revisionId,
+    payload: { followUpPrompt: instruction } };
+  const args = { ...f, job, review: async (name, schema, prompt) => {
+    reviews++; assert.equal(name, 'user-decision-answer'); assert.ok(prompt.includes(instruction));
+    return { approved: true, reason: 'The authenticated follow-up supplies the complete replacement.' };
+  }, reconcile: async () => {
+    reconciles++;
+    const amended = structuredClone(f.plan); amended.assets[0].generationInput.prompt = instruction;
+    await atomicJson(f.planFile, amended);
+  } };
+  await createUserDecisions(args).beforeWork(); await createUserDecisions(args).beforeWork();
+  assert.equal(reviews, 1); assert.equal(reconciles, 1);
+  assert.equal(await readJson(path.join(f.root, 'decision-state/pending.json')), null);
+  assert.equal(await fs.readFile(path.join(f.root, 'decision-state', f.question.requestId + '.json'), 'utf8'), beforeQuestion);
+  const receipts = (await fs.readdir(path.join(f.root, 'decision-state'))).filter(name => name.startsWith('answer-'));
+  const receipt = await readJson(path.join(f.root, 'decision-state', receipts[0]));
+  assert.equal(receipt.answer.source, 'controller-follow-up');
+  assert.equal(receipt.answer.answer.instruction, instruction);
+});
+
+test('plain Continue cannot clear a retained decision and a later concrete prompt gets its own review', async t => {
+  const f = await fixture(t); let reviews = 0, reconciles = 0;
+  const args = { ...f, job: { ...f.job, revisionId: 'continue-only', payload: { followUpPrompt: 'Continue.' } },
+    review: async () => { reviews++; return { approved: false, reason: 'A complete acceptable design is still missing.' }; },
+    reconcile: async () => { reconciles++; } };
+  for (let i = 0; i < 2; i++) await assert.rejects(createUserDecisions(args).beforeWork(), { kind: 'USER_INPUT_REQUIRED' });
+  assert.equal(reviews, 1); assert.equal(reconciles, 0);
+  args.job = { ...args.job, revisionId: 'concrete-answer', payload: { followUpPrompt: 'Replace with a copper creature with rounded ears.' } };
+  args.review = async () => { reviews++; return { approved: true, reason: 'Complete revised design.' }; };
+  args.reconcile = async () => {
+    reconciles++; const amended = structuredClone(f.plan); amended.assets[0].generationInput.prompt = args.job.payload.followUpPrompt;
+    await atomicJson(f.planFile, amended);
+  };
+  await createUserDecisions(args).beforeWork();
+  assert.equal(reviews, 2); assert.equal(reconciles, 1);
+});
+
+test('new prompt is reviewed against the current basis and resumes an interrupted activation', async t => {
+  const f = await fixture(t); let reviews = 0, reconciles = 0, firstPrompt;
+  const basis = { ...f.plan, reason: 'Current approved plan differs from the old question basis' };
+  await atomicJson(f.planFile, basis);
+  const instruction = 'Replace the fox with an original copper creature with rounded ears.';
+  const amended = structuredClone(basis); amended.assets[0].generationInput.prompt = instruction;
+  const args = { ...f, job: { ...f.job, revisionId: 'new-prompt', payload: { followUpPrompt: instruction } },
+    review: async (name, schema, prompt) => {
+      reviews++; firstPrompt ||= prompt; assert.equal(prompt, firstPrompt); assert.ok(prompt.includes(basis.reason));
+      return { approved: true, reason: 'Explicit replacement for the current plan.' };
+    }, reconcile: async () => {
+      reconciles++; await atomicJson(f.planFile, amended);
+      await atomicJson(path.join(f.project, 'plan/modeling-user-revision.json'), { status: 'APPLIED', revisionId: args.job.revisionId,
+        before: basis, beforeHash: hashValue(basis), appliedHash: hashValue(amended) });
+      if (reconciles === 1) throw new Error('Interrupted after activation');
+    } };
+  await assert.rejects(createUserDecisions(args).beforeWork(), /Interrupted after activation/);
+  await createUserDecisions(args).beforeWork();
+  assert.equal(reviews, 2); assert.equal(reconciles, 2);
+  assert.equal(await readJson(path.join(f.root, 'decision-state/pending.json')), null);
+});
+
+test('host revision defects do not turn a reviewed user answer into another authorization question', async t => {
+  const f = await fixture(t), pending = await readJson(path.join(f.root, 'decision-state/pending.json'));
+  await assert.rejects(createUserDecisions({ ...f, job: f.nextJob,
+    review: async () => ({ approved: true, reason: 'Complete authorized answer.' }),
+    reconcile: async () => { throw Object.assign(new Error('Repair the host proposal'), { kind: 'USER_REVISION_UNRESOLVED' }); },
+  }).beforeWork(), { kind: 'USER_REVISION_UNRESOLVED' });
+  assert.deepEqual(await readJson(path.join(f.root, 'decision-state/pending.json')), pending);
+  assert.equal((await fs.readdir(path.join(f.root, 'decision-state'))).filter(name => name.startsWith('answer-')).length, 0);
+});
+
 test('a new explicit budget after answer revisions inherits the previous package from the original budget ledger', async t => {
   const f = await fixture(t), policy = { maxIterations: 10 };
   const original = await createProductionIterations({ ...f, policy });

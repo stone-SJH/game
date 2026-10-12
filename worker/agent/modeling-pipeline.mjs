@@ -31,7 +31,7 @@ import { retainedFinalForValidation } from './modeling-author-recovery.mjs';
 import { reconcileUserModelingRevision } from './modeling-user-revision.mjs';
 import { retainedDimensionSource } from './modeling-dimension-source.mjs';
 import { assertGenerationPrompt } from './modeling-generation-input.mjs';
-import { retireCanceledAuthor } from './modeling-maintenance.mjs';
+import { retireCanceledAuthor, resumePendingValidation } from './modeling-maintenance.mjs';
 import { prepareTraversalPlan } from './modeling-traversal-plan.mjs';
 import { validateModelingDraft, normalizeModelingDraft, normalizeEngineeringResponse, validateModelingDraftRepair, modelingReferences, objectiveRequirements, engineeringSchema, engineeringPrompt, resolveEngineering, writeEngineeringPlan } from './modeling-engineering.mjs';
 
@@ -448,7 +448,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     await fs.mkdir(evidence, { recursive: true });
     const specFile = path.join(output, `modeling-spec-${attemptId}.json`);
     await atomicJson(specFile, spec);
-    const traversalPlanFile = await prepareTraversalPlan({ spec, project, directory, output,
+    const traversalPlanFile = await prepareTraversalPlan({ spec, project, directory, output: context.validationOutput || output,
       engineering: engineeringContext?.assets?.find(row => row.assetId === spec.assetId), review: reviewer });
     const traversalPlanHash = traversalPlanFile ? await hashFile(traversalPlanFile) : null;
     const technical = context.technical || await execution.run({ key: `technical:${attemptId}`, stage: 'TECHNICAL', identity: { assetId: spec.assetId, attemptId },
@@ -581,6 +581,8 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
     if (state && state.protocol !== 2) throw modelingFailure('EXECUTION_VERSION_CHANGED', 'Restore the original release for this modeling task; legacy execution budgets cannot be migrated implicitly.');
     const canceled = await retireCanceledAuthor(state, execution);
     if (canceled) { state = canceled; await writeModelingState(stateFile, state); }
+    const resumedValidation = await resumePendingValidation(state, execution, productionIteration);
+    if (resumedValidation) { state = resumedValidation; await writeModelingState(stateFile, state); }
     if (state && enforceSourcePolicy(state, sourcePolicy, productionIteration)) await writeModelingState(stateFile, state);
     const repairRequest = await readJson(path.join(project, 'plan/modeling-repair-request.json'));
     const repairKey = hashValue({ revision: job.revisionId || productionIteration, assetId: spec.assetId, reason: repairRequest?.reason || '' });
@@ -930,6 +932,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       await fs.mkdir(await localPath(project, directory), { recursive: true });
       const receiptFile = state.pending?.receiptFile || path.join(output, `modeling-mcp-${attemptId}.json`);
       const context = { spec, decision: { ...state.decision, route }, directory, evidenceDirectory, receiptFile, sourceFile,
+        validationOutput: state.pending?.validationOutput || path.dirname(receiptFile),
         skillPlan,
         sourcePreviews: route === 'tripo_then_blender' ? state.sourcePreviews : [], feedback: state.feedback,
         previousAttemptDirectory: state.previousAttemptDirectory, cleanup: route === 'tripo_then_blender',
@@ -938,7 +941,7 @@ export function createModelingPipeline({ job, project, output, signal, step, inv
       state.attemptBudgets[attemptId] ||= { startedAt: Date.now(), deadlineAt: Math.min(Date.now() + (context.cleanup ? policy.cleanupMs : policy.buildMs),
         job.deadlineAt ? Date.parse(job.deadlineAt) : Infinity) };
       context.deadlineAt = state.attemptBudgets[attemptId].deadlineAt;
-      state.pending ||= { attempt, attemptId, route, receiptFile, sourceFile, phase: 'AUTHORING', stageArtifacts: [] };
+      state.pending ||= { attempt, attemptId, route, receiptFile, sourceFile, validationOutput: output, phase: 'AUTHORING', stageArtifacts: [] };
       context.stageArtifacts = state.pending.stageArtifacts;
       context.technical = state.pending.technical;
       context.artifactEvidence = state.pending.artifactEvidence;

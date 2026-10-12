@@ -72,6 +72,52 @@ test('review service failure does not consume an author attempt', async t => {
   assert.deepEqual(f.counts, { author: 1, technical: 1, review: 2 });
 });
 
+for (const canceledStage of ['technical', 'visual']) test(`Continue after cancellation during ${canceledStage} validation finishes the original attempt`, async t => {
+  const f = await fixture(t, [validReview('PASS')]);
+  const abort = new AbortController(); f.options.signal = abort.signal;
+  f.options.job = { ...f.options.job, revisionId: 'before-cancel' };
+  let canceled = false;
+  const cancel = () => {
+    canceled = true; abort.abort(new Error('User canceled validation'));
+    throw Object.assign(new Error('User canceled validation'), { result: { canceled: true, stopConfirmed: true } });
+  };
+  const step = f.options.step, evaluate = f.options.evaluate;
+  f.options.step = async (...args) => {
+    if (!canceled && canceledStage === 'technical') { f.counts.technical++; cancel(); }
+    return step(...args);
+  };
+  f.options.evaluate = async context => {
+    if (context.name === 'modeling-user-revision') return { reason: 'Continue independent checks of unchanged assets.', changes: [] };
+    if (!canceled && canceledStage === 'visual' && context.name === 'modeling-visual-review') { f.counts.review++; cancel(); }
+    return evaluate(context);
+  };
+  await assert.rejects(createModelingPipeline(f.options).prepare(), /User canceled validation/);
+  const stateDirectory = (await fs.readdir(path.join(f.root, 'modeling-state'))).find(name => /^[a-f0-9]{20}$/.test(name));
+  const stateFile = path.join(f.root, 'modeling-state', stateDirectory, 'state.json');
+  const before = await readModelingState(stateFile);
+  assert.equal(before.pending.phase, canceledStage === 'technical' ? 'TECHNICAL_PENDING' : 'VISUAL_PENDING');
+  const output = path.join(f.root, 'continued-run'); await fs.mkdir(output);
+  const result = await createModelingPipeline({ ...f.options, output, signal: new AbortController().signal,
+    job: { ...f.options.job, revisionId: 'after-cancel', runId: 'continued-run', parentRevisionId: 'before-cancel',
+      payload: { followUpPrompt: 'Continue and finish the independent checks; keep the existing model.' } } }).prepare();
+  assert.equal(result.assets[0].status, 'DCC_READY');
+  assert.equal(result.assets[0].attemptId, before.pending.attemptId);
+  assert.deepEqual(f.counts, { author: 1, technical: canceledStage === 'technical' ? 2 : 1, review: canceledStage === 'visual' ? 2 : 1 });
+  const after = await readModelingState(stateFile);
+  assert.deepEqual(after.attempts, before.attempts);
+  assert.deepEqual(after.attemptBudgets, before.attemptBudgets);
+  assert.deepEqual(after.revisionBudgets['before-cancel'], before.revisionBudgets['before-cancel']);
+  assert.deepEqual(after.revisionBudgets['after-cancel'].attempts, {});
+  assert.equal(after.validationResumptions.length, 1);
+  assert.equal(after.validationResumptions[0].fromIteration, before.productionIteration);
+  assert.notEqual(after.productionIteration, before.productionIteration);
+  const ledger = await readJson(result.assets[0].executionFile);
+  const validationGroup = Object.values(ledger.groups).find(group => group.key === `${canceledStage === 'technical' ? 'technical' : 'visual'}:${before.pending.attemptId}`);
+  assert.equal(validationGroup.calls.length, 2);
+  assert.equal(validationGroup.calls[0].error.kind, 'CANCELED');
+  assert.equal(validationGroup.cancellationResumes[0].consumedCalls, 1);
+});
+
 test('technical process retries preserve the authored model and reject no source', async t => {
   const f = await fixture(t, [validReview('PASS')]);
   const step = f.options.step; let calls = 0;

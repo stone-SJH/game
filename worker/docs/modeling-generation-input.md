@@ -1,6 +1,6 @@
 # User revisions and concept generation inputs
 
-A controller-owned follow-up is reviewed once per immutable revision before ordinary
+A controller-owned follow-up is reviewed before ordinary
 modeling repairs. The host records the cited instruction, exact superseded requirements,
 before/after plans and independent review in `user-revision-<hash>.json`. The visible copy
 is `project/plan/modeling-user-revision.json`. Technical contracts and unrelated assets
@@ -28,6 +28,39 @@ input review receives the composed `initialProviderInputs` separately from that 
 and archived history. This review does not certify visual fidelity or provider acceptance.
 Supersession records contain only removed requirement-array entries; validation reports the
 exact expected entries and unexpected values so bounded repairs can correct malformed output.
+
+## Retained draft wording and requirement reconciliation
+
+Cancel followed by a changed prompt and Continue uses the same revision path as any other
+follow-up from a terminal task. Cancellation is not the source of requirement contradictions.
+Engineering can complete a nullable draft contract while preserving its original textual
+requirements. A later visual revision can consequently retain a stale “still null/unknown”
+statement alongside a requirement to use the now-complete contract. Array-difference
+validation alone cannot detect that semantic conflict.
+
+When independent revision review returns GAP, the worker permits one bounded requirement
+reconciliation. It also handles retained legacy GAP records. The repair model can only name
+complete, exact old requirements still present on already changed assets, cite an existing
+contract field, and propose replacement wording. The host applies those replacements and
+computes the exact `supersededRequirements` array. It preserves all other requirements,
+technical data, dimension amendments, visual inputs and unaffected assets. A mixed entry
+must retain its binding obligations: for example, replacing a stale traversal status must
+keep raised clearance, actual player capsule and asset-local path verification.
+
+The unchanged original rejection remains in `user-revision-<original-hash>.json`. A separate
+`user-revision-<repair-hash>.json` links to that record by identity and hash and records the
+repair, corrected proposal and independent disposition. The visible receipt points to the
+resulting record. Only an independently approved corrected proposal activates the plan and
+archives stale pending requests. The reviewer must resolve every original finding; a wording
+change cannot waive an obligation or clear a provider refusal.
+
+There is at most one correction candidate and one independent review of that candidate.
+Each operation uses its own durable execution key with at most two calls for malformed
+output or service recovery. Cancellation/resume reuses these calls and their consumed
+allowances; it never resets an original review or author budget. Empty repairs, unrepaired
+scope/content findings and a rejected correction stay blocked without another approval
+sample. Original proposal/review inputs and keys remain compatible with retained journals.
+This is an input consistency repair, not asset, provider or engine acceptance.
 
 An input constraint failure makes no provider request. A confirmed provider content-review
 rejection remains retained and blocks automatic resubmission of the same explicit input,

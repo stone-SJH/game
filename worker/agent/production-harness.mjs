@@ -10,7 +10,7 @@ import {
   qualityReviewSettings,
 } from './quality-review.mjs';
 import { createModelingPipeline } from './modeling-pipeline.mjs';
-import { agentEnvironment, readJson, localPath } from './modeling-io.mjs';
+import { agentEnvironment, atomicJson, hashValue, readJson, localPath } from './modeling-io.mjs';
 import { validateEngineeringAcceptance } from './modeling-engineering.mjs';
 import { validateUnrealModels } from './modeling-unreal.mjs';
 import { criterionScore, iterationScore } from './iteration-quality.mjs';
@@ -33,8 +33,7 @@ const STAGES = [
 ];
 
 async function writeJson(file, value) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await atomicJson(file, value);
 }
 
 async function filesUnder(directory) {
@@ -339,6 +338,36 @@ export async function readProductionPlans(project, job) {
   return { values, stageIds: stageIds || [...STAGES], existing: Boolean(stageIds) };
 }
 
+async function plansForContinuation(project, job, output) {
+  try { return await readProductionPlans(project, job); }
+  catch (error) {
+    if (!job.revisionId || !job.payload?.followUpPrompt?.trim() ||
+        !(error instanceof SyntaxError || error.message.startsWith('Cannot resume invalid production state:'))) throw error;
+    const stageIds = new Set(STAGES), inputs = [];
+    for (const name of ['production-plan.json', 'stage-manifest.json']) {
+      const file = await localPath(project, `plan/${name}`);
+      let value, raw = null;
+      try {
+        // Retain the same read limit and I/O errors as ordinary startup.
+        value = await readJson(file);
+      } catch (readError) { if (!(readError instanceof SyntaxError)) throw readError; }
+      try { raw = await fs.readFile(file, 'utf8'); } catch (readError) { if (readError.code !== 'ENOENT') throw readError; }
+      if (value?.taskId && value.taskId !== job.taskId || value?.workspaceId && value.workspaceId !== job.workspaceId) throw error;
+      for (const stage of Array.isArray(value?.stages) ? value.stages : []) {
+        if (/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(stage?.id || '')) stageIds.add(stage.id);
+      }
+      inputs.push({ path: `plan/${name}`, raw });
+    }
+    const record = { protocol: 1, taskId: job.taskId, revisionId: job.revisionId, reason: error.message,
+      requiredStageIds: [...stageIds], inputs };
+    const repairFile = path.join(output, `production-plan-repair-${hashValue(record)}.json`);
+    await atomicJson(repairFile, record);
+    // Leave both files intact for the normal production agent to repair in place.
+    // Budgets, execution journals and accepted model contracts are not plan files.
+    return { stageIds: [...stageIds], repairFile };
+  }
+}
+
 export async function initializeProductionPlans(project, job, context) {
   const { values, stageIds } = await readProductionPlans(project, job);
   const seeds = {
@@ -369,7 +398,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
   if ((job.payload?.references?.length || 0) !== (job.referenceFiles?.length || 0)) throw new Error('Reference files must be downloaded and verified before production starts.');
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(output, { recursive: true });
-  const productionState = await readProductionPlans(project, job);
+  const productionState = await plansForContinuation(project, job, output);
   const qualityCriteria = extractQualityCriteria(job);
   const qualitySettings = qualityReviewSettings();
   const iterations = await createProductionIterations({ job, project, policy: qualitySettings });
@@ -392,7 +421,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
     qualityCriteria,
     qualityReview: { enabled: qualityCriteria.length > 0, maxAdditionalIterations: qualitySettings.maxIterations },
   };
-  await initializeProductionPlans(project, job, context);
+  if (!productionState.repairFile) await initializeProductionPlans(project, job, context);
   await writeJson(path.join(project, 'plan', 'production-context.json'), context);
 
   const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -501,6 +530,11 @@ export async function runProductionHarness({ job, project, output, signal, step,
     const coverageBefore = await readSceneCoverage(project, job, iteration);
     if (coverageBefore) await writeJson(path.join(project, 'plan/scene-coverage-status.json'), coverageBefore);
     const basePrompt = [
+      ...(productionState.repairFile ? [
+        `Repair the interrupted production-plan.json/stage-manifest.json handoff in this existing project first. The host retained exact original bytes and findings at ${productionState.repairFile}.`,
+        'Latest user instruction: ' + job.payload.followUpPrompt,
+        'Read those records and the latest user instruction. Repair the JSON and matching stage identities, preserving all recoverable custom stages, requirements, attempts and evidence. Neither file has been reset or replaced by the host. Keep unresolved checks as GAP. Do not edit production-state, modeling-state, execution journals or toolchain pins. The host will validate the repaired pair and every retained stage before acceptance.',
+      ] : []),
       `You are the YahahaGame production worker. Read and follow this skill file and its production-contract reference before editing: ${skillPath}`,
       `This is production iteration ${iteration}, execution attempt ${attempt}; inspect existing files and improve the current result. Finish a playable round even when some stage quality targets remain unmet.`,
       ...(completed ? [`Best retained iteration: ${completed.delivery.iteration}, score ${completed.delivery.score}/100, checkpoint ${completed.delivery.snapshotManifest || completed.delivery.retainedProject}. The host retains immutable bytes outside the working project; never copy the whole project for a production iteration.`] : []),

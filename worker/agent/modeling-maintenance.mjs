@@ -5,6 +5,7 @@ import { readModelingState, writeModelingState } from './modeling-state.mjs';
 import { createExecutionStore, verifyEvidence } from './modeling-execution.mjs';
 import { modelingTaskRoot, recoveredModelingReferences } from './modeling-recovery.mjs';
 import { createSkillPlan } from './modeling-skill-routing.mjs';
+import { isExecutionFence } from './stage-failure.mjs';
 
 export async function verifyRetainedModelingSkills({ workspace, job, plan }) {
   if (!plan?.assets?.length) return [];
@@ -56,6 +57,23 @@ export async function retireCanceledAuthor(state, execution) {
     failure: { callId: last.callId, group: last.group, ...last.error },
     budgetHash: budgetHash(state),
     reason: 'Canceled author confirmed stopped; reservation remains consumed in its original iteration. Outputs require independent validation before use.' }] };
+}
+
+// Validation belongs to the authored attempt, not the display iteration. A new
+// controller revision may finish it using the same evidence, keys and deadlines.
+export async function resumePendingValidation(state, execution, iteration) {
+  const pending = state?.pending;
+  if (!pending || !['TECHNICAL_PENDING', 'VISUAL_PENDING'].includes(pending.phase) || state.productionIteration === iteration) return null;
+  const failure = state.failures?.at(-1);
+  if (failure?.attemptId === pending.attemptId && isExecutionFence(failure)) return null;
+  await execution.assertSettled();
+  if (!pending.artifactEvidence?.length) return null;
+  await verifyEvidence(pending.artifactEvidence);
+  if (pending.technical) await verifyEvidence(pending.technical.evidence);
+  return { ...state, productionIteration: iteration, validationResumptions: [...(state.validationResumptions || []), {
+    attemptId: pending.attemptId, phase: pending.phase, fromIteration: state.productionIteration, toIteration: iteration,
+    budgetHash: budgetHash(state), executionFile: execution.file,
+    reason: 'Resume the same authored attempt and independent validation with its original evidence, calls and deadlines; no acceptance or budget reset.' }] };
 }
 
 // Offline repair only. The caller owns the stopped worker and workspace lock.

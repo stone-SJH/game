@@ -58,6 +58,59 @@ for (const mode of ['duplicate', 'missing-required', 'missing-custom', 'unsafe-i
   });
 }
 
+for (const mode of ['truncated-plan', 'missing-manifest', 'missing-custom']) {
+  test(`new user prompt reaches in-place plan repair after ${mode}, retaining inputs and normal budgets`, async t => {
+    const f = await fixture(t), originals = await readProductionPlans(f.project, f.job);
+    const settings = { MODELING_ROUTING_ENABLED: '0', CODEX_CMD: process.execPath, CODEX_MAX_ATTEMPTS: '1' };
+    const previous = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
+    Object.assign(process.env, settings);
+    t.after(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+    const planFile = path.join(f.project, 'plan/production-plan.json'), manifestFile = path.join(f.project, 'plan/stage-manifest.json');
+    if (mode === 'truncated-plan') await fs.writeFile(planFile, '{"taskId":"task","stages":[');
+    if (mode === 'missing-manifest') await fs.unlink(manifestFile);
+    if (mode === 'missing-custom') {
+      const value = await readJson(manifestFile); value.stages.pop(); await atomicJson(manifestFile, value);
+    }
+    const bytes = await Promise.all([planFile, manifestFile].map(file => fs.readFile(file, 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return null; throw error;
+    })));
+    const job = { ...f.job, runId: 'continued-run', revisionId: 'repair-revision', payload: { followUpPrompt: 'Repair the interrupted plan and continue the existing game.' } };
+    let calls = 0;
+    await assert.rejects(runProductionHarness({ ...f, job, signal: new AbortController().signal, unreal: 'fixture',
+      step: async (name, command, args, timeout, cwd, accepts, options) => {
+        assert.match(name, /^production-orchestrator/); calls++;
+        assert.match(options.input, /Repair the interrupted production-plan/);
+        assert.ok(options.input.includes(job.payload.followUpPrompt));
+        const receipt = (await fs.readdir(f.output)).find(name => name.startsWith('production-plan-repair-'));
+        const preserved = await readJson(path.join(f.output, receipt));
+        assert.deepEqual(preserved.inputs.map(row => row.raw), bytes);
+        assert.deepEqual(new Set(preserved.requiredStageIds), new Set(originals.stageIds));
+        for (const [index, name] of names.entries()) {
+          const file = path.join(f.project, 'plan', name);
+          assert.equal(await fs.readFile(file, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; }), bytes[index]);
+          await atomicJson(file, originals.values[name]);
+        }
+        throw new Error('Probe stopped after the normal agent repaired the plan');
+      } }), /Probe stopped after/);
+    assert.equal(calls, 1);
+    const repaired = await readProductionPlans(f.project, job);
+    assert.deepEqual(repaired.values, originals.values);
+    const branches = await fs.readdir(path.join(f.root, 'production-state'));
+    const ledger = await readJson(path.join(f.root, 'production-state', branches[0], 'iterations.json'));
+    assert.equal(ledger.attempts, 1); assert.equal(ledger.rounds.length, 0);
+  });
+}
+
+test('a new prompt cannot repair a production plan belonging to another task', async t => {
+  const f = await fixture(t), file = path.join(f.project, 'plan/production-plan.json');
+  const value = await readJson(file); value.taskId = 'another-task'; await atomicJson(file, value);
+  const before = await hashFile(file);
+  await assert.rejects(runProductionHarness({ ...f, job: { ...f.job, revisionId: 'new-revision', payload: { followUpPrompt: 'Repair and continue.' } },
+    signal: new AbortController().signal, step: async () => assert.fail('Foreign plan must remain fenced') }), /Cannot resume invalid production state/);
+  assert.equal(await hashFile(file), before);
+  await assert.rejects(fs.stat(path.join(f.root, 'production-state')), { code: 'ENOENT' });
+});
+
 for (const mode of ['pass', 'custom-evidence-gap', 'custom-manifest-gap', 'removed-stage']) {
   test('full harness checks custom stage requirements: ' + mode, async t => {
     const f = await fixture(t);

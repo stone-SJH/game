@@ -37,7 +37,9 @@ async function fixture(t, approved = true) {
     job: { revisionId: 'new-user-revision', payload: { followUpPrompt: instruction } },
     review: async (name, schema, prompt, images, options) => {
       calls.push(name);
-      const value = name === 'modeling-user-revision' ? structuredClone(proposal) : { approved, reason: approved ? 'Current user design; technical obligations retained.' : 'Unjustified removal.' };
+      const value = name === 'modeling-user-revision' ? structuredClone(proposal)
+        : name === 'modeling-user-revision-requirement-repair' ? { reason: 'No stale contract wording to repair.', replacements: [] }
+          : { approved, reason: approved ? 'Current user design; technical obligations retained.' : 'Unjustified removal.' };
       validateSchema(value, schema); await options.validate?.(value); return value;
     } };
 }
@@ -103,7 +105,7 @@ test('independent rejection prevents activation and cannot be resampled into app
   const f = await fixture(t, false), before = hashValue(await readJson(path.join(f.taskState, 'plan.json')));
   await assert.rejects(reconcileUserModelingRevision(f), error => error.kind === 'USER_REVISION_UNRESOLVED' && error.productionIncomplete);
   await assert.rejects(reconcileUserModelingRevision(f), /Unjustified removal/);
-  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls.length, 3);
   assert.equal(hashValue(await readJson(path.join(f.taskState, 'plan.json'))), before);
 });
 
@@ -111,6 +113,23 @@ test('a task without a controller-owned follow-up cannot obtain a relaxed asset 
   const f = await fixture(t);
   const result = await reconcileUserModelingRevision({ ...f, job: { revisionId: 'new-user-revision' } });
   assert.equal(result.current, current); assert.equal(f.calls.length, 0);
+});
+
+test('a rejected revision cannot veto a later controller prompt in the same workspace', async t => {
+  const f = await fixture(t, false);
+  await assert.rejects(reconcileUserModelingRevision(f), { kind: 'USER_REVISION_UNRESOLVED' });
+  const rejectedFiles = (await fs.readdir(f.taskState)).filter(name => name.startsWith('user-revision-'));
+  const retained = await Promise.all(rejectedFiles.map(name => fs.readFile(path.join(f.taskState, name), 'utf8')));
+  const next = { ...f, job: { revisionId: 'corrected-user-instruction', payload: {
+    followUpPrompt: instruction + ' Preserve all source, rig and engine obligations while correcting the rejected proposal.' } },
+    review: async (name, schema, prompt, images, options) => {
+      const value = name === 'modeling-user-revision' ? structuredClone(proposal) : { approved: true, reason: 'Current instruction resolves the earlier rejection.' };
+      validateSchema(value, schema); await options.validate?.(value); return value;
+    } };
+  const result = await reconcileUserModelingRevision(next);
+  assert.equal((await readJson(result.recordFile)).status, 'APPLIED');
+  assert.deepEqual(result.current.assets[0].contract, original.contract);
+  assert.deepEqual(await Promise.all(rejectedFiles.map(name => fs.readFile(path.join(f.taskState, name), 'utf8'))), retained);
 });
 
 test('one generic revision handles multiple non-character assets with separate visual constraints', () => {
@@ -146,7 +165,7 @@ test('approval and rejection records are isolated across task workspaces even wi
   await assert.rejects(reconcileUserModelingRevision(rejected), error => error.kind === 'USER_REVISION_UNRESOLVED');
   const resumed = await reconcileUserModelingRevision({ ...approved, current: accepted.current });
   assert.deepEqual(resumed.current, accepted.current);
-  assert.equal(approved.calls.length, 2); assert.equal(rejected.calls.length, 2);
+  assert.equal(approved.calls.length, 2); assert.equal(rejected.calls.length, 3);
   assert.deepEqual(await readJson(path.join(rejected.taskState, 'plan.json')), current);
 });
 

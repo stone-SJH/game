@@ -10,7 +10,12 @@ durable call is failed, canceled, and confirmed stopped. This happens when handl
 the cancellation and when loading retained state, before the iteration check.
 The original iteration, call, deadline, counters, files and failure remain intact.
 The archived output is not promoted to an accepted asset. Remaining author work
-uses only the normal allowance; validation stages keep their own recovery rules.
+uses only the normal allowance. An already authored attempt in technical/visual validation
+can continue across the iteration boundary after its execution ledger and artifact hashes
+are verified, using the original validation keys, calls and deadlines. Its traversal-plan
+evidence retains its original run path. See
+[prompt-continuation-recovery.md](prompt-continuation-recovery.md) for the other host
+state recovery paths.
 An unconfirmed process, an explicit execution fence or any other unfinished
 operation still blocks the transition.
 
