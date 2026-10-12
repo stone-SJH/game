@@ -4,6 +4,9 @@ import crypto from 'node:crypto';
 import { atomicJson, hashFile, hashValue, localPath, readJson } from './modeling-io.mjs';
 
 const GiB = 1024 ** 3;
+// Retained projects can accumulate a large path-signature index. Keep the
+// index bounded, but allow maintenance and migration to reopen mature workspaces.
+const INDEX_LIMIT = 64 * 1024 * 1024;
 const indexes = new Map();
 const statSignature = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(':');
 export async function requireSpace(directory, additionalBytes, { reserveBytes = 20 * GiB, statfs = fs.statfs } = {}) {
@@ -34,7 +37,7 @@ export async function walkFiles(root, include = () => true) {
 export function contentStore(workspace, { reserveBytes = 20 * GiB } = {}) {
   const root = path.join(workspace, 'storage-v2');
   const indexFile = path.join(root, 'hash-index.json');
-  if (!indexes.has(root)) indexes.set(root, readJson(indexFile, {}, 32 * 1024 * 1024));
+  if (!indexes.has(root)) indexes.set(root, readJson(indexFile, {}, INDEX_LIMIT));
   const objectPath = sha => {
     if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('Invalid content digest');
     return path.join(root, 'objects', sha.slice(0, 2), sha);
