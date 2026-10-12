@@ -49,6 +49,12 @@ export function applyUserAssetChanges(current, proposal, instruction) {
         unexpected: change.supersededRequirements.filter(item => !removed.includes(item)) }] });
     // Technical fields are copied by the host. A separately cited, reviewed user
     // dimension amendment is the only exception; ordinary repair cannot relax them.
+    const retainedExcludedTerms = original.generationInput?.excludedTerms;
+    if (Array.isArray(retainedExcludedTerms) &&
+        hashValue(change.generationInput?.excludedTerms || []) !== hashValue(retainedExcludedTerms)) {
+      throw Object.assign(new Error('generationInput.excludedTerms is host-only validation configuration and must be preserved exactly across user revisions.'),
+        { validationIssues: [{ assetId: change.assetId, field: 'generationInput.excludedTerms', expected: retainedExcludedTerms }] });
+    }
     const revised = { ...structuredClone(original), description: change.description, prompt: change.prompt,
       requirements: [...change.requirements], referenceImages: [...change.referenceImages], generationInput: structuredClone(change.generationInput) };
     if (change.dimensionAmendment) {

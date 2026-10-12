@@ -79,6 +79,22 @@ test('provider input excludes history and comparison references; final composed 
   assert.throws(() => composeConceptPrompt(spec, '', 'Restore 林克'), error => error.requiresInputChange === true);
 });
 
+test('host-only excluded terms cannot be cleared by an appearance revision', () => {
+  const base = structuredClone(current);
+  base.assets[0].generationInput = { prompt: 'Retained visual brief', requirements: ['Blue stone'], referenceImages: [], excludedTerms: ['catalog-name', '名称'] };
+  const scoped = structuredClone(proposal);
+  scoped.changes[0].generationInput = { prompt: 'Blue stone', requirements: ['Blue stone'], referenceImages: [], excludedTerms: [] };
+  assert.throws(() => applyUserAssetChanges(base, scoped, instruction), error => {
+    assert.match(error.message, /host-only validation configuration/);
+    assert.deepEqual(error.validationIssues[0].expected, ['catalog-name', '名称']);
+    return true;
+  });
+  scoped.changes[0].generationInput.excludedTerms = ['catalog-name', '名称'];
+  const next = applyUserAssetChanges(base, scoped, instruction);
+  assert.deepEqual(next.assets[0].generationInput.excludedTerms, ['catalog-name', '名称']);
+  assert.doesNotMatch(composeConceptPrompt(next.assets[0]), /catalog-name|名称/);
+});
+
 test('reviewed revision archives obsolete requests, resumes without extra calls and preserves later repairs', async t => {
   const f = await fixture(t);
   const pending = path.join(f.taskState, 'revision-pending.json'), request = path.join(f.project, 'plan/modeling-request.json');
