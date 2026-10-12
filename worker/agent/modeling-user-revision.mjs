@@ -24,6 +24,32 @@ const requirementRepairRules = [
   'Replace the COMPLETE original requirement entry and record it verbatim in supersededRequirements; never record only its obsolete clause. The replacement must retain every still-binding obligation in that entry, including clearance, actual player capsule and asset-local path verification where applicable. Do not merely append a contradictory requirement while leaving the old statement active.',
   'Preserve dimensions, tolerances, all contract data, source provenance, rigging, animation poses, generation and engine acceptance obligations. Do not invent missing contract values or resolve a real technical/design conflict by weakening a requirement. Provider review remains mandatory; input approval is not final asset or engine acceptance.',
 ];
+
+function isSceneAppearanceOnlyInstruction(instruction) {
+  const scene = /(?:场景|环境|scene|environment)/iu.test(instruction);
+  const appearance = /(?:材质|shader|渲染|render(?:ing)?|光色|lighting|赛璐璐|cel|toon|外光派)/iu.test(instruction);
+  const explicitSceneGeometryChange = /(?:场景|环境|scene|environment)[\s\S]{0,100}(?:新增|修改|改变|重做|扩展|建模|几何|geometry|mesh|model(?:ing)?)/iu.test(instruction);
+  return scene && appearance && !explicitSceneGeometryChange;
+}
+
+function isCharacterAsset(asset) {
+  return asset.contract?.assetClass === 'skeletal-character' || asset.requireRig === true;
+}
+
+function assertSceneAppearanceScope(original, change, instruction) {
+  if (!isSceneAppearanceOnlyInstruction(instruction) || isCharacterAsset(original)) return;
+  const candidate = [change.description, change.prompt, change.generationInput.prompt,
+    ...(change.generationInput.requirements || []), ...(change.requirements || [])].join('\n');
+  const appearance = /(?:材质|shader|渲染|render(?:ing)?|光色|lighting|material|赛璐璐|cel|toon|外光派)/iu.test(candidate);
+  const expansion = /(?:场景|环境|scene|environment)[\s\S]{0,100}(?:建模|几何|geometry|mesh|model(?:ing)?)[\s\S]{0,100}(?:渲染|shader|render|材质|光色|lighting)|(?:建模|几何|geometry|mesh|model(?:ing)?)[\s\S]{0,100}(?:场景|环境|scene|environment)/iu.test(candidate);
+  const preserveShapeAndContract = /(?:保留|保持|不得改变|不改变)[^。\n]{0,80}(?:既有|现有|原有)?[^。\n]{0,30}(?:形体|结构|几何|shape|structure|geometry|mesh)/iu.test(candidate)
+    || /(?:preserve|retain|keep)[^.\n]{0,100}(?:shape|structure|geometry|mesh)/iu.test(candidate)
+    || /(?:冻结|既有|现有|原有)[^。\n]{0,30}(?:技术)?(?:合同|contract)/iu.test(candidate)
+    || /(?:preserve|retain|keep)[^.\n]{0,100}(?:technical contract|contract)/iu.test(candidate);
+  if (!appearance || expansion || !preserveShapeAndContract) throw Object.assign(
+    new Error('Scene-only rendering revisions must limit the change to materials, shaders, lighting or color, explicitly preserve the existing shape and structure, and preserve the frozen technical contract.'),
+    { kind: 'USER_REVISION_SCOPE_CONFLICT', requiresInputChange: true });
+}
 // Optional for retained v1 proposals. New requests can amend only explicitly approved
 // dimensions; this does not open the rest of the technical contract to model edits.
 const dimensionChangeSchema = structuredClone(schema.properties.changes.items);
@@ -57,6 +83,7 @@ export function applyUserAssetChanges(current, proposal, instruction) {
     }
     const revised = { ...structuredClone(original), description: change.description, prompt: change.prompt,
       requirements: [...change.requirements], referenceImages: [...change.referenceImages], generationInput: structuredClone(change.generationInput) };
+    assertSceneAppearanceScope(original, change, instruction);
     if (change.dimensionAmendment) {
       const amendment = change.dimensionAmendment;
       if (!instruction.includes(amendment.instructionQuote) ||
@@ -195,6 +222,8 @@ export async function reconcileUserModelingRevision({ current, job, project, tas
       'Verify this visual request expresses the intended design without excluded terms or archived workflow instructions. Omitting a name does not authorize an arbitrary redesign. Content-review refusal cannot be bypassed by cosmetic wording changes; the actual provider still reviews every newly submitted request.',
       'This disposition approves a proposed asset input, not final asset fidelity, content-service approval or delivery. Missing source measurements or references are not alone a contradiction when the user requested a descriptive prompt and all original fidelity obligations remain enforced downstream. Preserve unknowns; never invent measurements or waive concept, model or engine acceptance.',
       'Reject invented measurements, lost obligations, hidden scope expansion or unresolved contradictions. Do not demand another approval when this review can resolve the instruction.',
+      'For any asset with a non-null contract.traversal, inspect the composed provider input for the exact host traversal block: player capsule, clearance margin, asset-local space, UE query channel and every contract path must remain present; any statement that traversal is null is a contradiction.',
+      'When the latest instruction changes only scene rendering, scene asset descriptions and provider inputs must be limited to materials, shaders, lighting or color and must explicitly preserve existing shape, structure and the frozen technical contract. Treat scene modeling, geometry or mesh expansion as an unresolved scope conflict.',
       ...(repairContext ? [...requirementRepairRules,
         'Review this materially changed proposal against ALL findings in the original rejection. Approve only if every replacement is evidenced by the existing contract and retains ALL obligations from the full original entry. Unresolved content or scope findings still block activation. Do not resample approval of the rejected input.',
         'Requirement repair and original rejection: ' + JSON.stringify(repairContext)] : []),
@@ -214,6 +243,8 @@ export async function reconcileUserModelingRevision({ current, job, project, tas
       'Remove stale internal wait-for-host language and conflicts actually resolved by this instruction from active requirements, recording them as superseded. This host review is the input disposition; another fictional host approval must not be required. Provider content review remains mandatory. Do not disguise rejected content or change providers to evade a refusal.',
       'generationInput.prompt, requirements and referenceImages are the COMPLETE visual brief for each affected asset, whether a character, prop, organic object or environment kit. Describe its distinguishing geometry, proportions, parts and material details already supported by the current design. Retain uncertainty about unspecified details. Comparison-only references, archived requirements, workflow instructions and technical contracts do not belong in this visual payload.',
       'generationInput.excludedTerms is HOST-ONLY validation configuration, never provider-facing text. List the names/terms the user explicitly excludes (including their direct translations) in this control field. Do not put them in the generation prompt or visual requirements. They remain in the immutable source evidence.',
+      'For every asset whose existing contract.traversal is non-null, generationInput must never say traversal is null or pending. The composed provider input must preserve the actual player capsule, clearance margin, asset-local space, UE query channel and every existing local verification path.',
+      'If the latest instruction only changes scene rendering, describe scene changes as materials, shaders, lighting or color only. Explicitly say to preserve the existing shape and structure and the frozen technical contract; never describe the scene change as modeling, geometry or mesh work.',
       'Each change must quote a literal relevant substring of the current instruction. Existing paths may be retained; do not invent reference files. Only the explicit dimensionAmendment can change technical dimensions.',
       'Latest instruction: ' + instruction,
       'Current user reference inventory: ' + JSON.stringify((job.referenceFiles || []).map(({ localPath, name, sha256 }) => ({ path: localPath, name, sha256 }))),

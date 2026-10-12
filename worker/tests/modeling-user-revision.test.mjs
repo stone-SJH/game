@@ -95,6 +95,55 @@ test('host-only excluded terms cannot be cleared by an appearance revision', () 
   assert.doesNotMatch(composeConceptPrompt(next.assets[0]), /catalog-name|名称/);
 });
 
+test('non-null traversal is preserved in the composed provider input and stale null wording is rejected', () => {
+  const gate = { assetId: 'lift-gate', description: 'Raised stone gate', prompt: 'Raised stone gate',
+    requirements: ['Preserve the existing shape, structure and frozen technical contract.'], referenceImages: [],
+    maxTriangles: 12000, requireRig: false, requireClosedMesh: true,
+    contract: defaultContract({ runtime: { ...defaultContract().runtime, profile: 'fbx-static', collision: 'convex' },
+      traversal: { version: 1, space: 'asset-local-meters', capsule: { radiusMeters: .35, halfHeightMeters: .9, axis: 'Z' },
+        marginMeters: .05, paths: [
+          { id: 'supported-left', startMeters: [1.2, -1.6, .96], endMeters: [1.2, 1.6, .96] },
+          { id: 'supported-right', startMeters: [-1.2, -1.6, .96], endMeters: [-1.2, 1.6, .96] },
+        ], ueQuery: { channel: 'Visibility', traceComplex: false } } }) };
+  const base = { reason: 'Retained gate contract', assets: [gate], revisions: 0 };
+  const instruction = '调整场景整体渲染风格，仅材质、shader、光色；保留既有形体、结构和冻结技术合同。';
+  const makeProposal = generationInput => ({ reason: 'Rendering-only gate revision', changes: [{
+    assetId: gate.assetId, instructionQuote: instruction, reason: 'Rendering-only adjustment',
+    description: '仅调整材质、shader、光色；保留既有形体、结构和冻结技术合同。',
+    prompt: 'Adjust only materials, shaders and lighting; preserve the existing shape, structure and frozen technical contract.',
+    requirements: [...gate.requirements], supersededRequirements: [], referenceImages: [], generationInput,
+  }] });
+  const visualInput = { prompt: 'Adjust only materials, shaders and lighting; preserve the existing shape, structure and frozen technical contract.',
+    requirements: ['Materials, shaders and lighting only; preserve the existing shape, structure and frozen technical contract.'],
+    referenceImages: [], excludedTerms: [] };
+  const stale = structuredClone(visualInput);
+  stale.requirements.push('Raised clearance traversal remains null.');
+  assert.throws(() => applyUserAssetChanges(base, makeProposal(stale), instruction), error => error.kind === 'GENERATION_INPUT_CONFLICT');
+  const next = applyUserAssetChanges(base, makeProposal(visualInput), instruction);
+  const providerPrompt = composeConceptPrompt(next.assets[0]);
+  assert.doesNotMatch(providerPrompt, /traversal[\s\S]{0,100}null/i);
+  for (const value of ['0.35', '0.9', '0.05', 'asset-local-meters', 'Visibility', 'supported-left', 'supported-right']) assert.match(providerPrompt, new RegExp(value.replace(/[.-]/g, '\\$&')));
+});
+
+test('scene rendering revisions reject modeling scope expansion and require shape and contract preservation', () => {
+  const asset = { assetId: 'altar', description: 'Stone altar', prompt: 'Stone altar',
+    requirements: ['Preserve the existing shape, structure and frozen technical contract.'], referenceImages: [],
+    maxTriangles: 10000, requireRig: false, requireClosedMesh: true, contract: defaultContract({ assetClass: 'static-prop' }) };
+  const currentScene = { reason: 'Retained scene plan', assets: [asset], revisions: 1 };
+  const instruction = '调整场景整体渲染风格，仅材质、shader、光色；保留既有形体、结构和冻结技术合同。';
+  const baseChange = { assetId: asset.assetId, instructionQuote: instruction, reason: 'Rendering-only adjustment',
+    description: '仅调整材质、shader、光色；保留既有形体、结构和冻结技术合同。',
+    prompt: 'Adjust only materials, shaders and lighting; preserve the existing shape, structure and frozen technical contract.',
+    requirements: [...asset.requirements], supersededRequirements: [], referenceImages: [],
+    generationInput: { prompt: 'Adjust only materials, shaders and lighting; preserve the existing shape, structure and frozen technical contract.',
+      requirements: ['Materials, shaders and lighting only; preserve the existing shape, structure and frozen technical contract.'], referenceImages: [], excludedTerms: [] } };
+  const bad = structuredClone(baseChange);
+  bad.description = '场景建模与渲染shader调整。'; bad.prompt = '场景建模与渲染shader调整。';
+  bad.generationInput.prompt = '场景建模与渲染shader调整。'; bad.generationInput.requirements = ['场景建模与渲染shader调整。'];
+  assert.throws(() => applyUserAssetChanges(currentScene, { reason: 'bad', changes: [bad] }, instruction), error => error.kind === 'USER_REVISION_SCOPE_CONFLICT');
+  assert.doesNotThrow(() => applyUserAssetChanges(currentScene, { reason: 'good', changes: [baseChange] }, instruction));
+});
+
 test('reviewed revision archives obsolete requests, resumes without extra calls and preserves later repairs', async t => {
   const f = await fixture(t);
   const pending = path.join(f.taskState, 'revision-pending.json'), request = path.join(f.project, 'plan/modeling-request.json');
