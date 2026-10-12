@@ -14,6 +14,10 @@ export const generationInputSchema = {
 
 const staleTraversalPattern = /(?:traversal|通行合同|通行路径)[\s\S]{0,160}(?:\bnull\b|保持\s*null|保持为空|仍为空)/iu;
 
+export function containsStaleTraversalWording(value) {
+  return staleTraversalPattern.test(String(value || ''));
+}
+
 // A non-null traversal contract is part of the actual provider brief. Keeping
 // this formatting in the host makes a revised model prompt unable to silently
 // drop the capsule, clearance, query channel or local verification paths.
@@ -46,7 +50,7 @@ export function assertGenerationPrompt(spec, prompt) {
     if (new RegExp(expression, 'iu').test(prompt)) throw Object.assign(new Error(`Final concept request violates an explicit input constraint: ${term}. Revise the host input; no provider request was made.`),
       { kind: 'GENERATION_INPUT_CONFLICT', requiresInputChange: true });
   }
-  if (spec.contract?.traversal && staleTraversalPattern.test(prompt)) throw Object.assign(
+  if (spec.contract?.traversal && containsStaleTraversalWording(prompt)) throw Object.assign(
     new Error('The composed concept request contradicts the existing non-null traversal contract. Preserve its player capsule, clearance, space, query channel and local paths; no provider request was made.'),
     { kind: 'GENERATION_INPUT_CONFLICT', requiresInputChange: true });
   return prompt;
