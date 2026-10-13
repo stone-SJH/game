@@ -124,12 +124,28 @@ test('archived Build Windows package is discovered without mistaking tools for t
 
 test('acceptance contract failures identify stale identity and missing proof fields', () => {
   const result = validateAcceptanceReport({ protocol: 1, status: 'ACCEPTED', pass: true, criteria: [{ status: 'PASS' }],
-    taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old' },
-  { taskId: 'task-current', workspaceId: 'workspace-current', runId: 'run-current' });
+    taskId: 'task-old', workspaceId: 'workspace-old', runId: 'run-old', revisionId: 'revision-old' },
+  { taskId: 'task-current', workspaceId: 'workspace-current', runId: 'run-current', revisionId: 'revision-current' });
   assert.equal(result.valid, false);
   assert.deepEqual(result.details.failedCriteria, []);
   assert.ok(result.details.failedChecks.some(item => item.field === 'packagedGameStatus'));
   assert.ok(result.details.failedChecks.some(item => item.field === 'runId' && item.actual === 'run-old'));
+  assert.ok(result.details.failedChecks.some(item => item.field === 'revisionId' && item.actual === 'revision-old'));
+});
+
+test('same-run acceptance evidence from an older revision is rejected before validation', async t => {
+  const f = await fixture(t), job = { ...f.job, revisionId: 'revision-current' };
+  f.step = async name => {
+    if (name.startsWith('production-orchestrator')) {
+      await seedDeliverables(f.project);
+      const file = path.join(f.project, 'acceptance', 'acceptance-report.json');
+      const acceptance = JSON.parse(await fs.readFile(file, 'utf8'));
+      acceptance.revisionId = 'revision-old';
+      await fs.writeFile(file, JSON.stringify(acceptance));
+    }
+    return success();
+  };
+  await assert.rejects(runProductionHarness({ ...f, job }), error => error.kind === 'REVISION_NOT_APPLIED');
 });
 
 test('report-only acceptance failures receive bounded instructions', async t => {
@@ -247,16 +263,18 @@ async function seedDeliverables(project) {
   await fs.writeFile(path.join(project, 'scene-preview.png'), 'preview');
   await fs.writeFile(path.join(project, 'package', 'Windows', 'Game.exe'), 'game');
   const plan = JSON.parse(await fs.readFile(path.join(project, 'plan', 'production-plan.json'), 'utf8'));
+  const context = JSON.parse(await fs.readFile(path.join(project, 'plan', 'production-context.json'), 'utf8').catch(() => '{}'));
   const { files } = await inspectProduction(project);
   for (const [role, file] of Object.entries(files)) {
     if (!file.endsWith('.json')) continue;
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const identity = { taskId: 'task-fixture', runId: 'run-fixture', workspaceId: 'workspace-fixture' };
+    const identity = { taskId: 'task-fixture', runId: 'run-fixture', workspaceId: 'workspace-fixture', ...(context.revisionId ? { revisionId: context.revisionId } : {}) };
     const value = role === 'stageManifest' ? { protocol: 1, ...identity, stages: plan.stages.map(stage => ({ ...stage, status: 'ACCEPTED' })) }
       : role === 'acceptanceReport' ? { protocol: 1, ...identity, status: 'ACCEPTED', pass: true, accepted: true, passed: true,
         packagedGameStatus: 'PASS', gameplayStatus: 'PASS', visualStatus: 'PASS', criteria: [{ status: 'PASS' }] }
-      : role.endsWith('-evidence') ? { protocol: 1, status: 'PASS', criteria: [{ status: 'PASS' }] }
-      : { protocol: 1, status: 'ACCEPTED' };
+      : role.endsWith('-evidence') ? { protocol: 1, ...identity, status: 'PASS', criteria: [{ status: 'PASS' }] }
+      : role.endsWith('-report') ? { protocol: 1, ...identity, status: 'ACCEPTED' }
+      : { protocol: 1, ...identity, status: 'ACCEPTED' };
     await fs.writeFile(file, JSON.stringify(value));
   }
 }

@@ -238,7 +238,7 @@ export function acceptanceFailureDetails(acceptance = {}, criteria, expected = {
   }
   if (!Array.isArray(criteria)) addCheck(failedChecks, 'criteria', 'non-empty array', actualType(criteria));
   else if (!criteria.length) addCheck(failedChecks, 'criteria', 'non-empty array', 'empty array');
-  for (const field of ['taskId', 'workspaceId', 'runId']) {
+  for (const field of ['taskId', 'workspaceId', 'runId', 'revisionId']) {
     if (expected[field] && acceptance[field] !== expected[field]) addCheck(failedChecks, field, expected[field], acceptance[field]);
   }
   return {
@@ -282,12 +282,20 @@ function evidenceHasProof(evidence) {
   return required.length ? required.every(field => checks[field] === true) : Object.values(checks).some(value => value === true);
 }
 
-function stageEvidenceFailure(report, evidence, stageId) {
+function stageEvidenceFailure(report, evidence, stageId, job) {
   const failures = [];
+  const identityFields = ['taskId', 'workspaceId', 'runId', 'revisionId'];
+  for (const value of [report, evidence]) {
+    for (const field of identityFields) {
+      if (job?.[field] && value?.[field] && value[field] !== job[field]) failures.push(`${field}=${value[field]}`);
+    }
+  }
   if (!['ACCEPTED', 'PASS'].includes(report?.status)) failures.push(`report.status=${report?.status || 'missing'}`);
   if (report?.stageId && report.stageId !== stageId) failures.push(`report.stageId=${report.stageId}`);
+  if (job?.revisionId && report?.revisionId !== job.revisionId) failures.push(`report.revisionId=${report?.revisionId || 'missing'}`);
   if (!evidence || !['PASS', 'ACCEPTED'].includes(evidence.status)) failures.push(`evidence.status=${evidence?.status || 'missing'}`);
   if (evidence?.stageId && evidence.stageId !== stageId) failures.push(`evidence.stageId=${evidence.stageId}`);
+  if (job?.revisionId && evidence?.revisionId !== job.revisionId) failures.push(`evidence.revisionId=${evidence?.revisionId || 'missing'}`);
   if (evidence && !evidenceHasProof(evidence)) {
     const proof = Array.isArray(evidence.criteria) ? 'criteria' : Array.isArray(evidence.checks) ? 'checks[]' : evidence.validation?.pass === true ? 'validation.pass' : 'checks';
     failures.push(`passing proof missing from ${proof}`);
@@ -304,10 +312,11 @@ async function removeCodexTempDirectory(directory) {
   await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
 }
 
-function productionStageIds(value, name, job) {
+function productionStageIds(value, name, job, { requireRevision = false } = {}) {
   const fail = reason => { throw new Error(`Cannot resume invalid production state: ${name} (${reason})`); };
   if (value?.protocol !== 1 || value.taskId !== job.taskId ||
       value.workspaceId && job.workspaceId && value.workspaceId !== job.workspaceId) fail('task/workspace or protocol mismatch');
+  if (requireRevision && job.revisionId && value.revisionId !== job.revisionId) fail('revision mismatch');
   if (!Array.isArray(value.stages) || !value.stages.length || value.stages.length > 256) fail('invalid stages array');
   const ids = value.stages.map(entry => entry?.id);
   if (ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id))) fail('invalid stage id');
@@ -372,12 +381,12 @@ export async function initializeProductionPlans(project, job, context) {
   const { values, stageIds } = await readProductionPlans(project, job);
   const seeds = {
     'production-plan.json': {
-      protocol: 1, taskId: job.taskId, runId: job.runId, objective: job.objective,
+      protocol: 1, taskId: job.taskId, runId: job.runId, revisionId: job.revisionId || null, objective: job.objective,
       stages: STAGES.map((id, index) => ({ id, order: index + 1, status: 'PENDING', outputs: [] })),
       acceptance: context.requiredOutputs, qualityAcceptance: context.qualityCriteria,
     },
     'stage-manifest.json': {
-      protocol: 1, taskId: job.taskId, runId: job.runId,
+      protocol: 1, taskId: job.taskId, runId: job.runId, revisionId: job.revisionId || null,
       stages: STAGES.map(id => ({ id, status: 'PENDING', attempts: 0 })),
     },
   };
@@ -386,8 +395,8 @@ export async function initializeProductionPlans(project, job, context) {
     const file = await localPath(project, `plan/${name}`);
     const previous = values[name];
     if (previous) {
-      // Update the run envelope only: accepted evidence and consumed attempts survive resumption.
-      writes.push([file, { ...previous, runId: job.runId }]);
+      // Update only the execution envelope: accepted evidence and consumed attempts survive resumption.
+      writes.push([file, { ...previous, runId: job.runId, ...(job.revisionId && !previous.revisionId ? { revisionId: job.revisionId } : {}) }]);
     } else writes.push([file, seed]);
   }
   for (const [file, value] of writes) await writeJson(file, value);
@@ -411,6 +420,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
     protocol: 1,
     taskId: job.taskId,
     runId: job.runId,
+    revisionId: job.revisionId || null,
     workspaceId: job.workspaceId,
     objective: job.objective,
     createdAt: new Date().toISOString(),
@@ -557,7 +567,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       'Place the complete Windows package under package/Windows/ with its root <ProjectName>.exe and all dependencies. Existing complete packages under Build/Windows/, Build/Win64/, package/Win64/ or Saved/StagedBuilds/Windows/ or Win64/ are also supported. Do not copy an executable alone or invent a root packaged-game.exe to satisfy a filename.',
       'For every stages/<stageId>/evidence.json, use {protocol:1,stageId,status:"PASS" or "GAP",files:[{path,sha256}],checks:[{id,status:"PASS" or "GAP",evidence:[actual workspace-relative proof files]}]}. Record actual results. The stage-report.json and manifest use ACCEPTED only for passing stages, otherwise PROVISIONAL with concrete gaps and repair instructions. Continue dependent stages with the best usable artifact; do not turn a visual gap into global failure or invent PASS.',
       'Read/write task JSON and Chinese text as UTF-8 explicitly. On Windows PowerShell use Get-Content -Encoding UTF8; its legacy default encoding corrupts these files.',
-      `The acceptance report must use protocol 1 and taskId=${job.taskId}, workspaceId=${job.workspaceId}, runId=${job.runId}. Report actual packagedGameStatus, gameplayStatus, visualStatus and every original criterion as PASS or GAP with evidence. Use ACCEPTED and passed:true only when everything passes; otherwise use PROVISIONAL and passed:false. Preserve every planned stage and criterion. The host will publish, score and iterate this result.`,
+      `The acceptance report must use protocol 1 and taskId=${job.taskId}, workspaceId=${job.workspaceId}, runId=${job.runId}${job.revisionId ? `, revisionId=${job.revisionId}` : ''}. Report actual packagedGameStatus, gameplayStatus, visualStatus and every original criterion as PASS or GAP with evidence. Use ACCEPTED and passed:true only when everything passes; otherwise use PROVISIONAL and passed:false. Preserve every planned stage and criterion. The host will reject a report from another revision even when its runId matches, so never reuse an older acceptance report. The host will publish, score and iterate this result.`,
       'Record commands, tool versions, hashes, the default map, packaged executable, launch result, and acceptance criteria in the required reports. Leave all source and build outputs in the workspace.',
       'Record stage blockers and concrete reasons in acceptance/hard-failure.json when necessary, but continue every independent stage and finish the best package possible. This file is internal gap evidence, never authority to abort the whole task. Do not claim unavailable validation passed.',
       ...(feedback ? feedback.kind === 'quality-review' ? [
@@ -683,7 +693,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
       const hasPackage = await isFile(deliverables.files.projectFile) && await isFile(deliverables.files.packageFile);
       if (job.revisionId && hasPackage) {
         const acceptance = await readJson(deliverables.files.acceptanceReport);
-        if (acceptance?.taskId !== job.taskId || acceptance?.workspaceId !== job.workspaceId || acceptance?.runId !== job.runId) {
+        if (acceptance?.taskId !== job.taskId || acceptance?.workspaceId !== job.workspaceId || acceptance?.runId !== job.runId || acceptance?.revisionId !== job.revisionId) {
           throw Object.assign(new Error('Production retained an older acceptance report; the current revision has not been applied and validated.'),
             { kind: 'REVISION_NOT_APPLIED', productionIncomplete: true });
         }
@@ -735,6 +745,7 @@ export async function runProductionHarness({ job, project, output, signal, step,
           taskId: job.taskId,
           workspaceId: job.workspaceId,
           runId: job.runId,
+          revisionId: job.revisionId,
       });
       if (!acceptanceResult.valid) {
         const details = acceptanceResult.details;
@@ -746,10 +757,11 @@ export async function runProductionHarness({ job, project, output, signal, step,
       await observe(stage, async () => {
         let stageManifest;
         try { stageManifest = JSON.parse(await fs.readFile(deliverables.files.stageManifest, 'utf8')); } catch (error) { throw new Error(`Invalid stage manifest: ${error.message}`); }
-        if (stageManifest.protocol !== 1 || stageManifest.taskId !== job.taskId || stageManifest.runId !== job.runId) {
-          throw new Error(`Stage manifest identity does not match the current task/run (${job.taskId}/${job.runId}).`);
+        if (stageManifest.protocol !== 1 || stageManifest.taskId !== job.taskId || stageManifest.runId !== job.runId ||
+            job.revisionId && stageManifest.revisionId !== job.revisionId) {
+          throw new Error(`Stage manifest identity does not match the current task/run/revision (${job.taskId}/${job.runId}/${job.revisionId || 'legacy'}).`);
         }
-        const manifestIds = productionStageIds(stageManifest, 'stage-manifest.json', job);
+        const manifestIds = productionStageIds(stageManifest, 'stage-manifest.json', job, { requireRevision: true });
         if (manifestIds.length !== stageIds.length || stageIds.some(id => !manifestIds.includes(id)) ||
             stageManifest.stages.some(entry => entry.status !== 'ACCEPTED')) {
           throw Object.assign(new Error('Stage manifest retains provisional or missing stages.'), {
@@ -764,8 +776,16 @@ export async function runProductionHarness({ job, project, output, signal, step,
           let report, evidence;
           try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); evidence = JSON.parse(await fs.readFile(evidencePath, 'utf8')); } catch (error) { throw new Error(`Invalid ${stageId} handoff: ${error.message}`); }
           if (!['ACCEPTED', 'PASS'].includes(report.status) || report.stageId && report.stageId !== stageId ||
-              !evidenceHasProof(evidence) || evidence.stageId && evidence.stageId !== stageId) {
-            throw Object.assign(new Error(`Stage ${stageId} retains gaps: ${stageEvidenceFailure(report, evidence, stageId)}.`), {
+              job.taskId && report.taskId && report.taskId !== job.taskId ||
+              job.workspaceId && report.workspaceId && report.workspaceId !== job.workspaceId ||
+              job.runId && report.runId && report.runId !== job.runId ||
+              job.revisionId && report.revisionId !== job.revisionId ||
+              !evidenceHasProof(evidence) || evidence.stageId && evidence.stageId !== stageId ||
+              job.taskId && evidence.taskId && evidence.taskId !== job.taskId ||
+              job.workspaceId && evidence.workspaceId && evidence.workspaceId !== job.workspaceId ||
+              job.runId && evidence.runId && evidence.runId !== job.runId ||
+              job.revisionId && evidence.revisionId !== job.revisionId) {
+            throw Object.assign(new Error(`Stage ${stageId} retains gaps: ${stageEvidenceFailure(report, evidence, stageId, job)}.`), {
               qualityScore: criterionScore(evidence?.criteria || (Array.isArray(evidence?.checks) ? evidence.checks : [])) });
           }
         });
